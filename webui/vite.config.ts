@@ -27,5 +27,7 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     css: false,
+    // e2e 目录是 Playwright 用例，不归 Vitest 收集。
+    exclude: ["**/node_modules/**", "**/dist/**", "e2e/**"],
   },
 });
