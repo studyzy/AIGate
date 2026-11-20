@@ -14,9 +14,14 @@
 package proxy
 
 import (
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"aigate/internal/model"
 )
 
 // 本文件是直通 SSE 扫描器（responsesPassthroughStream）的白盒用例。
@@ -135,4 +140,92 @@ func TestResponsesPassthroughStream_LeavesNonTerminalEventsAlone(t *testing.T) {
 	if s.usage != nil {
 		t.Fatalf("usage should stay nil when no terminal event carries it, got %+v", s.usage)
 	}
+}
+
+// TestNewResponsesID_Shape：ID 必须是 resp_ + 32 位十六进制，且每次不同。
+func TestNewResponsesID_Shape(t *testing.T) {
+	seen := map[string]struct{}{}
+	for i := 0; i < 32; i++ {
+		id := newResponsesID()
+		if len(id) != len(responsesIDPrefix)+32 {
+			t.Fatalf("id = %q, want %d chars", id, len(responsesIDPrefix)+32)
+		}
+		if !strings.HasPrefix(id, responsesIDPrefix) {
+			t.Fatalf("id = %q, want %q prefix", id, responsesIDPrefix)
+		}
+		if _, err := hex.DecodeString(id[len(responsesIDPrefix):]); err != nil {
+			t.Fatalf("id = %q: suffix is not hex: %v", id, err)
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate id generated: %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestNewResponsesID_ErrorReturnsEmpty：熵源失败时必须返回空串，交给调用方按 500 处理；
+// 绝不能返回裸的 "resp_"（那会成为一个看起来合法、实则可能重复的 ID）。
+func TestNewResponsesID_ErrorReturnsEmpty(t *testing.T) {
+	restore := randRead
+	randRead = func([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
+	t.Cleanup(func() { randRead = restore })
+
+	if id := newResponsesID(); id != "" {
+		t.Fatalf("id on entropy failure = %q, want empty string", id)
+	}
+}
+
+// TestResponsesConversionMessage_Sentinels：入站错误映射必须基于哨兵而非字符串比对。
+// 用 fmt.Errorf 包一层哨兵，模拟「转换器改文案但保留哨兵」的情形——映射仍要正确。
+func TestResponsesConversionMessage_Sentinels(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("wrapped: %w", errResponsesInvalidInput), msgResponsesInvalidInput},
+		{fmt.Errorf("wrapped: %w", errResponsesInvalidTools), msgResponsesInvalidTools},
+		{fmt.Errorf("wrapped: %w", errResponsesMissingModel), msgModelRequired},
+		{errResponsesInvalidBody, msgInvalidJSON},
+		{errors.New("something else"), msgInvalidJSON},
+	}
+	for _, c := range cases {
+		if got := responsesConversionMessage(c.err); got != c.want {
+			t.Fatalf("responsesConversionMessage(%v) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
+// TestPrepareResponsesTokens_OnlyHandlesResponsesShape：钉住 §5.4.1 的机制前提——
+// prepareResponsesTokens 只对 **Responses 形态**（带 max_output_tokens、无 messages）生效；
+// 传入已转换的 chat 形态时它必须什么都不做。
+//
+// 为什么必须钉住这条：如果它悄悄「兼容」了 chat 形态，转换路径的 chat 压制（第二道）
+// 就会变成冗余，而第 4 步是否真的执行则永远观测不到——顺序契约重新失去判别力。
+// 反向验证：把 max_output_tokens 当 chat 形态也压制，本用例即变红。
+func TestPrepareResponsesTokens_OnlyHandlesResponsesShape(t *testing.T) {
+	const limit = 16
+
+	t.Run("responses shape is capped", func(t *testing.T) {
+		body := map[string]any{"model": "m", "input": "hi", "max_output_tokens": float64(9000)}
+		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, body)
+		if got := body["max_output_tokens"]; got != float64(limit) {
+			t.Fatalf("max_output_tokens = %v, want %d", got, limit)
+		}
+	})
+
+	t.Run("chat shape is left untouched by this step", func(t *testing.T) {
+		// 已转换的 chat 形态：带 messages。max_output_tokens 不是 chat 协议字段，
+		// 第 4 步不该碰它（chat 的上限由转换路径的 enforceMaxTokens 经 max_tokens 施加）。
+		body := map[string]any{
+			"model":    "m",
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		}
+		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, body)
+		if _, injected := body["max_output_tokens"]; injected {
+			t.Fatalf("chat shape must not gain max_output_tokens, got %v", body)
+		}
+		if _, injected := body["max_tokens"]; injected {
+			t.Fatalf("this step must not inject chat max_tokens, got %v", body)
+		}
+	})
 }

@@ -124,6 +124,11 @@ func responsesLatestUsage(t *testing.T, e *env) model.LLMUsageLog {
 	return latestUsageLog(t, openReadDB(t, e.dsn))
 }
 
+// 异步观测说明：网关在请求处理末尾异步投递用量日志，且 httptest 服务器在响应写完后才提交
+// upstreamRequest 记录——两者都与客户端收到响应存在竞争。凡是「请求根本没有触达上游」
+// 或「上游收到了第 N 次请求」的断言，都必须先等这条链路走完，否则会读到过期值。
+// 等待手段：排空用量写入器（e.stopUsage）后再断言，或轮询 upstreamRequest.Calls()。
+
 // waitUpstreamBody 等待 mock 上游收到第 want 次请求并返回其请求体。
 //
 // 必要性：网关先写响应、后投递用量日志，而 httptest 服务器在响应写完后才提交 upstreamRequest
@@ -262,9 +267,15 @@ func TestResponsesIngress_QuotaExceeded(t *testing.T) {
 // 3b. 密钥上限（★ 顺序契约 §5.4.1：Responses 形态 body 先压制，再转 chat）
 // ---------------------------------------------------------------------------
 
-// TestResponsesIngress_KeyMaxTokensCap：密钥上限必须作用于 Responses 请求的 max_output_tokens。
-// 顺序颠倒（先转 chat 再压制）时，isResponsesShaped 为假、max_output_tokens 不被压制，
-// 本用例会在上游请求体里看到原始的大值而失败。
+// TestResponsesIngress_KeyMaxTokensCap：转换路径（Responses 请求 → chat 上游）上，
+// 密钥上限必须最终体现为发往 chat 上游的 max_tokens。
+//
+// 判别力说明（重要，勿高估本用例）：本用例只能钉住「转换路径最终发出了上限值」，
+// **不能**证明 §5.4.1 第 4 步（转换前对 Responses 形态 body 压制）执行过。
+// 因为转换路径的第 6 步 prepareForward 还会对 chat 形态的 max_tokens 再压一次，
+// 即使第 4 步被整段删掉，本用例依然通过（实测变异）。
+// 真正钉住第 4 步的是 TestResponsesIngress_PassthroughCapsMaxOutputTokens
+// （直通路径不经 chat 转换，第 6 步不参与）。
 func TestResponsesIngress_KeyMaxTokensCap(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
@@ -312,6 +323,64 @@ func TestResponsesIngress_KeyMaxTokensCap(t *testing.T) {
 			t.Fatalf("upstream max_tokens = %v (present=%v), want key limit %d", cap, ok, keyLimit)
 		}
 	})
+}
+
+// upstreamErrorBody 是 mock chat 上游返回的 4xx 错误体（含上游自己的错误详情）。
+const upstreamErrorBody = `{"error":{"message":"max_tokens: 999999 exceeds the model limit",` +
+	`"type":"invalid_request_error","param":"max_tokens","code":"context_length_exceeded"}}`
+
+// TestResponsesIngress_UpstreamErrorBodyPassedThrough：转换路径上，上游非 200 时
+// 状态码与响应体都要原样回给客户端——与流式路径、直通路径一致。
+//
+// 丢弃上游错误体会让调用方看不到真正原因（如 context_length_exceeded），
+// 也造成「同一请求流式与非流式行为不一致」。
+func TestResponsesIngress_UpstreamErrorBodyPassedThrough(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusBadRequest, upstreamErrorBody))
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", resp.StatusCode, readBody(t, resp))
+	}
+	if got := readBody(t, resp); got != upstreamErrorBody {
+		t.Fatalf("upstream error body must be passed through verbatim:\n got %q\nwant %q",
+			got, upstreamErrorBody)
+	}
+}
+
+// TestResponsesIngress_ChatUpstreamCapOnlyOnce：转换路径只经过一道压制，
+// 客户端给的大值既不能透出，也不能被二次改写。
+//
+// 它锁住两件事：
+//  1. 发往 chat 上游的 max_tokens 恰为密钥上限，客户端的 9000 不得透出；
+//  2. 转换路径全程只有一处施加密钥上限的地方——删掉那处压制（变异 D）本用例即变红。
+func TestResponsesIngress_ChatUpstreamCapOnlyOnce(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	const keyLimit = 16
+	unlimited := &model.Group{Name: "responses-chat-cap", TokenQuotaRules: `[]`}
+	if err := e.store.CreateGroup(ctx(), unlimited); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	_, token := mustCreateKeyWithGroup(t, e.store, e.user.ID, unlimited.ID, keyLimit, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi","max_output_tokens":9000}`)
+	assertStatus(t, resp, http.StatusOK)
+	_ = readBody(t, resp)
+
+	up := waitUpstreamBody(t, e, 1)
+	if _, ok := up["max_output_tokens"]; ok {
+		t.Fatalf("chat upstream must not receive max_output_tokens: %v", up)
+	}
+	capped, ok := bodyNumber(t, up, "max_tokens")
+	if !ok {
+		t.Fatalf("chat upstream body missing max_tokens: %v", up)
+	}
+	if capped != keyLimit {
+		t.Fatalf("chat upstream max_tokens = %v, want key limit %d (client's 9000 must never be forwarded)",
+			capped, keyLimit)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +645,40 @@ const responsesSSEStream = "event: response.created\n" +
 	"event: response.completed\n" +
 	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_up_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":13,\"total_tokens\":24}}}\n\n"
 
+// TestResponsesIngress_StreamingPassthroughKeepsUpstreamDone：上游**自己发了** [DONE] 时，
+// 直通路径原样转发，不主动删除。
+//
+// 取舍理由：§5.4.2 第 4 条只管「上游没发 [DONE] 时不补发」；上游既然发了，那就是上游的数据，
+// 网关的职责是透传而非裁剪——静默删掉上游数据属于「转换丢字段却不报错」的反目标。
+// 注意这与转换路径不同：转换路径（chat 上游）的 [DONE] 由 chat→responses 翻译器吞掉，
+// 因为 Responses 客户端不认这个终止符；直通路径没有翻译器，故不做此处理。
+func TestResponsesIngress_StreamingPassthroughKeepsUpstreamDone(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(responsesSSEStream + "data: [DONE]\n\n"))
+		w.(http.Flusher).Flush()
+	})
+	m := mustCreateAIModel(t, e.store, newResponsesAIModel("mock-responses", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-responses","input":"hi","stream":true}`)
+	assertStatus(t, resp, http.StatusOK)
+	stream := readBody(t, resp)
+
+	if !strings.Contains(stream, "data: [DONE]") {
+		t.Fatalf("upstream-sent [DONE] must be forwarded verbatim, got:\n%s", stream)
+	}
+	// 透传不应影响终态事件的改写与用量抓取。
+	if id := sseResponseID(t, stream, "response.completed"); !strings.HasPrefix(id, "resp_") || id == "resp_up_1" {
+		t.Fatalf("completed response.id = %q, want a gateway-generated resp_ id", id)
+	}
+	row := responsesLatestUsage(t, e)
+	if row.PromptTokens != 11 || row.CompletionTokens != 13 || row.TotalTokens != 24 {
+		t.Fatalf("usage tokens = %+v, want prompt=11 completion=13 total=24", row)
+	}
+}
+
 func TestResponsesIngress_StreamingPassthrough(t *testing.T) {
 	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -597,8 +700,10 @@ func TestResponsesIngress_StreamingPassthrough(t *testing.T) {
 	if !strings.Contains(stream, `"delta":"nat"`) {
 		t.Fatalf("passthrough must keep upstream data payloads, got:\n%s", stream)
 	}
+	// 上游本次没有发 [DONE]：网关不得「凭空补发」。
+	// （上游真发了 [DONE] 时会原样转发，见 TestResponsesIngress_StreamingPassthroughKeepsUpstreamDone。）
 	if strings.Contains(stream, "[DONE]") {
-		t.Fatalf("responses passthrough must not append [DONE], got:\n%s", stream)
+		t.Fatalf("gateway must not append [DONE] when upstream sent none, got:\n%s", stream)
 	}
 
 	// 上游模型名已替换、store 强制 false。

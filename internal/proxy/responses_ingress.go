@@ -19,12 +19,16 @@ package proxy
 //       1. 读 Responses 原始 body；
 //       2. 解析 model / stream / store / previous_response_id / conversation / background；
 //       3. 有状态前置（本轮无状态：这些字段一律 400）；
-//       4. 先对 **Responses 形态** 的 body 调 enforceMaxTokens（压 max_output_tokens）；
-//       5. 再 responsesRequestToChat 转成 chat 形状（max_tokens 由第 4 步映射而来）；
-//       6. 调 resolveAndCheckQuota（模型解析、配额）——不再二次压制。
-//   - 按 resolved.ModelType 二选一（§5.4.1 第 5 步）：
-//       openai-responses → 原生直通（格 7，仅替换 model、强制 store:false、改写终态 id）；
-//       其余             → chat 转换（格 8/9，GetProvider 内部处理上游差异）。
+//       4. prepareResponsesTokens：**在转 chat 之前**对 Responses 形态 body 压 max_output_tokens
+//          （enforceMaxTokens 靠请求体形态判定协议，转成 chat 后再压就压不到了）；
+//       5. resolveAndCheckQuota：模型解析 + 配额（**每条路径恰好一次**）；
+//       6. 按 resolved.ModelType 二选一（各自施加本路径唯一的一处上限压制）：
+//            openai-responses → forwardResponsesPassthrough（格 7，用原始 Responses body，
+//                               仅替换 model、强制 store:false、改写终态 id）；
+//            其余             → forwardViaChatConversion（格 8/9，先 responsesRequestToChat
+//                               转 chat，再由 GetProvider 处理上游差异；转出的 chat 形态
+//                               由 enforceMaxTokens 复压一次密钥上限）。
+//   - 「解析 + 配额」每条路径恰好一次（第 5 步），两条路径都不调用 prepareForward。
 //   - 收尾：logUsage（本轮不落库，store 由 Task 8 消费）。
 
 import (
@@ -97,17 +101,27 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. 先对 Responses 形态的 body 施加密钥上限，压的是 max_output_tokens。
+	// 4. 先对 Responses 形态的 body 施加密钥上限，压的是 max_output_tokens（§5.4.1 第 4 步）。
 	prepareResponsesTokens(key, reqBody)
 
-	// 5. 按上游协议二选一：直通用原始 body（保真 Responses 专有结构），转换用 chat 形状。
-	if resolved, ok := h.resolveAndCheckQuota(w, r, key, reqBody); !ok {
+	// 5. 解析模型 + 配额（每条路径恰好一次），再按上游协议二选一。
+	//    这里**不能**用 prepareForward：它会原地改写传入的 body。转换路径传入的是 Responses
+	//    形态 body，一旦经过它，max_output_tokens 会被再压一次（并混入 chat 的 max_tokens），
+	//    第 4 步是否真的执行就再也观测不到了——顺序契约重新变成盲区（review I-2）。
+	//    因此解析/配额走 resolveAndCheckQuota，两条路径各自施加自己的一处上限压制：
+	//      · 直通：第 4 步已压 max_output_tokens，路径内只改 model 与 store；
+	//      · 转换：第 4 步 → 转换器映射成 max_tokens → 转换路径内再幂等复压。
+	resolved, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
+	if !ok {
 		return
-	} else if resolved.ModelType == model.ModelTypeResponses {
+	}
+
+	// 6. 按上游协议二选一。
+	if resolved.ModelType == model.ModelTypeResponses {
 		h.forwardResponsesPassthrough(w, r, key, resolved, reqBody, requestedModel, isStream, start)
 		return
 	}
-	h.forwardViaChatConversion(w, r, key, reqBody, requestedModel, isStream, start)
+	h.forwardViaChatConversion(w, r, key, resolved, reqBody, requestedModel, isStream, start)
 }
 
 // rejectStatefulResponsesFields 检查本轮不支持的有状态字段，返回对外错误文案。
@@ -133,7 +147,19 @@ func rejectStatefulResponsesFields(reqBody map[string]any) (string, bool) {
 //
 // 顺序契约（design §5.4.1）：必须在 responsesRequestToChat 之前调用——转换后 body 带
 // messages，isResponsesShaped 为假，enforceMaxTokens 不再压制 max_output_tokens。
+//
+// 口径说明（有意为之，非疏漏）：Responses 形态下，max_output_tokens 为 null / 字符串 / 布尔
+// 等**非数值**时会被改写为密钥上限；而 chat 形态下这类值反而会被**原样透传**（chat 的上限
+// 一律经 max_tokens 施加）。两者不一致是 §5.4.1 裁决的结果：Responses 上游的
+// max_output_tokens 是唯一的输出预算字段，留一个非数值给上游等于放弃上限保护；
+// chat 的 max_output_tokens 则是非标准字段，改写它会破坏对严格上游的兼容性。
 func prepareResponsesTokens(key *model.APIKey, reqBody map[string]any) {
+	// 只认 Responses 形态（带 max_output_tokens、无 messages）。
+	// 已转换的 chat 形态绝不能被本步骤改写：否则转换路径的第二道压制变成冗余，
+	// 第 4 步是否真的执行就再也观测不到（review I-2 的根因）。
+	if _, isChat := reqBody["messages"]; isChat {
+		return
+	}
 	if key.MaxTokens <= 0 {
 		return
 	}
@@ -151,21 +177,33 @@ func (h *Handler) forwardViaChatConversion(
 	w http.ResponseWriter,
 	r *http.Request,
 	key *model.APIKey,
+	resolved *model.Resolved,
 	reqBody map[string]any,
 	requestedModel string,
 	isStream bool,
 	start time.Time,
 ) {
+	respID := newResponsesID()
+	if respID == "" {
+		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+		return
+	}
 	chatBody, err := marshalResponsesChatBody(reqBody)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, responsesConversionMessage(err))
 		return
 	}
-	resolved, body, ok := h.prepareForward(w, r, key, chatBody)
-	if !ok {
+	// 上限在此施加（转换路径上**唯一**一处 max_tokens 压制）：
+	// 第 4 步已把 max_output_tokens 收敛为密钥上限，转换器把它映射成 max_tokens；
+	// 这里对 chat 形态再压一次，兜住转换器未映射 max_output_tokens 的情形，
+	// 并覆盖 max_completion_tokens 等 chat 侧字段。
+	enforceMaxTokens(chatBody, key.MaxTokens)
+	chatBody["model"] = resolved.ModelID
+	body, err := json.Marshal(chatBody)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, msgInvalidJSON)
 		return
 	}
-	respID := newResponsesID()
 
 	p := provider.GetProvider(resolved.ModelType)
 	customHeaders := extractCustomHeaders(r, resolved.CustomHTTPHeaders)
@@ -228,8 +266,17 @@ func (h *Handler) forwardViaChatConversion(
 		return
 	}
 	if statusCode != http.StatusOK {
+		// 与流式路径、直通路径一致：原样回写上游状态码与响应体。
+		// 丢弃上游 body（换成本地拼的 "upstream returned status N"）会让调用方看不到
+		// 真正原因（如 context_length_exceeded），也造成流式/非流式行为不一致。
+		upstreamBody := []byte(upstreamStatusMessage(statusCode))
+		if result != nil && len(result.Body) > 0 {
+			upstreamBody = result.Body
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		_, _ = w.Write(upstreamBody)
 		h.logUsage(key, resolved, completionResultUsage(result), statusCode, start)
-		httpx.WriteError(w, statusCode, upstreamStatusMessage(statusCode))
 		return
 	}
 	out, err := chatResponseToResponses(result.Body, requestedModel, respID)
@@ -250,17 +297,21 @@ func (h *Handler) forwardViaChatConversion(
 func marshalResponsesChatBody(reqBody map[string]any) (map[string]any, error) {
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, errors.New("invalid request body")
+		return nil, errResponsesInvalidBody
 	}
 	return responsesRequestToChat(raw)
 }
 
 // responsesConversionMessage 把转换器错误映射为对外 400 文案。
+// 用 errors.Is 判定包级哨兵，而不是比对错误字符串——后者一旦转换器改文案就会静默退化成
+// 通用文案（客户端拿到的错误提示随之失真）。
 func responsesConversionMessage(err error) string {
-	switch message := err.Error(); message {
-	case msgResponsesInvalidInput, msgResponsesInvalidTools:
-		return message
-	case "missing model":
+	switch {
+	case errors.Is(err, errResponsesInvalidInput):
+		return msgResponsesInvalidInput
+	case errors.Is(err, errResponsesInvalidTools):
+		return msgResponsesInvalidTools
+	case errors.Is(err, errResponsesMissingModel):
 		return msgModelRequired
 	default:
 		return msgInvalidJSON
@@ -296,6 +347,11 @@ func (h *Handler) forwardResponsesPassthrough(
 	outBody, err := json.Marshal(buildResponsesPassthroughBody(reqBody, resolved.ModelID))
 	if err != nil {
 		slog.Error("responses passthrough body rewrite failed", "error", err, "model", resolved.ModelID)
+		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+		return
+	}
+	respID := newResponsesID()
+	if respID == "" {
 		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -336,7 +392,7 @@ func (h *Handler) forwardResponsesPassthrough(
 			return
 		}
 		if resp.StatusCode < http.StatusBadRequest {
-			respBody = rewriteResponsesID(respBody, newResponsesID())
+			respBody = rewriteResponsesID(respBody, respID)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -360,7 +416,7 @@ func (h *Handler) forwardResponsesPassthrough(
 	sink := &responsesPassthroughStream{
 		w:             w,
 		flusher:       flusher,
-		gatewayID:     newResponsesID(),
+		gatewayID:     respID,
 		requestedName: requestedModel,
 	}
 	_, _ = io.Copy(sink, resp.Body)
@@ -566,13 +622,17 @@ type responsesIngressUsage struct {
 	} `json:"input_tokens_details"`
 }
 
+// randRead 是 crypto/rand.Read 的间接引用（测试可替换以模拟熵源失败）。
+var randRead = rand.Read
+
 // newResponsesID 生成网关响应 ID：resp_ + 32 位随机十六进制（crypto/rand）。
 func newResponsesID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand 在本平台不可用时无法生成不可预测 ID；返回空串会被上层判为非法。
+	if _, err := randRead(b[:]); err != nil {
+		// 熵源不可用时无法生成不可预测 ID：返回空串，由调用方按 500 拒绝。
+		// 绝不能回落到 "resp_" 之类的固定值——那会成为一个看似合法、实则可能与他人重复的 ID。
 		slog.Error("generate responses id failed", "error", err)
-		return responsesIDPrefix
+		return ""
 	}
 	return responsesIDPrefix + hex.EncodeToString(b[:])
 }

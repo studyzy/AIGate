@@ -175,9 +175,11 @@ func (h *Handler) prepareForward(
 }
 
 // resolveAndCheckQuota 只完成 prepareForward 的前半段：「模型解析 → 配额检查」；
-// 不做 max_tokens 压制与 body 重写。两段拆开是为了让 Responses 入口能先对
-// Responses 形态的 body 调 enforceMaxTokens（design §5.4.1 的顺序约束），
-// 之后再做 chat 转换。失败时已写出错误响应并返回 ok=false。
+// 不做 max_tokens 压制与 body 重写。失败时已写出错误响应并返回 ok=false。
+//
+// 拆成两段是为了让调用方能「只做解析与配额、不碰请求体」：Responses 入口用它拿 resolved
+// 再按 ModelType 分派，避免把 Responses 形态 body 交给 prepareForward 的改写步骤
+// （那会二次压制并掩盖 §5.4.1 第 4 步）。每条路径对它的调用恰好一次。
 func (h *Handler) resolveAndCheckQuota(
 	w http.ResponseWriter,
 	r *http.Request,

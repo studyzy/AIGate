@@ -43,6 +43,21 @@ const (
 	respStatusInProgress = "in_progress"
 )
 
+// 请求方向转换器的哨兵错误：入站处理器用 errors.Is 判定，再映射为对外 400 文案。
+// 文案本身就是对外 API 契约的一部分（T5 测试按字面断言），因此哨兵化不改变对外行为。
+var (
+	// errResponsesInvalidBody 表示请求体不是合法 JSON 对象。
+	errResponsesInvalidBody = errors.New("invalid request body")
+	// errResponsesMissingModel 表示请求体缺少 model。
+	errResponsesMissingModel = errors.New("missing model")
+	// errResponsesInvalidInput 表示 input 无法产出任何 chat message。
+	errResponsesInvalidInput = errors.New("invalid input")
+	// errResponsesInvalidTools 表示 tools 不是数组。
+	errResponsesInvalidTools = errors.New("invalid tools")
+	// errResponsesInvalidUpstream 表示上游 chat 响应无法解析。
+	errResponsesInvalidUpstream = errors.New("invalid upstream response")
+)
+
 // --- 请求方向：responses → chat ---
 
 // responsesRequestToChat 把 Responses 请求体转换为 OpenAI chat completions 请求体。
@@ -56,14 +71,14 @@ const (
 func responsesRequestToChat(body []byte) (map[string]any, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, errors.New("invalid request body")
+		return nil, errResponsesInvalidBody
 	}
 	if req == nil {
-		return nil, errors.New("invalid request body")
+		return nil, errResponsesInvalidBody
 	}
 	model, _ := req["model"].(string)
 	if strings.TrimSpace(model) == "" {
-		return nil, errors.New("missing model")
+		return nil, errResponsesMissingModel
 	}
 
 	out := map[string]any{"model": model}
@@ -82,7 +97,7 @@ func responsesRequestToChat(body []byte) (map[string]any, error) {
 	}
 	// input 无法产出任何 message 时直接拒绝，绝不向上游发一条没有 messages 的请求。
 	if len(messages) == 0 {
-		return nil, errors.New("invalid input")
+		return nil, errResponsesInvalidInput
 	}
 	out["messages"] = messages
 
@@ -108,7 +123,7 @@ func responsesRequestToChat(body []byte) (map[string]any, error) {
 	// 「tool_choice 有值、tools 缺失」的组合，因此与 invalid input 一样直接拒绝。
 	if rawTools, exists := req["tools"]; exists && rawTools != nil {
 		if _, ok := rawTools.([]any); !ok {
-			return nil, errors.New("invalid tools")
+			return nil, errResponsesInvalidTools
 		}
 		out["tools"] = responsesToolsToChat(rawTools)
 	}
@@ -410,15 +425,15 @@ func chatResponseToResponses(chatBody []byte, requestedModel, respID string) ([]
 func responsesChatChoice(chatBody []byte) (map[string]any, map[string]any, error) {
 	var chat map[string]any
 	if err := json.Unmarshal(chatBody, &chat); err != nil {
-		return nil, nil, errors.New("invalid upstream response")
+		return nil, nil, errResponsesInvalidUpstream
 	}
 	choices, ok := chat["choices"].([]any)
 	if !ok || len(choices) == 0 {
-		return nil, nil, errors.New("invalid upstream response")
+		return nil, nil, errResponsesInvalidUpstream
 	}
 	choice, ok := choices[0].(map[string]any)
 	if !ok {
-		return nil, nil, errors.New("invalid upstream response")
+		return nil, nil, errResponsesInvalidUpstream
 	}
 	usage, _ := chat["usage"].(map[string]any)
 	return choice, usage, nil
