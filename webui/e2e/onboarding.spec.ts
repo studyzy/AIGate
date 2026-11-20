@@ -14,16 +14,21 @@ test("guides an empty install to a working key", async ({ page }) => {
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("e2e-cred")).toBeVisible();
 
-  await page.getByRole("link", { name: "Models" }).click();
-  await page.getByRole("button", { name: "New model" }).click();
+  // 模型按厂商分组维护：新建供应商 = 在该厂商下建第一个模型。
+  await page.getByRole("link", { name: "Providers" }).click();
+  await expect(page.getByText("No providers yet")).toBeVisible();
+  await page.getByRole("button", { name: "New provider" }).click();
   await page.getByLabel("Display name").fill("E2E Mock");
   await page.getByLabel("Provider").fill("openai");
   await page.getByLabel("Model ID").fill("mock-model-e2e");
   await page.getByLabel("Upstream URL").fill("http://127.0.0.1:19090/v1");
   await page.getByLabel("Credential").selectOption({ label: "e2e-cred" });
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText("E2E Mock")).toBeVisible();
 
+  const providerRow = page.getByText("openai", { exact: true }).first();
+  await expect(providerRow).toBeVisible();
+  await providerRow.click();
+  await expect(page.getByText("E2E Mock")).toBeVisible();
   await page.getByRole("button", { name: "Test connectivity" }).first().click();
   await expect(page.getByText(/ms|error/i).first()).toBeVisible();
 

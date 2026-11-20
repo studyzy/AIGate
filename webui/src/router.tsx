@@ -8,7 +8,7 @@ import { GroupsPage } from "./pages/groups";
 import { ImportPage } from "./pages/import";
 import { KeysPage } from "./pages/keys";
 import { LoginPage } from "./pages/login";
-import { ModelsPage } from "./pages/models";
+import { ProvidersPage } from "./pages/providers";
 import { SettingsPage } from "./pages/settings";
 import { UsagePage } from "./pages/usage";
 import { UsersPage } from "./pages/users";
@@ -26,7 +26,8 @@ export const router = createBrowserRouter(
           children: [
             { index: true, element: <DashboardPage /> },
             { path: "usage", element: <UsagePage /> },
-            { path: "models", element: <ModelsPage /> },
+            { path: "providers", element: <ProvidersPage /> },
+            { path: "models", element: <Navigate to="/providers" replace /> },
             { path: "credentials", element: <CredentialsPage /> },
             { path: "keys", element: <KeysPage /> },
             { path: "users", element: <UsersPage /> },
