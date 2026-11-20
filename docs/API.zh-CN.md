@@ -446,7 +446,7 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 
 | Body | 含义 |
 |------|------|
-| `{"ok": true, "latency_ms": N}` | 成功。`latency_ms` 为往返毫秒数（取整且至少为 `1`）。 |
+| `{"ok": true, "latency_ms": N, "reply": "hello"}` | 成功。`latency_ms` 为往返毫秒数（取整且至少为 `1`）；`reply` 为上游真实返回的助手文本。 |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | 失败。`error_kind` 为封闭枚举，`message` 为人类可读原因。 |
 
 `error_kind` 取值：
@@ -496,6 +496,8 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 |------|------|
 | `{"ok": true, "models": ["gpt-4o", …]}` | 上游 `/models` 返回的模型 ID 列表。 |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | `error_kind` 与连通性探测同一枚举。 |
+
+只有 2xx 不算通过：响应体必须能解析出非空的助手消息，否则按 `upstream_client` 判失败，避免「网关回了 200 但没真正调用模型」被当成连通。
 
 出站请求复用数据面 SSRF 防护：默认严格模式下私网/回环地址被拦截，归类为 `network_unreachable`，需要放行时启动加 `-allow-private-upstreams`。
 

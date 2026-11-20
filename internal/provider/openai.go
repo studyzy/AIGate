@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -271,7 +272,7 @@ func firstPositiveInt(values ...int) int {
 func (p *OpenAIProvider) CheckConnectivityWithChat(
 	ctx context.Context,
 	apiKey, apiBase, model string,
-) (time.Duration, error) {
+) (time.Duration, string, error) {
 	req := map[string]interface{}{
 		"model": model,
 		"messages": []map[string]interface{}{
@@ -283,7 +284,7 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 	normalizeMaxTokensParam(req, model)
 	body, err := json.Marshal(req)
 	if err != nil {
-		return 0, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return 0, "", &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 
 	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+"/chat/completions", body, func(h http.Header) {
@@ -292,7 +293,29 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 		}
 	})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return runConnectivityProbe(httpReq)
+	return runConnectivityProbe(httpReq, openAIProbeReply)
+}
+
+// openAIProbeReply 从 OpenAI 兼容响应里取出助手回复；空回复视为未真正调用模型。
+func openAIProbeReply(body []byte) (string, error) {
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content *string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", errors.New("response is not a chat completion")
+	}
+	if len(parsed.Choices) == 0 || parsed.Choices[0].Message.Content == nil {
+		return "", errors.New("response has no assistant message")
+	}
+	reply := strings.TrimSpace(*parsed.Choices[0].Message.Content)
+	if reply == "" {
+		return "", errors.New("response has empty assistant message")
+	}
+	return reply, nil
 }

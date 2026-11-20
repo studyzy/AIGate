@@ -433,7 +433,7 @@ Probe an upstream with a minimal request — one user message asking the model t
 
 | Body | Meaning |
 |------|---------|
-| `{"ok": true, "latency_ms": N}` | Success. `latency_ms` is the round-trip in milliseconds (rounded, and at least `1`). |
+| `{"ok": true, "latency_ms": N, "reply": "hello"}` | Success. `latency_ms` is the round-trip in milliseconds (rounded, and at least `1`); `reply` is the assistant text the upstream actually returned. |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | Failure. `error_kind` is a closed enum; `message` is human-readable. |
 
 `error_kind` values:
@@ -446,6 +446,8 @@ Probe an upstream with a minimal request — one user message asking the model t
 | `rate_limited` | The upstream rate-limited the probe. |
 | `upstream_server` | The upstream returned a 5xx. |
 | `upstream_client` | The upstream returned another 4xx. |
+
+A 2xx response alone is not treated as success: the body must parse into a non-empty assistant message, otherwise the probe fails with `upstream_client`. This keeps a gateway that answers 200 without actually calling the model from looking reachable.
 
 The outbound request uses the same SSRF protection as the data plane: under the default strict mode a private/loopback upstream is blocked and classified as `network_unreachable`; start with `-allow-private-upstreams` to allow it. The upstream key is resolved live (credential first, then the model's `api_key`); a resolution failure is a server-configuration error and returns `500` rather than a probe result.
 

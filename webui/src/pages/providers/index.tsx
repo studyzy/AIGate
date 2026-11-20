@@ -85,8 +85,11 @@ export function ProvidersPage() {
   async function test(id: number) {
     try {
       const res = await api<ConnectivityResult>("/admin/models/" + id + "/connectivity", { method: "POST" });
-      if (res.ok) toast(t("model.testOk", { ms: res.latency_ms ?? 0 }), "success");
-      else toast(res.error ?? t("usage.status"));
+      if (res.ok) {
+        toast(t("model.testOk", { ms: res.latency_ms ?? 0 }) + (res.reply ? " · " + t("model.testReply", { reply: res.reply }) : ""), "success");
+      } else {
+        toast(res.message ?? res.error_kind ?? t("usage.status"));
+      }
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err));
     }

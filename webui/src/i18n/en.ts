@@ -122,6 +122,7 @@ export const en = {
   "model.apiKey": "Upstream API key",
   "model.test": "Test connectivity",
   "model.testOk": "Reachable in {ms} ms",
+  "model.testReply": "upstream replied: {reply}",
   "model.boundKeys": "Keys",
   "model.emptyTitle": "No models yet",
   "model.emptyHint": "Create a credential first, then bind it to a model here.",

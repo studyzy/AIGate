@@ -31,6 +31,7 @@ import (
 type connectivityResp struct {
 	OK        bool   `json:"ok"`
 	LatencyMS int64  `json:"latency_ms"`
+	Reply     string `json:"reply"`
 	ErrorKind string `json:"error_kind"`
 	Message   string `json:"message"`
 }
@@ -109,6 +110,9 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 	}
 	if resp.LatencyMS <= 0 {
 		t.Fatalf("latency_ms = %d, want > 0", resp.LatencyMS)
+	}
+	if resp.Reply != "hi" {
+		t.Fatalf("reply = %q, want the upstream assistant text", resp.Reply)
 	}
 	if resp.ErrorKind != "" || resp.Message != "" {
 		t.Fatalf("success response should not carry error_kind/message: %+v", resp)

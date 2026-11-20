@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -1073,7 +1074,7 @@ func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, chunk map[string
 func (p *AnthropicProvider) CheckConnectivityWithChat(
 	ctx context.Context,
 	apiKey, apiBase, model string,
-) (time.Duration, error) {
+) (time.Duration, string, error) {
 	body, err := json.Marshal(map[string]interface{}{
 		"model":      model,
 		"max_tokens": probeMaxTokens,
@@ -1082,7 +1083,7 @@ func (p *AnthropicProvider) CheckConnectivityWithChat(
 		},
 	})
 	if err != nil {
-		return 0, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return 0, "", &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 
 	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+"/v1/messages", body, func(h http.Header) {
@@ -1092,7 +1093,31 @@ func (p *AnthropicProvider) CheckConnectivityWithChat(
 		h.Set("anthropic-version", anthropicVersion)
 	})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return runConnectivityProbe(httpReq)
+	return runConnectivityProbe(httpReq, anthropicProbeReply)
+}
+
+// anthropicProbeReply 从 Messages 响应里拼接文本块；没有文本内容视为未真正调用模型。
+func anthropicProbeReply(body []byte) (string, error) {
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", errors.New("response is not a messages payload")
+	}
+	var parts []string
+	for _, block := range parsed.Content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	reply := strings.TrimSpace(strings.Join(parts, " "))
+	if reply == "" {
+		return "", errors.New("response has no text content")
+	}
+	return reply, nil
 }

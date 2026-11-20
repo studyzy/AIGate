@@ -123,6 +123,7 @@ export const zhCN: Record<MessageKey, string> = {
   "model.apiKey": "上游 API key",
   "model.test": "测试连通性",
   "model.testOk": "连通，耗时 {ms} ms",
+  "model.testReply": "上游回复：{reply}",
   "model.boundKeys": "绑定密钥数",
   "model.emptyTitle": "还没有模型",
   "model.emptyHint": "先创建凭据，再在这里绑定模型。",

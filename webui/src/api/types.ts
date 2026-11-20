@@ -217,7 +217,10 @@ export interface UsageFilter {
 export interface ConnectivityResult {
   ok: boolean;
   latency_ms?: number;
-  error?: string;
+  /** 上游真实返回的助手文本（探测要求模型回一个 hello）。 */
+  reply?: string;
+  error_kind?: string;
+  message?: string;
 }
 
 export interface ImportDetail {

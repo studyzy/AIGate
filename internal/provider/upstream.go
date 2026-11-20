@@ -93,23 +93,39 @@ func newProbeRequest(ctx context.Context, url string, body []byte, auth func(htt
 	return httpReq, nil
 }
 
-// runConnectivityProbe 发送探测请求（15s 超时）并返回往返耗时与分类后的错误。
-func runConnectivityProbe(httpReq *http.Request) (time.Duration, error) {
+// runConnectivityProbe 发送探测请求（15s 超时），返回往返耗时、上游回复文本与分类后的错误。
+//
+// 仅凭 2xx 判定「可用」是不够的：网关类上游可能对任何路径都回 200。
+// 这里要求响应体解析得出非空的对话内容（由 extract 负责，按协议各自解析），
+// 否则按 upstream_client 归类，避免把「没真正调用模型」误报成连通。
+func runConnectivityProbe(httpReq *http.Request, extract func([]byte) (string, error)) (time.Duration, string, error) {
 	start := time.Now()
 	resp, err := httpClientForTimeout(15 * time.Second).Do(httpReq)
 	latency := time.Since(start)
 	if err != nil {
-		return latency, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return latency, "", &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if kind := classifyHTTPStatus(resp.StatusCode); kind != nil {
-		return latency, &ConnectivityError{
+		return latency, "", &ConnectivityError{
 			Kind:       kind,
 			StatusCode: resp.StatusCode,
-			Snippet:    readBodySnippet(resp.Body, 512),
+			Snippet:    snippetOf(string(body)),
 		}
 	}
-	// Drain body so the connection can be reused.
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return latency, nil
+	if readErr != nil {
+		return latency, "", &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: readErr}
+	}
+	reply, err := extract(body)
+	if err != nil {
+		return latency, "", &ConnectivityError{
+			Kind:       ErrUpstreamClient,
+			StatusCode: resp.StatusCode,
+			Snippet:    snippetOf(string(body)),
+			Cause:      err,
+		}
+	}
+	return latency, reply, nil
 }

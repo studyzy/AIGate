@@ -157,7 +157,7 @@ type Provider interface {
 	// On success it returns the round-trip latency and a nil error. On
 	// failure it returns a *ConnectivityError wrapping one of the Err*
 	// sentinels; callers can use errors.Is to classify the failure.
-	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, err error)
+	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, reply string, err error)
 }
 
 // richErrorf 用英文文案替换上游实现里的 i18n 文案，并通过 %w 把 base 保留在
