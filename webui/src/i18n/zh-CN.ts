@@ -34,4 +34,5 @@ export const zhCN: Record<MessageKey, string> = {
   "login.token": "管理员 token",
   "login.submit": "登录",
   "login.invalid": "网关拒绝了该 token",
+  "nav.logout": "退出登录",
 };

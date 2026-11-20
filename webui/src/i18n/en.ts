@@ -33,6 +33,7 @@ export const en = {
   "login.token": "Admin token",
   "login.submit": "Sign in",
   "login.invalid": "Token rejected by the gateway",
+  "nav.logout": "Sign out",
 } as const;
 
 export type MessageKey = keyof typeof en;
