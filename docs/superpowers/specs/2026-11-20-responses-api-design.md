@@ -445,6 +445,32 @@ response.completed       （携带完整 response 与最终 usage）
 - 流中错误输出 `event: error\ndata: {...}`，不追加 `[DONE]`；
 - 上游不发 `[DONE]` 时也能正常收尾（以 `response.completed` 为界）。
 
+#### 5.5.1 工具调用的流式事件（补充，原版本遗漏）
+
+上面的序列只覆盖纯文本输出。chat 流的 `choices[0].delta.tool_calls[]` 必须同样合成
+Responses 的 `function_call` item 事件，否则**流式模式下工具调用会静默丢失参数**。
+
+当某个 chat chunk 带 `delta.tool_calls[i]` 时，为该工具（按 `tool_calls[i].index`
+区分，与 `Provider` 层 `responsesStreamToChat` 的 index 语义对称）合成：
+
+```
+response.output_item.added
+  （item 为 {"type":"function_call","call_id":<tool_call.id>,"name":<function.name>,"arguments":""}）
+response.function_call_arguments.delta   ×N   （每个 arguments 增量一条）
+response.function_call_arguments.done    （该工具的 arguments 收齐时）
+response.output_item.done                （item.status="completed"，带完整 arguments）
+```
+
+规则：
+
+- **一个响应可同时包含** `message` item 与多个 `function_call` item；`output_index`
+  按 item 出现顺序递增（先出现的是 0）。
+- `function_call` 的 item 与 `message` 的 item **不共享** `output_index`。
+- 文本与工具调用可交错出现；每个 item 各自维护 `content_index` / `arguments` 累积。
+- `response.completed` 的 `output[]` 必须包含全部 item（message + 各 function_call），
+  顺序与事件中的 `output_index` 一致。
+- `finish_reason="tool_calls"` → `status:"completed"`（不是 `incomplete`）。
+
 ### 5.6 有状态设计
 
 **新表 `response_states`**（SQLite 由 `AutoMigrate` 建；MySQL 加到 `sql/init.sql`，
