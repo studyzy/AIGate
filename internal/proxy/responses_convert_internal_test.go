@@ -739,9 +739,12 @@ func TestResponsesStreamTranslator_ErrorEvent(t *testing.T) {
 		t.Fatalf("output contains [DONE]")
 	}
 	events := respStreamEvents(t, raw)
-	last := events[len(events)-1]
-	if last[0] != "error" {
-		t.Fatalf("last event = %q, want \"error\"", last[0])
+	// C-2：error 之后仍须补出 response.failed 终态，故 error 不再是最后一条。
+	if got := respStreamLastTerminal(t, events); got != "response.failed" {
+		t.Fatalf("terminal event = %q, want response.failed", got)
+	}
+	if n := len(respStreamAllOf(events, "error")); n != 1 {
+		t.Fatalf("error event count = %d, want 1", n)
 	}
 	errPayload := respStreamDataOf(t, events, "error", 0)
 	errObj, ok := errPayload["error"].(map[string]any)
@@ -1129,7 +1132,8 @@ func TestResponsesStreamTranslator_FunctionCallClosure(t *testing.T) {
 	} {
 		respStreamFeed(t, tr, chunk, 0)
 	}
-	// 故意不给 [DONE] 与 finish_reason，直接 Finish。
+	// 不给 [DONE]，但上游给了 finish_reason（已结束）：Finish() 应走正常收尾而非判定中断。
+	respStreamFeed(t, tr, respStreamChatFinishChunk("tool_calls"), 0)
 	tr.Finish()
 	events := respStreamEvents(t, rec.Body.String())
 
@@ -1269,7 +1273,7 @@ func TestResponsesStreamTranslator_ErrorBeforeFirstDelta(t *testing.T) {
 
 	events := respStreamEvents(t, rec.Body.String())
 	names := respStreamEventNames(events)
-	want := []string{"response.created", "response.in_progress", "error"}
+	want := []string{"response.created", "response.in_progress", "error", "response.failed"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("event types = %v, want exactly %v", names, want)
 	}
@@ -1360,8 +1364,9 @@ func TestResponsesStreamTranslator_ToolCallsWithItemNoWarn(t *testing.T) {
 // 真实输出：即便上游没有 [DONE]、收尾事件全由 Finish() 补发，Wrote() 仍为 true。
 func TestResponsesStreamTranslator_FinishKeepsWroteFromDelta(t *testing.T) {
 	tr, rec := respStreamNew(t, "m")
-	// 只给增量，不给 [DONE]、不给 finish_reason：收尾完全由 Finish() 驱动。
+	// 不给 [DONE]，但上游给了 finish_reason（已结束）：收尾事件由 Finish() 补发。
 	respStreamFeed(t, tr, respStreamChatTextChunk("hello"), 0)
+	respStreamFeed(t, tr, respStreamChatFinishChunk("stop"), 0)
 	if !tr.Wrote() {
 		t.Fatalf("Wrote() = false after a text delta, want true")
 	}
@@ -1480,4 +1485,210 @@ func TestResponsesStreamTranslator_FinishAfterUpstreamDoneIsNotSynthesized(t *te
 	if tr2.finishSynthesized {
 		t.Fatal("Finish on an already-failed stream must not synthesize a completion")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix Round 4：流收尾状态机（C-2 / I-2 / C-1）
+// ---------------------------------------------------------------------------
+
+// respStreamLastFailure 断言流以一个失败类终态收尾（response.failed 或 error），返回事件名。
+func respStreamLastTerminal(t *testing.T, events [][2]string) string {
+	t.Helper()
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i][0] {
+		case "response.completed", "response.failed", "error":
+			return events[i][0]
+		}
+	}
+	t.Fatalf("stream has no terminal event: %v", respStreamEventNames(events))
+	return ""
+}
+
+// TestResponsesStreamTranslator_FailedStreamEmitsTerminalWithoutDone（C-2）：
+// emitError 之后上游没有 [DONE]，Finish() 必须补出 response.failed，否则客户端永远等不到终态。
+func TestResponsesStreamTranslator_FailedStreamEmitsTerminalWithoutDone(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
+	tr.Write([]byte(`data: {"error":{"message":"upstream exploded","type":"server_error"}}` + "\n\n"))
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	if got := respStreamLastTerminal(t, events); got != "response.failed" {
+		t.Fatalf("terminal event = %q, want response.failed (client would otherwise wait forever)", got)
+	}
+	failed := respStreamDataOf(t, events, "response.failed", 0)
+	resp, ok := failed["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("response.failed payload lacks a response object: %v", failed)
+	}
+	if resp["status"] != "failed" {
+		t.Fatalf("response.failed status = %#v, want \"failed\"", resp["status"])
+	}
+	if resp["id"] != "resp_stream" {
+		t.Fatalf("response.failed id = %#v, want the same resp_ id", resp["id"])
+	}
+}
+
+// TestResponsesStreamTranslator_FailedStreamTerminalEmittedOnce（C-2）：
+// error 之后上游又发了 [DONE]，终态仍只能出现一次（不重复）。
+func TestResponsesStreamTranslator_FailedStreamTerminalEmittedOnce(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
+	tr.Write([]byte(`data: {"error":{"message":"boom"}}` + "\n\n"))
+	tr.Write([]byte("data: [DONE]\n\n"))
+	tr.Finish()
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	if n := len(respStreamAllOf(events, "response.failed")); n > 1 {
+		t.Fatalf("response.failed emitted %d times, want at most 1: %v", n, respStreamEventNames(events))
+	}
+	if n := len(respStreamAllOf(events, "error")); n != 1 {
+		t.Fatalf("error event count = %d, want 1", n)
+	}
+	if got := respStreamLastTerminal(t, events); got == "response.completed" {
+		t.Fatalf("failed stream must not end with response.completed: %v", respStreamEventNames(events))
+	}
+}
+
+// TestResponsesStreamTranslator_FailedStreamNoCompleted：失败流绝不能发 response.completed。
+func TestResponsesStreamTranslator_FailedStreamNoCompleted(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	tr.Write([]byte(`data: {"error":{"message":"boom"}}` + "\n\n"))
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	if n := len(respStreamAllOf(events, "response.completed")); n != 0 {
+		t.Fatalf("response.completed emitted %d times on a failed stream: %v", n, respStreamEventNames(events))
+	}
+}
+
+// TestResponsesStreamTranslator_InterruptedAfterContentIsNotCompleted（I-2）：
+// 上游发了内容后直接断开（无 [DONE]、无 finish_reason）→ Finish() 不能谎报 completed，
+// 否则 store:false 的客户端拿到半截内容却看起来完全正常（§5.5「截断要显式告知」）。
+func TestResponsesStreamTranslator_InterruptedAfterContentIsNotCompleted(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
+	// 上游复述就到此为止：既没有 [DONE]，也没有 finish_reason。
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	if n := len(respStreamAllOf(events, "response.completed")); n != 0 {
+		t.Fatalf("interrupted stream reported response.completed %d times: %v", n, respStreamEventNames(events))
+	}
+	if got := respStreamLastTerminal(t, events); got != "response.failed" {
+		t.Fatalf("terminal event = %q, want response.failed for an interrupted stream", got)
+	}
+	failed := respStreamDataOf(t, events, "response.failed", 0)
+	resp, _ := failed["response"].(map[string]any)
+	if resp["status"] != "failed" {
+		t.Fatalf("status = %#v, want \"failed\"", resp["status"])
+	}
+	// 已产出的内容仍要保留在终态里（客户端能看到自己收到了多少）。
+	output, _ := resp["output"].([]any)
+	if len(output) == 0 {
+		t.Fatalf("response.failed output = %#v, want the partial content retained", resp["output"])
+	}
+}
+
+// TestResponsesStreamTranslator_InterruptedBeforeContentStaysMinimal（I-2 边界）：
+// 零增量 + Finish() 仍走最小合法序列（completed），不因为「中断」就把空流报成 failed。
+func TestResponsesStreamTranslator_InterruptedBeforeContentStaysMinimal(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	tr.Finish()
+
+	names := respStreamEventNames(respStreamEvents(t, rec.Body.String()))
+	want := "response.created,response.in_progress,response.completed"
+	if strings.Join(names, ",") != want {
+		t.Fatalf("event types = %v, want %s", names, want)
+	}
+}
+
+// TestResponsesStreamTranslator_TerminalFailures 逐个钉住终态事件「编码/写出失败」的三条路径。
+//
+// json.Marshal 对 map[string]any 几乎只会在「含无法序列化的 Go 值」时失败（NaN/Inf 会被静默换成
+// null），所以这里直接用不可序列化值构造 response 对象，覆盖原来只能靠真实事故触发的分支：
+//  1. 编码失败 → 记 Error 且标记 finishSynthesized（C-1：不静默、不当作正常轮落库）；
+//  2. 编码失败 → finalize 仍要补出终态事件（C-2：失败流不能没有终态）；
+//  3. 写出阶段编码失败 → 同样记 Error，且退化为只带错误信息的终态（客户端仍有终态可等）。
+func TestResponsesStreamTranslator_TerminalFailures(t *testing.T) {
+	t.Run("终态 response 编码失败记 Error 且不当作正常轮", func(t *testing.T) {
+		var logs bytes.Buffer
+		restore := captureSlog(&logs)
+		defer restore()
+
+		tr, _ := respStreamNew(t, "m")
+		// 让 usage 进入终态，再把 usage 本身换成不可序列化的值：单元级函数（func）无法被
+		// 外层 map 挡住，保证失败发生在「response 原文编码」这一步而不是被 JSON 省略。
+		tr.usage = map[string]any{}
+		tr.ensureOpened()
+		tr.handleTextDelta("hi")
+		tr.usage = map[string]any{"input_tokens_details": func() {}}
+		// 自指的 response 对象不可序列化（json 检测到循环引用）→ 事件体被降级，但 response 的
+		// 原文必须记 Error 且判为不可信（不落库），否则这一轮会静默变成父子链上的 404。
+		unencodable := map[string]any{"output": make(chan int)} // chan 无法被 JSON 编码
+		tr.emitTerminal("response.completed", unencodable)
+
+		if !strings.Contains(logs.String(), "level=ERROR") {
+			t.Fatalf("logs = %q, want an ERROR for the unencodable response body", logs.String())
+		}
+		if !tr.finishSynthesized {
+			t.Fatalf("finishSynthesized = false, want true so the round is not persisted as a normal one")
+		}
+		if tr.terminal != nil {
+			t.Fatalf("terminal = %q, want nil for an unencodable response body", string(tr.terminal))
+		}
+	})
+
+	t.Run("编码失败时失败流仍有终态", func(t *testing.T) {
+		var logs bytes.Buffer
+		restore := captureSlog(&logs)
+		defer restore()
+
+		tr, rec := respStreamNew(t, "m")
+		tr.ensureOpened()
+		tr.handleTextDelta("half")
+		tr.terminal = nil
+		// 让终态承载不可序列化的错误对象：emitError 会把它原样放进 response.failed。
+		tr.failure = func() {}
+		tr.fail("upstream returned an error event")
+
+		if got := respStreamLastTerminal(t, respStreamEvents(t, rec.Body.String())); got != "response.failed" {
+			t.Fatalf("terminal event = %q, want response.failed", got)
+		}
+		if !strings.Contains(logs.String(), "level=ERROR") {
+			t.Fatalf("logs = %q, want an ERROR for the unencodable terminal", logs.String())
+		}
+	})
+
+	t.Run("写出阶段编码失败仍给终态", func(t *testing.T) {
+		var logs bytes.Buffer
+		restore := captureSlog(&logs)
+		defer restore()
+
+		tr, rec := respStreamNew(t, "m")
+		tr.ensureOpened()
+		tr.handleTextDelta("half")
+		tr.emitTerminal("response.completed", map[string]any{"bad": func() {}})
+
+		if !strings.Contains(logs.String(), "level=ERROR") {
+			t.Fatalf("logs = %q, want an ERROR when the event itself cannot be encoded", logs.String())
+		}
+		var sawCompleted bool
+		for _, ev := range respStreamEvents(t, rec.Body.String()) {
+			if ev[0] == "response.completed" {
+				sawCompleted = true
+			}
+		}
+		if !sawCompleted {
+			t.Fatalf("no terminal event written after an encode failure: %s", rec.Body.String())
+		}
+	})
+}
+
+// captureSlog 把默认 logger 临时重定向到 buf，返回恢复函数。
+func captureSlog(buf *bytes.Buffer) func() {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	return func() { slog.SetDefault(prev) }
 }

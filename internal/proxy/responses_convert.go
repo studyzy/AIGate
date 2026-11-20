@@ -41,6 +41,8 @@ const (
 	respStatusIncomplete = "incomplete"
 	// respStatusInProgress 是流式过程中的状态。
 	respStatusInProgress = "in_progress"
+	// respStatusFailed 是失败终态（流中错误、上游中途断开）。
+	respStatusFailed = "failed"
 )
 
 // 请求方向转换器的哨兵错误：入站处理器用 errors.Is 判定，再映射为对外 400 文案。
@@ -551,6 +553,10 @@ type responsesStreamTranslator struct {
 	finalizing bool
 	closed     bool
 	failed     bool
+	// terminalSent 标记唯一的终态事件（response.completed / response.failed）已发出。
+	// 它与 closed/failed 的区别：closed 是「正常收尾流程已走完」，failed 是「流中出现了 error 事件」；
+	// 而一个已 failed 的流在 Finish() 时才补出终态，因此不能拿 failed 当「终态已发」的判据。
+	terminalSent bool
 
 	// items 是按 output_index 排列的已开启 item（按首次出现顺序追加）。
 	items []*responsesStreamItem
@@ -571,6 +577,12 @@ type responsesStreamTranslator struct {
 	// （nil 表示还没有终态）。只由**上游驱动**的收尾写入：Finish() 补发的收尾是网关
 	// 凭空合成的，上游实际并未结束，不能当成本轮结果落库（见 finishSynthesized）。
 	terminal []byte
+	// doneSeen 标记上游发过 [DONE]（收尾信号之一）。
+	doneSeen bool
+	// failure 是流中错误的原始值（chunk 里的 error 对象），供 response.failed 终态复用。
+	failure any
+	// failReason 是中断/失败的简短原因，写入 response.failed 的 error.message。
+	failReason string
 	// finishSynthesized 标记收尾是由 Finish() 补发的（上游中途断开、从未给出终态）。
 	// 合成收尾不算本轮结果：有状态路径据此**不落库**（中断轮不进会话历史），
 	// 理由与取舍见 proxy.persistResponsesStream 的函数注释，改这里之前请先读那一段。
@@ -659,15 +671,29 @@ func (t *responsesStreamTranslator) Wrote() bool { return t.wrote }
 // Wrote() 保持 false，供调用方识别「空响应」；但如 Wrote 注释所述，回退 502 的依据应当是
 // 上游状态码异常，而不是 Wrote()==false。
 func (t *responsesStreamTranslator) Finish() {
-	// 只有**真正需要补发收尾**时才算「合成收尾」。上游已自行收尾（closed）或已失败（failed）时
-	// finalize 会直接返回、不写任何事件：此时若仍置位标志，就把一轮**正常**响应标记成了合成的。
-	// 今天没有可见后果（terminal 已写好且 finalize 早返回），但这是个埋雷：将来只要
-	// finalize 变成可重入、或 terminal 改成延后写入，正常轮就会被误判为合成收尾而静默不落库。
-	// 因此把「只有真正补发才置位」直接编码进函数，而不是依赖 finalize 的前置条件。
-	if t.closed || t.failed {
+	// 上游已自行收尾（closed）：不补任何事件，也**不**置位合成标志，
+	// 否则会把一轮正常响应误标记成「合成收尾」而静默不落库。
+	if t.closed {
 		return
 	}
+	// 流中已出错：error 事件**不是**终态，这里必须补出唯一的 response.failed，
+	// 否则客户端只拿到 error、永远等不到收尾（C-2）。
+	if t.failed {
+		t.fail(t.failReason)
+		return
+	}
+	// 到这里说明上游从未自行收尾，收尾事件全部由本函数补发。
 	t.finishSynthesized = true
+	// 上游给出过收尾信号（finish_reason 或 [DONE]）则正常收尾；只有「中途断开」才判失败。
+	// 否则每个不带 [DONE] 但带 finish_reason 的上游都会在 Finish() 时被误判成中断。
+	if t.wrote && !t.upstreamTerminated() {
+		// 已写出过内容却中途断开：**不能**合成 completed，否则半截对话会伪装成完整响应
+		// （§5.5「截断要显式告知」）。store:false 是隐私敏感场景最常用的配置，
+		// 客户端无法从响应判断完整性，必须显式失败。
+		t.fail("upstream stream interrupted before completion")
+		return
+	}
+	// 零增量或上游已明确结束：正常收尾（零增量时给出最小合法序列，避免「200 + 空 body」）。
 	t.finalize()
 }
 
@@ -685,6 +711,7 @@ func (t *responsesStreamTranslator) processEvent(block string) {
 		return
 	}
 	if data == "[DONE]" {
+		t.doneSeen = true
 		t.finalize()
 		return
 	}
@@ -857,7 +884,13 @@ func (t *responsesStreamTranslator) ensureTextItem() *responsesStreamItem {
 //
 // 两者都会真实写出 created/in_progress/completed。因此 Wrote()==false **不代表** w 未被写入。
 func (t *responsesStreamTranslator) finalize() {
-	if t.closed || t.failed {
+	// 终态只能发一次：上游已正常收尾（closed 且非合成）或终态已发时直接返回。
+	if t.terminalSent || t.closed && !t.finishSynthesized && !t.failed {
+		return
+	}
+	if t.failed && !t.finishSynthesized {
+		// 流中出现过 error 事件：收尾必须是 response.failed，绝不能合成 completed。
+		t.fail(t.failReason)
 		return
 	}
 	t.finalizing = true
@@ -893,21 +926,128 @@ func (t *responsesStreamTranslator) finalize() {
 		slog.Warn("responses stream: finish_reason=tool_calls but no function_call item was synthesized",
 			"response_id", t.respID, "model", t.model)
 	}
-	terminal := t.responseBody(t.finalStatus(), output)
-	// 收尾事件的 response 对象是最终形态的完整响应；缓存其 JSON 原文供有状态路径落库
-	// （与写出的事件同源，避免二次构造出现字段漂移）。编码失败不影响事件写出。
+	t.emitTerminal("response.completed", t.responseBody(t.finalStatus(), output))
+}
+
+// emitTerminal 缓存并写出终态事件（response.completed / response.failed）。
+//
+// 收尾事件的 response 对象是最终形态的完整响应；缓存其 JSON 原文供有状态路径落库
+// （与写出的事件同源，避免二次构造出现字段漂移）。
+//
+// 两条写入约束（不变式：落库内容必须等于客户端所见）：
+//   - 只写一次：调用前均有幂等前置（closed/failed 直接返回），这里再挡住未来可能的重入；
+//   - 合成的收尾不进 terminal：中断/失败时的终态是网关补发的，不是上游给出的结果，
+//     落库等于把半截对话伪装成一轮完整对话。
+//
+// 编码失败**不能静默**（C-1）：否则这一轮既不落库也没有任何日志，previous_response_id
+// 表现为莫名其妙的 404。失败时记 Error，并把该轮标记为合成收尾（保证不被当作正常轮落库）。
+func (t *responsesStreamTranslator) emitTerminal(eventType string, response map[string]any) {
+	// 先缓存**原始** response 的 JSON 原文供有状态路径落库（与写出的事件同源，避免二次构造漂移）。
 	//
 	// 两条写入约束（不变式：落库内容必须等于客户端所见）：
-	//   · 只写一次：finalize 本身有幂等前置（closed/failed 直接返回），这里再挡住未来可能的
-	//     重入路径，保证落库的是**第一个**终态；
-	//   · 合成的收尾不进 terminal：上游中途断开时客户端会收到网关补发的 completed，
-	//     但那不是上游给出的结果，落库等于把半截对话伪装成一轮完整对话。
+	//   - 只写一次：调用前均有幂等前置（terminalSent），这里再挡住未来可能的重入；
+	//   - 合成的收尾不进 terminal：中断/失败时的终态是网关补发的，不是上游给出的结果。
+	//
+	// 编码失败**不能静默**（C-1）：否则这一轮既不落库也没有任何日志，previous_response_id
+	// 表现为莫名其妙的 404。失败时记 Error，并把该轮标记为合成收尾（不当作正常轮落库）。
 	if t.terminal == nil && !t.finishSynthesized {
-		if raw, err := json.Marshal(terminal); err == nil {
+		raw, err := json.Marshal(response)
+		if err != nil {
+			slog.Error("responses stream: failed to encode terminal response; round will not be persisted",
+				"response_id", t.respID, "model", t.model, "event", eventType, "error", err)
+			t.finishSynthesized = true
+			t.terminal = nil
+		} else {
 			t.terminal = raw
 		}
 	}
-	t.emit("response.completed", map[string]any{"response": terminal})
+
+	// 事件体的编码同样会失败：不能像普通事件那样静默丢弃，否则客户端收不到任何终态
+	// （C-2）。这里退化为「只带状态与简短错误」的最小终态，保证前端一定能收尾。
+	// 注意降级只影响事件体，上面缓存的 original 不受影响（不会伪造落库内容）。
+	body := response
+	if _, err := json.Marshal(map[string]any{"type": eventType, "response": body}); err != nil {
+		slog.Error("responses stream: terminal event could not be encoded; degrading to a minimal terminal",
+			"response_id", t.respID, "model", t.model, "event", eventType, "error", err)
+		body = map[string]any{
+			"id":     t.respID,
+			"object": respObjectResponse,
+			"model":  t.model,
+			"status": responsesTerminalStatusOf(eventType),
+			"output": []any{},
+			"error":  map[string]any{"message": "response could not be encoded", "type": "server_error"},
+		}
+	}
+	t.terminalSent = true
+	t.emit(eventType, map[string]any{"response": body})
+}
+
+// responsesTerminalStatusOf 把终态事件名映射为 status 取值。
+func responsesTerminalStatusOf(eventType string) string {
+	if eventType == "response.failed" {
+		return respStatusFailed
+	}
+	return respStatusCompleted
+}
+
+// upstreamTerminated 报告上游是否给出过收尾信号：[DONE] 事件，或带非空 finish_reason 的分片。
+func (t *responsesStreamTranslator) upstreamTerminated() bool {
+	return t.doneSeen || t.finishReason != ""
+}
+
+// fail 以 response.failed 结束流：先补齐已开启 item 的 done 级事件（客户端已看到的 item
+// 必须有收尾，否则前端状态机停在半开状态），再发唯一的终态事件。幂等。
+//
+// failure 非空时把原始错误对象塞进终态的 error 字段；否则只给简短原因。
+func (t *responsesStreamTranslator) fail(reason string) {
+	// 幂等判据是「终态是否已发」：failed 为真只表示出过错，终态仍可能尚未补发。
+	if t.terminalSent || t.closed && t.finishSynthesized {
+		return
+	}
+	t.finalizing = true
+	t.closed = true
+	t.failReason = reason
+	t.ensureOpened()
+	// 已开启的 item 仍要收尾（不是「完成」，只是闭合结构）。
+	for _, item := range t.openCalls {
+		t.closeCallItem(item)
+	}
+	if item := t.textItem; item != nil && !item.partOpen {
+		item.partOpen = true
+		t.emit("response.content_part.added", map[string]any{
+			"item_id":       item.id,
+			"output_index":  item.index,
+			"content_index": 0,
+			"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		})
+	}
+	if item := t.textItem; item != nil && !item.closed {
+		full := item.text.String()
+		t.emit("response.output_text.done", map[string]any{
+			"item_id":       item.id,
+			"output_index":  item.index,
+			"content_index": 0,
+			"text":          full,
+		})
+		t.emit("response.content_part.done", map[string]any{
+			"item_id":       item.id,
+			"output_index":  item.index,
+			"content_index": 0,
+			"part":          map[string]any{"type": "output_text", "text": full, "annotations": []any{}},
+		})
+		t.emit("response.output_item.done", map[string]any{
+			"output_index": item.index,
+			"item":         responsesMessageItemFull(item.id, full, respStatusFailed),
+		})
+		item.closed = true
+	}
+	response := t.responseBody(respStatusFailed, t.finalOutput())
+	errValue := t.failure
+	if errValue == nil {
+		errValue = map[string]any{"message": reason, "type": "upstream_error"}
+	}
+	response["error"] = errValue
+	t.emitTerminal("response.failed", response)
 }
 
 // hasFunctionCallItem 报告是否有任何已合成的 function_call item。
@@ -1008,10 +1148,15 @@ func (t *responsesStreamTranslator) responseBody(status string, output []any) ma
 // 先 ensureOpened() 补发 response.created / response.in_progress：OpenAI SDK 依赖
 // response.created 建立 response 对象，首个增量之前就失败时也必须先给（I-3）。
 // 流中错误算「已写出」（见 wrote 字段注释），因此这里显式置位。
+//
+// error 事件**不是**终态：OpenAI SDK 依赖 response.failed 收尾，只发 error 会让客户端一直等待。
+// 因此这里只记下失败原因，真正的终态由 Finish() → fail() 补发（保证只发一次）。
 func (t *responsesStreamTranslator) emitError(errValue any) {
 	t.ensureOpened()
 	t.failed = true
 	t.buf = nil
+	t.failure = errValue
+	t.failReason = "upstream returned an error event"
 	t.writeEvent("error", map[string]any{"type": "error", "error": errValue}, true)
 }
 
@@ -1035,6 +1180,9 @@ func (t *responsesStreamTranslator) emit(eventType string, payload map[string]an
 func (t *responsesStreamTranslator) writeEvent(eventType string, payload map[string]any, markWrote bool) {
 	data, err := json.Marshal(payload)
 	if err != nil {
+		// 不能静默丢事件：至少留下可定位的日志。终态事件的额外降级见 emitTerminal。
+		slog.Error("responses stream: dropping an event that could not be encoded",
+			"response_id", t.respID, "model", t.model, "event", eventType, "error", err)
 		return
 	}
 	t.ensureSSEHeaders()
