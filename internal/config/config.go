@@ -25,9 +25,14 @@ import (
 	"time"
 )
 
-// maxResponseRetentionDays 是 -response-retention-days 的上界（100 年）。
-// 取它的理由不是业务上限，而是挡住 time.Duration 溢出（见 validate）。
-const maxResponseRetentionDays = 36500
+// maxRetentionDays 是「按天计的保留期」配置项的统一上界（100 年）：
+// -webhook-delivery-retention-days 与 -response-retention-days 共用。
+//
+// 取它的理由不是业务上限，而是挡住 time.Duration 溢出：装配层统一用
+// time.Duration(days) * 24 * time.Hour 换算，超过 ~106751 天就溢出成负数，
+// 而负的保留期会被清理循环当成「≤0 = 永不清理」——一次写错的配置就静默关掉了数据清理，
+// 且没有任何报错。两个配置项是同一类缺陷，共用同一个上界与同一条校验。
+const maxRetentionDays = 36500
 
 const (
 	// DBTypeSQLite 本地开发/体验用的嵌入式数据库。
@@ -197,11 +202,13 @@ func (c *Config) validate() error {
 	if c.ResponseRetentionDays < 0 {
 		return fmt.Errorf("response-retention-days must be >= 0")
 	}
-	// 上界换算：装配层用 time.Duration(天数) * 24h，超过 ~106751 天会溢出成负数，
-	// 而负的保留期会被当作「永不清理」——一次写错的配置就静默关掉了数据清理。
-	// 这里取一个远大于任何合理运维口径的上界（100 年），把溢出挡在启动期。
-	if c.ResponseRetentionDays > maxResponseRetentionDays {
-		return fmt.Errorf("response-retention-days must be <= %d", maxResponseRetentionDays)
+	// 上界校验（两个按天计的保留期共用，理由见 maxRetentionDays 的注释）：
+	// 把 time.Duration 溢出挡在启动期，而不是让它静默退化成「永不清理」。
+	if c.WebhookDeliveryRetentionDays > maxRetentionDays {
+		return fmt.Errorf("webhook-delivery-retention-days must be <= %d", maxRetentionDays)
+	}
+	if c.ResponseRetentionDays > maxRetentionDays {
+		return fmt.Errorf("response-retention-days must be <= %d", maxRetentionDays)
 	}
 	if c.QuotaExceededStatus != 429 && c.QuotaExceededStatus != 403 {
 		return fmt.Errorf("quota-exceeded-status must be 429 or 403")

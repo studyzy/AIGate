@@ -50,6 +50,22 @@ func TestLoad_InvalidValues(t *testing.T) {
 			[]string{"-response-retention-days", "9223372036854775807"},
 			"response-retention-days must be <=",
 		},
+		{
+			// 同一类溢出（同源修复）：装配层同样是 time.Duration(days) * 24h。
+			"overflowing webhook delivery retention",
+			[]string{"-webhook-delivery-retention-days", "9223372036854775807"},
+			"webhook-delivery-retention-days must be <=",
+		},
+		{
+			"webhook delivery retention just above the bound",
+			[]string{"-webhook-delivery-retention-days", "36501"},
+			"webhook-delivery-retention-days must be <=",
+		},
+		{
+			"response retention just above the bound",
+			[]string{"-response-retention-days", "36501"},
+			"response-retention-days must be <=",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,5 +135,20 @@ func TestLoad_ResponseStorageOptions(t *testing.T) {
 	t.Setenv("AIGATE_ALLOW_RESPONSE_STORAGE", "not-a-bool")
 	if _, err := config.Load(nil); err == nil || !strings.Contains(err.Error(), "AIGATE_ALLOW_RESPONSE_STORAGE") {
 		t.Fatalf("Load() err = %v, want invalid boolean error", err)
+	}
+}
+
+// TestLoad_RetentionBoundsAreInclusive：上界本身的边界口径——上界值可用，上界 +1 拒绝。
+// 两个按天计的保留期共用 maxRetentionDays，这条用例同时钉住「都能停下界内合法值」。
+func TestLoad_RetentionBoundsAreInclusive(t *testing.T) {
+	cfg, err := config.Load([]string{
+		"-response-retention-days", "36500",
+		"-webhook-delivery-retention-days", "36500",
+	})
+	if err != nil {
+		t.Fatalf("Load() at the bound err = %v, want it to be accepted", err)
+	}
+	if cfg.ResponseRetentionDays != 36500 || cfg.WebhookDeliveryRetentionDays != 36500 {
+		t.Fatalf("bound values not applied: %+v", cfg)
 	}
 }

@@ -1454,3 +1454,30 @@ func TestResponsesStreamTranslator_TakeTerminalConsumesOnce(t *testing.T) {
 		t.Fatalf("second TakeTerminal = %q, want nil (consume-once)", got)
 	}
 }
+
+// TestResponsesStreamTranslator_FinishAfterUpstreamDoneIsNotSynthesized：上游已用 [DONE]
+// 自行收尾后，调用方**照常**再调一次 Finish()（调用方无从判断上游是否已收尾），
+// 这一轮仍是「上游驱动的正常轮」，不得被标记成合成收尾。
+//
+// 今天这没有可见后果（finalize 因 closed 早返回），但一旦 finalize 变成可重入、
+// 或 terminal 改为延后写入，被误标的正常轮就会静默不落库。本用例把「只有真正补发才置位」
+// 钉成不变量：去掉 Finish 的 closed/failed 前置，这里立刻变红。
+func TestResponsesStreamTranslator_FinishAfterUpstreamDoneIsNotSynthesized(t *testing.T) {
+	tr, _ := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamSSE(`{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}`), 7)
+	respStreamFeed(t, tr, respStreamSSE("[DONE]"), 7)
+
+	tr.Finish() // 正常调用：调用方不知道上游已经收尾了
+
+	if len(tr.TakeTerminal()) == 0 {
+		t.Fatal("an upstream-closed round must keep its terminal snapshot after a redundant Finish")
+	}
+
+	// 失败流同理：已 failed 的流不再补发，也不该被标记为合成收尾。
+	tr2, _ := respStreamNew(t, "m")
+	respStreamFeed(t, tr2, respStreamSSE(`{"error":{"message":"boom"}}`), 5)
+	tr2.Finish()
+	if tr2.finishSynthesized {
+		t.Fatal("Finish on an already-failed stream must not synthesize a completion")
+	}
+}

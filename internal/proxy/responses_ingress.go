@@ -342,8 +342,12 @@ func (h *Handler) persistResponsesStream(
 	if !state.store {
 		return
 	}
-	// take：终态快照消费即清。为空即「上游未自行收尾」（流被中断，quick 收尾是 Finish 合成的）
+	// take：终态快照消费即清。为空即「上游未自行收尾」（流被中断，收尾是 Finish 合成的）
 	// → **不落库**，理由见上方函数注释「为什么上游中断时故意不落库」。
+	//
+	// 这条早返回是**兜底，不是主闸门**：真正挡住合成收尾的是翻译器的 finishSynthesized
+	// （见 responses_convert.go 的 Finish）。删掉本早返回，黑盒仍全绿——所以**不要**据此
+	// 认为 finishSynthesized 是冗余的而把它删掉，那才是唯一的防线。
 	terminal := t.TakeTerminal()
 	if len(terminal) == 0 {
 		return

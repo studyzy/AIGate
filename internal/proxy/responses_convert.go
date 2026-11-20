@@ -658,7 +658,18 @@ func (t *responsesStreamTranslator) Wrote() bool { return t.wrote }
 // Finish() **不改变** Wrote() 的语义（收尾阶段写出的事件不计入 wrote）：上游 200 但零增量时
 // Wrote() 保持 false，供调用方识别「空响应」；但如 Wrote 注释所述，回退 502 的依据应当是
 // 上游状态码异常，而不是 Wrote()==false。
-func (t *responsesStreamTranslator) Finish() { t.finishSynthesized = true; t.finalize() }
+func (t *responsesStreamTranslator) Finish() {
+	// 只有**真正需要补发收尾**时才算「合成收尾」。上游已自行收尾（closed）或已失败（failed）时
+	// finalize 会直接返回、不写任何事件：此时若仍置位标志，就把一轮**正常**响应标记成了合成的。
+	// 今天没有可见后果（terminal 已写好且 finalize 早返回），但这是个埋雷：将来只要
+	// finalize 变成可重入、或 terminal 改成延后写入，正常轮就会被误判为合成收尾而静默不落库。
+	// 因此把「只有真正补发才置位」直接编码进函数，而不是依赖 finalize 的前置条件。
+	if t.closed || t.failed {
+		return
+	}
+	t.finishSynthesized = true
+	t.finalize()
+}
 
 // TakeTerminal 取走并清空终态 JSON 原文（消费即清，避免落库失败/重入后复用旧快照）。
 func (t *responsesStreamTranslator) TakeTerminal() []byte {
