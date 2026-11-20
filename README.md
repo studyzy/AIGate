@@ -276,6 +276,9 @@ precedence over the default.
 | `-usage-buffer` | `AIGATE_USAGE_BUFFER` | `256` | Capacity of the async usage-write queue (must be >= 1) |
 | `-webhook-buffer` | `AIGATE_WEBHOOK_BUFFER` | `256` | Capacity of the webhook event queue (must be >= 1) |
 | `-webhook-delivery-retention-days` | `AIGATE_WEBHOOK_DELIVERY_RETENTION_DAYS` | `7` | Days to retain `webhook_deliveries` rows (`0` = keep forever; must be >= 0) |
+| `-allow-response-storage` | `AIGATE_ALLOW_RESPONSE_STORAGE` | `true` | Responses storage switch; `false` makes `store`/`previous_response_id`/`conversation`/`background` return 400 |
+| `-response-retention-days` | `AIGATE_RESPONSE_RETENTION_DAYS` | `7` | Days to retain `response_states` rows (`0` = keep forever; must be 0–36500) |
+| `-response-background-timeout` | `AIGATE_RESPONSE_BACKGROUND_TIMEOUT` | `30m` | Run-time cap for `background:true` jobs (timed-out or restart-orphaned rows become `failed`; must be positive) |
 | `-quota-exceeded-status` | `AIGATE_QUOTA_EXCEEDED_STATUS` | `429` | Status code for quota rejection (`429` or `403`) |
 | `-init-admin-token` | `AIGATE_INIT_ADMIN_TOKEN` | (empty) | Bootstrap admin token; generated and printed once when empty |
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | Allow private/loopback upstreams (relaxes SSRF strict mode) |
