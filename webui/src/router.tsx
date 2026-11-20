@@ -2,9 +2,17 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 
 import { AppLayout } from "./components/AppLayout";
 import { AuthGuard } from "./components/AuthGuard";
-import { Placeholder } from "./components/Placeholder";
+import { CredentialsPage } from "./pages/credentials";
 import { DashboardPage } from "./pages/dashboard";
+import { GroupsPage } from "./pages/groups";
+import { ImportPage } from "./pages/import";
+import { KeysPage } from "./pages/keys";
 import { LoginPage } from "./pages/login";
+import { ModelsPage } from "./pages/models";
+import { SettingsPage } from "./pages/settings";
+import { UsagePage } from "./pages/usage";
+import { UsersPage } from "./pages/users";
+import { WebhooksPage } from "./pages/webhooks";
 
 // 路由挂在 /ui 下，basename 让链接与刷新后的直接访问都落在同一前缀内。
 export const router = createBrowserRouter(
@@ -17,15 +25,15 @@ export const router = createBrowserRouter(
           element: <AppLayout />,
           children: [
             { index: true, element: <DashboardPage /> },
-            { path: "usage", element: <Placeholder title="nav.usage" /> },
-            { path: "models", element: <Placeholder title="nav.models" /> },
-            { path: "credentials", element: <Placeholder title="nav.credentials" /> },
-            { path: "keys", element: <Placeholder title="nav.keys" /> },
-            { path: "users", element: <Placeholder title="nav.users" /> },
-            { path: "groups", element: <Placeholder title="nav.groups" /> },
-            { path: "settings", element: <Placeholder title="nav.settings" /> },
-            { path: "webhooks", element: <Placeholder title="nav.webhooks" /> },
-            { path: "import", element: <Placeholder title="nav.import" /> },
+            { path: "usage", element: <UsagePage /> },
+            { path: "models", element: <ModelsPage /> },
+            { path: "credentials", element: <CredentialsPage /> },
+            { path: "keys", element: <KeysPage /> },
+            { path: "users", element: <UsersPage /> },
+            { path: "groups", element: <GroupsPage /> },
+            { path: "settings", element: <SettingsPage /> },
+            { path: "webhooks", element: <WebhooksPage /> },
+            { path: "import", element: <ImportPage /> },
           ],
         },
       ],
