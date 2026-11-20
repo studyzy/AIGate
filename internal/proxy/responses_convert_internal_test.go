@@ -1563,21 +1563,42 @@ func TestResponsesStreamTranslator_FailedStreamNoCompleted(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamTranslator_InterruptedAfterContentIsNotCompleted（I-2）：
-// 上游发了内容后直接断开（无 [DONE]、无 finish_reason）→ Finish() 不能谎报 completed，
-// 否则 store:false 的客户端拿到半截内容却看起来完全正常（§5.5「截断要显式告知」）。
-func TestResponsesStreamTranslator_InterruptedAfterContentIsNotCompleted(t *testing.T) {
+// TestResponsesStreamTranslator_CleanEOFAfterContentIsCompleted（I-2 修正）：
+// 上游把内容发完就直接关连接（既不发 [DONE] 也不发 finish_reason）属于**干净 EOF**，
+// 是合理的流结束 —— 必须判完成，不能误伤正常用户（很多 chat 兼容上游就是这样收尾的）。
+func TestResponsesStreamTranslator_CleanEOFAfterContentIsCompleted(t *testing.T) {
 	tr, rec := respStreamNew(t, "m")
-	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
-	// 上游复述就到此为止：既没有 [DONE]，也没有 finish_reason。
+	respStreamFeed(t, tr, respStreamChatTextChunk("hello"), 0)
+	// 上游复述到此为止：没有 [DONE]，没有 finish_reason，也没有读错误。
 	tr.Finish()
 
 	events := respStreamEvents(t, rec.Body.String())
+	if got := respStreamLastTerminal(t, events); got != "response.completed" {
+		t.Fatalf("terminal event = %q, want response.completed for a clean EOF", got)
+	}
+	if n := len(respStreamAllOf(events, "response.failed")); n != 0 {
+		t.Fatalf("response.failed emitted %d times on a clean EOF: %v", n, respStreamEventNames(events))
+	}
+	resp := respStreamCompleted(t, events)
+	if resp["status"] != "completed" {
+		t.Fatalf("status = %#v, want \"completed\"", resp["status"])
+	}
+}
+
+// TestResponsesStreamTranslator_ReadErrorAfterContentIsFailed（I-2）：读取出错（连接重置、
+// 单行超限、超时）说明内容可能不完整 —— 必须以 response.failed 收尾，不能谎报 completed。
+func TestResponsesStreamTranslator_ReadErrorAfterContentIsFailed(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
+	// 调用方（ingress）在 ChatCompletionStream 返回 err != nil 时走 Abort。
+	tr.Abort("upstream stream read error: token too long")
+
+	events := respStreamEvents(t, rec.Body.String())
 	if n := len(respStreamAllOf(events, "response.completed")); n != 0 {
-		t.Fatalf("interrupted stream reported response.completed %d times: %v", n, respStreamEventNames(events))
+		t.Fatalf("read error reported response.completed %d times: %v", n, respStreamEventNames(events))
 	}
 	if got := respStreamLastTerminal(t, events); got != "response.failed" {
-		t.Fatalf("terminal event = %q, want response.failed for an interrupted stream", got)
+		t.Fatalf("terminal event = %q, want response.failed after a read error", got)
 	}
 	failed := respStreamDataOf(t, events, "response.failed", 0)
 	resp, _ := failed["response"].(map[string]any)
@@ -1585,9 +1606,40 @@ func TestResponsesStreamTranslator_InterruptedAfterContentIsNotCompleted(t *test
 		t.Fatalf("status = %#v, want \"failed\"", resp["status"])
 	}
 	// 已产出的内容仍要保留在终态里（客户端能看到自己收到了多少）。
-	output, _ := resp["output"].([]any)
-	if len(output) == 0 {
+	if output, _ := resp["output"].([]any); len(output) == 0 {
 		t.Fatalf("response.failed output = %#v, want the partial content retained", resp["output"])
+	}
+}
+
+// TestResponsesStreamTranslator_AbortIdempotent：Abort 之后 Finish() 不得再补终态，
+// 重复 Abort 也不得重复发（终态至多一次）。
+func TestResponsesStreamTranslator_AbortIdempotent(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("half"), 0)
+	tr.Abort("boom")
+	tr.Abort("boom again")
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	if n := len(respStreamAllOf(events, "response.failed")); n != 1 {
+		t.Fatalf("response.failed emitted %d times, want exactly 1: %v", n, respStreamEventNames(events))
+	}
+	if n := len(respStreamAllOf(events, "response.completed")); n != 0 {
+		t.Fatalf("response.completed emitted after Abort: %v", respStreamEventNames(events))
+	}
+}
+
+// TestResponsesStreamTranslator_AbortAfterNormalFinishIsNoop：上游已正常收尾后再报读错误
+// （例如收尾后才关连接）不得改写终态。
+func TestResponsesStreamTranslator_AbortAfterNormalFinishIsNoop(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("hello"), 0)
+	tr.Finish()
+	tr.Abort("late read error")
+
+	events := respStreamEvents(t, rec.Body.String())
+	if got := respStreamLastTerminal(t, events); got != "response.completed" {
+		t.Fatalf("terminal event = %q, want the earlier response.completed", got)
 	}
 }
 

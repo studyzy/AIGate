@@ -298,7 +298,10 @@ func (h *Handler) forwardViaChatConversion(
 				httpx.WriteError(w, http.StatusBadGateway, msgUpstreamConnect)
 				return
 			}
-			// 已写出部分事件后中断：不补发收尾事件，让客户端感知到流不完整。
+			// 读取出错（连接重置、单行超限、超时等）且已写出部分事件：内容可能不完整，
+			// 必须以 response.failed 收尾，否则客户端只拿到半截事件、永远等不到终态。
+			// 注意这条路径**不**调用 Finish()：干净 EOF 才走 Finish（正常完成）。
+			tw.Abort("upstream stream read error: " + err.Error())
 			return
 		}
 		// 回退 502 的依据是「上游状态码异常」，不是 Wrote() 为假：

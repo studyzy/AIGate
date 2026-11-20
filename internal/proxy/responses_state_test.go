@@ -804,3 +804,74 @@ func TestResponseState_UpstreamStoreForcedFalse(t *testing.T) {
 		t.Fatalf("response_states rows = %d, want 1", len(rows))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 14. 读错误 vs 干净 EOF（I-2 修正后的口径）
+// ---------------------------------------------------------------------------
+
+// responsesStreamEventNames 从响应体里按出现顺序提取 SSE 事件名。
+func responsesStreamEventNames(body string) []string {
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		if rest, ok := strings.CutPrefix(line, "event: "); ok {
+			names = append(names, strings.TrimSpace(rest))
+		}
+	}
+	return names
+}
+
+// TestResponseState_CleanEOFStreamEndsCompleted：上游把内容发完后直接关连接（不发 [DONE]、
+// 不发 finish_reason、没有读错误）——这是干净 EOF，属于正常完成，客户端必须拿到 completed。
+// 若把它当成中断，就会误伤大量「不发 [DONE]」的 chat 兼容上游。
+func TestResponseState_CleanEOFStreamEndsCompleted(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"role":"assistant","content":"whole answer"},"finish_reason":null}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// 正常返回：连接干净关闭，没有 [DONE]。
+	})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","stream":true,"input":"clean eof"}`)
+	assertStatus(t, resp, http.StatusOK)
+	body := readBody(t, resp)
+
+	names := responsesStreamEventNames(body)
+	if len(names) == 0 || names[len(names)-1] != "response.completed" {
+		t.Fatalf("clean EOF must end with response.completed, got events %v", names)
+	}
+	if strings.Contains(body, "event: response.failed") {
+		t.Fatalf("clean EOF must not report response.failed, got:\n%s", body)
+	}
+}
+
+// TestResponseState_ReadErrorStreamEndsFailed：上游读取出错（超长行触发 token too long）
+// → 客户端必须收到 response.failed，不能拿到半截事件后一直没有终态。
+func TestResponseState_ReadErrorStreamEndsFailed(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("data: " + strings.Repeat("x", 2*1024*1024) + "\n\n"))
+		w.(http.Flusher).Flush()
+	})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","stream":true,"input":"read error"}`)
+	assertStatus(t, resp, http.StatusOK)
+	body := readBody(t, resp)
+
+	names := responsesStreamEventNames(body)
+	if len(names) == 0 || names[len(names)-1] != "response.failed" {
+		t.Fatalf("read error must end with response.failed, got events %v", names)
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Fatalf("read error must not report response.completed, got:\n%s", body)
+	}
+}

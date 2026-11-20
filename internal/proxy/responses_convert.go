@@ -577,7 +577,7 @@ type responsesStreamTranslator struct {
 	// （nil 表示还没有终态）。只由**上游驱动**的收尾写入：Finish() 补发的收尾是网关
 	// 凭空合成的，上游实际并未结束，不能当成本轮结果落库（见 finishSynthesized）。
 	terminal []byte
-	// doneSeen 标记上游发过 [DONE]（收尾信号之一）。
+	// doneSeen 标记上游发过 [DONE]（仅用于日志/排查，不参与完成判定）。
 	doneSeen bool
 	// failure 是流中错误的原始值（chunk 里的 error 对象），供 response.failed 终态复用。
 	failure any
@@ -684,17 +684,28 @@ func (t *responsesStreamTranslator) Finish() {
 	}
 	// 到这里说明上游从未自行收尾，收尾事件全部由本函数补发。
 	t.finishSynthesized = true
-	// 上游给出过收尾信号（finish_reason 或 [DONE]）则正常收尾；只有「中途断开」才判失败。
-	// 否则每个不带 [DONE] 但带 finish_reason 的上游都会在 Finish() 时被误判成中断。
-	if t.wrote && !t.upstreamTerminated() {
-		// 已写出过内容却中途断开：**不能**合成 completed，否则半截对话会伪装成完整响应
-		// （§5.5「截断要显式告知」）。store:false 是隐私敏感场景最常用的配置，
-		// 客户端无法从响应判断完整性，必须显式失败。
-		t.fail("upstream stream interrupted before completion")
+	// 中断的判据是「读取出错」，**不是**「缺少结束信号」：
+	//   · 干净 EOF（scanner 正常读到结束、err == nil）即使上游既不发 [DONE] 也不发 finish_reason，
+	//     也是合理的流结束——大量 chat 兼容上游就是这样收尾的，判失败会误伤正常用户；
+	//   · 读取出错（单行超限、连接被重置、超时等）说明内容可能不完整 → 由 Abort() 判中断。
+	// 零增量时同样给出最小合法序列，避免「200 + 空 body」。
+	t.finalize()
+}
+
+// Abort 告知翻译器「上游读取出错」（连接重置、单行超限、超时等），并立即以
+// response.failed 收尾。
+//
+// 与 I-2 的关系：干净 EOF 属于正常完成（见 Finish）；只有读取出错才算中断。两者必须分开，
+// 否则「不发 [DONE] 但正常结束」的上游会被误判为失败。已写出内容时调用方**必须**调用本方法，
+// 否则客户端只收到半截事件、永远等不到终态（前端会一直转圈）。
+//
+// 幂等：终态已发或已正常收尾时不做任何事。
+func (t *responsesStreamTranslator) Abort(reason string) {
+	if t.terminalSent || t.closed {
 		return
 	}
-	// 零增量或上游已明确结束：正常收尾（零增量时给出最小合法序列，避免「200 + 空 body」）。
-	t.finalize()
+	t.finishSynthesized = true
+	t.fail(reason)
 }
 
 // TakeTerminal 取走并清空终态 JSON 原文（消费即清，避免落库失败/重入后复用旧快照）。
@@ -988,11 +999,6 @@ func responsesTerminalStatusOf(eventType string) string {
 		return respStatusFailed
 	}
 	return respStatusCompleted
-}
-
-// upstreamTerminated 报告上游是否给出过收尾信号：[DONE] 事件，或带非空 finish_reason 的分片。
-func (t *responsesStreamTranslator) upstreamTerminated() bool {
-	return t.doneSeen || t.finishReason != ""
 }
 
 // fail 以 response.failed 结束流：先补齐已开启 item 的 done 级事件（客户端已看到的 item
