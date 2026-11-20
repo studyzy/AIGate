@@ -199,7 +199,7 @@ The resolved model's `model_type` selects one of two paths:
 | Upstream | Behaviour |
 |----------|-----------|
 | `anthropic-messages` | **Native passthrough.** The inbound body is forwarded unchanged except that `model` is replaced with the resolved upstream ID and `max_tokens` is capped by the key limit. Anthropic-only fields such as `cache_control` are therefore preserved end to end. Upstream responses (JSON or SSE) are returned verbatim. |
-| `openai-completions` (and any other type) | **Translation.** The Anthropic request is converted to an OpenAI request (`system` → a system message, images → data URIs, `tool_use`/`tool_result` → `tool_calls`/`role=tool`, `tools`/`tool_choice`/`stop_sequences` mapped), and the OpenAI response or SSE stream is translated back into Anthropic format. |
+| `openai-completions` (and any other type, including `openai-responses`) | **Translation.** The Anthropic request is converted to an OpenAI request (`system` → a system message, images → data URIs, `tool_use`/`tool_result` → `tool_calls`/`role=tool`, `tools`/`tool_choice`/`stop_sequences` mapped), and the OpenAI response or SSE stream is translated back into Anthropic format. |
 
 Passthrough request headers: `x-api-key` (resolved upstream key), `anthropic-version` (inbound value, defaulting to `2023-06-01`), `anthropic-beta` (forwarded when present), plus any matched `custom_http_headers`.
 
@@ -295,6 +295,321 @@ curl http://127.0.0.1:8080/v1/models \
 | 401 | `missing API key` / `invalid API key` |
 | 500 | `internal server error` |
 
+### POST /v1/responses
+
+OpenAI Responses API ingress. Forwards a Responses request to the upstream model bound to the
+presented key: native passthrough for `openai-responses` upstreams, translation through chat
+completions for `openai-completions` / `anthropic-messages` upstreams. Streaming and
+non-streaming, text, images and function tool calls are supported, along with the four stateful
+options `store`, `previous_response_id`, `conversation` and `background`.
+
+**Authentication:** `Authorization: Bearer sk-…`. Errors use this document's `ErrorResponse`
+envelope (**not** the Anthropic envelope), with `code` equal to the HTTP status code.
+
+> ⚠️ **Privacy warning 1: `store` defaults to `true` — omitting it still persists.**
+>
+> Under OpenAI semantics the default value of `store` is `true`. So **when the client sends no
+> `store` field at all, the gateway still writes this turn's conversation content to the database**,
+> retained for 7 days by default (`-response-retention-days`). This is the opposite of the intuition
+> that nothing is saved unless explicitly requested.
+>
+> | Goal | How |
+> |------|-----|
+> | Do not persist this turn | Send `"store": false` **explicitly**. |
+> | Forbid persistence site-wide | Start with `-allow-response-storage=false` (or `AIGATE_ALLOW_RESPONSE_STORAGE=false`): every request is treated as `store:false` and all stateful features are unavailable. |
+> | Shorten retention | `-response-retention-days` (default `7`, `0` = keep forever). |
+>
+> With storage disabled site-wide, an **explicit** `"store": true` returns `400 response storage is
+> disabled on this gateway` — the gateway rejects it outright instead of silently rewriting it to
+> `store:false`, which would leave you believing the data was saved when it was not.
+
+> ⚠️ **Privacy warning 2: `store: false` ≠ "does not read the database".**
+>
+> Whenever a request carries `previous_response_id` or `conversation`, the gateway **still reads**
+> the parent row's history and prepends it to this request's `input` before sending it upstream.
+> `store: false` only means "**this turn's result is not written to storage**". It is **not** a
+> privacy switch: the previous turn's content is still read out and sent to the upstream provider.
+>
+> To touch no history at all, send neither `previous_response_id` nor `conversation`, and pass
+> `"store": false` explicitly.
+
+**Request fields**
+
+The request body is an OpenAI Responses object. The gateway only reads and rewrites the fields
+below; every other field is forwarded verbatim on the passthrough path.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `model` | string | no | Target model. Resolution rules are identical to `/v1/chat/completions` (including primary fallback and `requested model is not bound to this key`). |
+| `input` | string \| array | **yes** | A string, or an array of input items. On the translation path, producing no chat message at all yields `400 invalid input`. |
+| `instructions` | string | no | System prompt. Mapped to a system message on the translation path; **not** written into the conversation history snapshot (so a later turn does not re-inject it). |
+| `stream` | bool | no | `true` selects SSE streaming. |
+| `max_output_tokens` | integer | no | Capped by the key's `max_tokens` limit when that limit is `> 0`. |
+| `tools` | array | no | Responses flat tool array; a non-array yields `400 invalid tools`. |
+| `tool_choice` / `text` / any other field | — | no | Forwarded verbatim on the passthrough path; forwarded as far as it maps on the translation path. |
+| `store` | bool | no | **Defaults to `true`** (i.e. persisted by default — see warning 1). A non-boolean yields `400 invalid store`. |
+| `previous_response_id` | string | no | Continue from the given turn (see warning 2). |
+| `conversation` | string \| `{"id": "…"}` | no | Continue from the newest completed row in the conversation (see warning 2). |
+| `background` | bool | no | `true` runs the request asynchronously (see "Background execution" below). |
+
+**Stateful rules**
+
+| Case | Behaviour |
+|------|-----------|
+| `previous_response_id` and `conversation` both present | `400 previous_response_id and conversation are mutually exclusive`. |
+| `previous_response_id` names a row that is missing, **owned by another user**, or already pruned | `404 previous response not found`. All three cases share the **same code and wording**, leaving no gap for enumerating another user's response IDs. |
+| `conversation` names a conversation with no usable row | Treated as a new conversation (no error). |
+| The newest row in a conversation is `DELETE`d | That `conversation` falls back to the previous row; with no earlier row it is treated as a new conversation. |
+| The parent row's `items` snapshot is corrupt | Degraded to "no history" (the request does not fail). |
+| Site `-allow-response-storage=false` plus any stateful field | `400`: `previous_response_id`/`conversation` report `response storage is disabled on this gateway, previous_response_id and conversation are unavailable`; `background:true` reports `response storage is disabled on this gateway, background is unavailable`. |
+
+The history used for continuation is a **cumulative snapshot**: each row's snapshot = the previous
+history + this turn's `input` + this turn's output items, **excluding** `instructions`. Another
+data-plane key belonging to the same user may continue that user's rows (ownership is checked per
+user, not per key).
+
+**Upstream paths**
+
+The resolved model's `model_type` selects the path:
+
+| Upstream | Behaviour |
+|----------|-----------|
+| `openai-responses` | **Passthrough.** The request body is forwarded verbatim (only `model` is replaced with the upstream ID and `store:false` is **forced**) to `<url>/responses`. The upstream response and SSE stream are relayed as-is, rewriting only `id` / `model` in terminal events. |
+| `openai-completions` / `anthropic-messages` | **Translation.** The Responses request is converted to an OpenAI chat request (`instructions`/system → system message, input items → messages, `max_output_tokens` → `max_tokens`, `text.format` → `response_format`, flat `tools` → nested `tools`), and the chat response or SSE deltas are translated back into a Responses response / event sequence. |
+
+Both paths **force the upstream `store: false`** — the gateway never duplicates your data into the
+upstream vendor's storage. Upstream timeouts are the same on both: 5 minutes non-streaming,
+30 minutes streaming.
+
+**Response — non-streaming**
+
+`200` returns a Responses response object. `id` is always a gateway-generated `resp_` + 32 hex
+digits, never a passthrough of the upstream ID (the upstream ID is kept in the internal
+`upstream_id` field and is not exposed).
+
+```json
+{
+  "id": "resp_0f3a6c1d8b2e4a7c9d5f1b3e6a8c0d2e",
+  "object": "response",
+  "model": "glm-5.1",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+    }
+  ],
+  "usage": {
+    "input_tokens": 5,
+    "output_tokens": 2,
+    "total_tokens": 7,
+    "input_tokens_details": {"cached_tokens": 0},
+    "output_tokens_details": {"reasoning_tokens": 0}
+  }
+}
+```
+
+`status` values: `queued`, `in_progress`, `completed`, `incomplete`, `failed`, `cancelled`.
+An upstream `finish_reason=length` yields `incomplete` with
+`incomplete_details: {"reason": "max_output_tokens"}` — truncation is reported explicitly, never
+silently treated as success. `failed` carries `error: {"message": "…", "type": "background_error"}`;
+common `message` values include `failed to connect to LLM backend`,
+`upstream returned status <code>`, `invalid upstream response` and `internal server error`.
+
+**Response — streaming (`stream: true`)**
+
+`Content-Type: text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`. The
+translation path's event order is:
+
+```text
+response.created → response.in_progress
+  → response.output_item.added → response.output_text.delta*
+  → response.completed（or response.incomplete / response.failed）
+```
+
+The passthrough path relays the upstream's own Responses event stream as-is, rewriting only `id` /
+`model` in terminal events. Usage is recorded after the stream ends.
+
+**Background execution (`background: true`)**
+
+1. The gateway first completes authentication, model resolution and quota checks — **a rejected
+   request never leaves a row behind**; it then inserts a row with `status: queued` and **returns
+   that object immediately** (HTTP `200`).
+2. The background task advances the status to `in_progress` and finally settles on `completed` /
+   `failed` (or `cancelled` after a cancel).
+3. The client polls `GET /v1/responses/{id}`. The `POST` reply and the `GET` before the background
+   write-back are **the same row, byte-for-byte identical**.
+4. Total task time is bounded by `-response-background-timeout` (default `30m`).
+
+`background: true` requires persistence (the result needs somewhere to live): `store` is always
+`true`, and an explicit `store: false` returns `400 background requires store to be true` (a
+self-contradiction in the parameters, checked before the site switch).
+
+A process restart can leave in-flight rows nobody will ever advance: after startup the gateway
+marks `queued` / `in_progress` rows older than the background timeout as `failed` every minute,
+with `error.message` set to `interrupted by restart`. In a multi-instance deployment the background
+task runs on **the instance that received the request** and is not migrated; the status lives in the
+database, so polling another instance still observes the correct status.
+
+**Errors**
+
+| Status | `message` | Cause |
+|--------|-----------|-------|
+| 401 | `missing API key` / `invalid API key` | No `Authorization` header vs malformed, unknown or disabled. |
+| 400 | `failed to read request body` | The request body could not be read. |
+| 413 | `request body too large` | Body exceeds 1 MiB; rejected outright, never truncated. |
+| 400 | `invalid json body` | The body is not a JSON object. |
+| 400 | `invalid input` / `invalid tools` | `input` produced no message / `tools` is not an array (translation path). |
+| 400 | `invalid store` / `invalid background` | A field that must be boolean is not. |
+| 400 | `previous_response_id and conversation are mutually exclusive` | Both continuation fields present. |
+| 404 | `previous response not found` | Parent row missing, owned by another user, or pruned. |
+| 400 | `background requires store to be true` | `background:true` conflicts with an explicit `store:false`. |
+| 400 | `response storage is disabled on this gateway` | Storage disabled site-wide but the client explicitly asked for `store:true`. |
+| 400 | `response storage is disabled on this gateway, previous_response_id and conversation are unavailable` | Storage disabled site-wide but a continuation field was sent. |
+| 400 | `response storage is disabled on this gateway, background is unavailable` | Storage disabled site-wide but `background:true` was requested. |
+| 400 | `requested model is not bound to this key` / `no available model for this key` | Model resolution failed (same rules as `/v1/chat/completions`). |
+| 429 / 403 | The same quota messages as `/v1/chat/completions` | Quota check rejected the request; the status comes from `-quota-exceeded-status`, with `Retry-After`. |
+| 500 | `internal server error` | Internal error (including entropy failure while generating a `resp_` ID). |
+| 502 | `failed to connect to LLM backend` / `invalid upstream response` | Cannot reach the upstream / the upstream response cannot be parsed. |
+
+**Unsupported capabilities**
+
+- **Built-in tools** (`web_search`, `file_search`, `code_interpreter`, …): they have no counterpart
+  on the translation path and are **dropped**; only `function`-type tools are mapped.
+- **Responses-only structures**: `reasoning` items, `encrypted_content`, built-in tool outputs and
+  `annotations` are **lossy** (dropped) on the translation path. Use an `openai-responses` upstream
+  when these must survive end to end.
+- **Non-function tools and upstream-side `store`**: the upstream `store` is always forced to
+  `false`; the gateway does not let the upstream persist on your behalf.
+- Unknown request fields are forwarded verbatim on the passthrough path and ignored rather than
+  rejected on the translation path (forward compatibility).
+
+**Request example — stateless (explicitly not persisted)**
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.1",
+    "input": "hello",
+    "store": false
+  }'
+```
+
+**Request example — stateful continuation**
+
+```bash
+# Turn 1: store defaults to true, so this turn IS persisted
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "glm-5.1", "input": "hello"}'
+# → {"id": "resp_0f3a…", "status": "completed", …}
+
+# Turn 2: continue from the previous turn
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.1",
+    "input": "say it again",
+    "previous_response_id": "resp_0f3a…"
+  }'
+```
+
+### GET /v1/responses/{id}
+
+Reads one stored response. The returned object has the same shape as the `POST /v1/responses`
+reply.
+
+**Authentication:** `Authorization: Bearer sk-…`
+
+**Response:** `200` returns that row's response object — a `status: queued` object while the
+background task has not written back yet, and the terminal object (`completed` / `incomplete` /
+`failed` / `cancelled`) afterwards.
+
+```bash
+curl http://127.0.0.1:8080/v1/responses/resp_0f3a… \
+  -H "Authorization: Bearer <SK_TOKEN>"
+```
+
+**Errors**
+
+| Status | `message` |
+|--------|-----------|
+| 401 | `missing API key` / `invalid API key` |
+| 404 | `previous response not found` (missing / owned by another user / pruned — same code and wording) |
+| 500 | `internal server error` |
+
+### DELETE /v1/responses/{id}
+
+Deletes a finished response. **Only terminal** rows (`completed` / `failed` / `incomplete` /
+`cancelled`) may be deleted; an in-flight row must be `cancel`led first.
+
+**Authentication:** `Authorization: Bearer sk-…`
+
+**Response:** `200`
+
+```json
+{"id": "resp_0f3a…", "object": "response.deleted", "deleted": true}
+```
+
+Deleting the newest row of a conversation makes that `conversation` fall back to the previous row;
+with no earlier row it is treated as a new conversation. After deletion the ID can no longer be used
+as a `previous_response_id` (it returns 404).
+
+**Errors**
+
+| Status | `message` | Cause |
+|--------|-----------|-------|
+| 401 | `missing API key` / `invalid API key` | — |
+| 404 | `previous response not found` | Missing / owned by another user / pruned. |
+| 400 | `response is still running, cancel it before deleting` | The row is still `queued` / `in_progress`. |
+| 500 | `internal server error` | — |
+
+### POST /v1/responses/{id}/cancel
+
+Cancels an in-flight (`queued` / `in_progress`) response: the status becomes `cancelled` and its
+in-progress **upstream request is interrupted** (so compute and quota are not burned until the
+background timeout).
+
+**Authentication:** `Authorization: Bearer sk-…`
+
+**Response:** `200` returns the cancelled response object (`status: "cancelled"`).
+
+**A terminal row cannot be cancelled** and returns `400`, whose body is the error envelope **plus
+the current response object** — the client gets the result or the failure reason without issuing
+another GET:
+
+```json
+{
+  "error": {
+    "message": "response already finished and cannot be cancelled",
+    "type": "invalid_request_error"
+  },
+  "response": {
+    "id": "resp_0f3a…",
+    "object": "response",
+    "status": "completed",
+    "output": []
+  }
+}
+```
+
+When a cancel races a completion, **whichever arrives first wins**: if the terminal status is
+already written, the cancel simply returns that terminal status.
+
+**Errors**
+
+| Status | `message` | Cause |
+|--------|-----------|-------|
+| 401 | `missing API key` / `invalid API key` | — |
+| 404 | `previous response not found` | Missing / owned by another user / pruned. |
+| 400 | `response already finished and cannot be cancelled` | The row is terminal (the body also carries a `response` field). |
+| 500 | `internal server error` | — |
+
 ## 3. Admin plane
 
 All `/admin/*` routes require `Authorization: Bearer <ADMIN_TOKEN>` where the token belongs to a user with `role=admin`. Path `{id}` values must be positive integers; a non-numeric or zero value yields `400 invalid <model|credential|key|user|group|webhook> id`. A missing target yields `404 <model|credential|key|user|group|webhook> not found`.
@@ -313,7 +628,7 @@ Model objects returned by the API:
 | `model_name` | string | Display name. |
 | `url` | string | Upstream base URL. |
 | `credential_id` | integer | Credential referenced for the upstream key; `0` means none (use `api_key`). |
-| `model_type` | string | `openai-completions` or `anthropic-messages`. |
+| `model_type` | string | Upstream protocol: `openai-completions`, `anthropic-messages` or `openai-responses`. It also determines how `url` is joined (see "Upstream URL joining" in §6). |
 | `custom_http_headers` | object \| null | Allowed headers for passthrough (string values). |
 | `quota_day` | integer | Model-level daily token quota; `-1` means unlimited. |
 | `enabled` | bool | Disabled models are immediately unroutable. |
@@ -331,7 +646,7 @@ Model objects returned by the API:
 | `url` | string | **yes** | — | Must be non-empty after trimming. |
 | `api_key` | string | no | `""` | Upstream credential (used when `credential_id` is `0`). |
 | `credential_id` | integer | no | `0` | Must reference an existing credential, else `400 credential <id> not found`. |
-| `model_type` | string | **yes** | — | Must be `openai-completions` or `anthropic-messages`. |
+| `model_type` | string | **yes** | — | Must be `openai-completions`, `anthropic-messages` or `openai-responses`. |
 | `custom_http_headers` | object | no | none | JSON object of string values; `null` stores an empty value. |
 | `quota_day` | integer | no | `-1` | |
 | `enabled` | bool | no | `true` | |
@@ -1145,7 +1460,7 @@ Import existing data (groups, users, models, keys) in one call.
 | `models[].provider` / `model_id` | string | `model_id` required; `(provider, model_id)` is the key. |
 | `models[].url` | string | Required. |
 | `models[].api_key` | string | Optional. |
-| `models[].model_type` | string | `openai-completions` or `anthropic-messages`. |
+| `models[].model_type` | string | `openai-completions`, `anthropic-messages` or `openai-responses`. |
 | `models[].quota_day` / `enabled` | integer / bool | Optional. |
 | `keys[].token` | string | **Plaintext**; required. Hashed on import and never stored or echoed. |
 | `keys[].user` | string | Owner **name**; required and must resolve. |
@@ -1432,9 +1747,37 @@ See [docs/deploy.md](deploy.md) for the full runbook, including the warning to b
 
 | Topic | Detail |
 |-------|--------|
-| Upstream URL joining | `openai-completions` forwards to `<url>/chat/completions`; `anthropic-messages` forwards to `<url>/v1/messages`. Trailing slashes on `url` are trimmed. |
+| Upstream URL joining | See "Upstream URL joining" below. Trailing slashes on `url` are trimmed. |
 | SSRF policy | Outbound requests (upstreams and webhook receivers) are validated by default, which **rejects private/loopback addresses**. Local endpoints require `-allow-private-upstreams` (or `AIGATE_ALLOW_PRIVATE_UPSTREAMS=true`). |
 | Body size | 1 MiB per request; larger bodies are rejected (`413` on the data plane, `400` on the admin/user planes) — never truncated. |
 | Business timezone | Affects quota windows and usage/date bookkeeping only; it does not change API responses. |
 | Usage write path | Usage is written asynchronously; under extreme load a small number of entries can be dropped and the gateway is not the billing source of truth. |
 | Delivery retention | `webhook_deliveries` rows are kept indefinitely — there is no TTL, pruning, or table cap. |
+
+#### Upstream URL joining
+
+`ai_models.model_type` has three values, and their `url` semantics **differ from each other** —
+check them one by one when configuring a model:
+
+| `model_type` | `url` should be | The gateway actually requests |
+|--------------|-----------------|-------------------------------|
+| `openai-completions` | `<host>/v1` | `<url>/chat/completions` |
+| `openai-responses` | `<host>/v1` | `<url>/responses` |
+| `anthropic-messages` | `<host>` (**without** `/v1`) | `<url>/v1/messages` |
+
+Trailing slashes on `url` are trimmed. Hence `https://api.openai.com/v1` with `openai-responses`
+becomes `https://api.openai.com/v1/responses`, while the same `url` with `anthropic-messages`
+becomes `https://api.openai.com/v1/v1/messages` (wrong).
+
+An empty or unknown `model_type` is treated as `openai-completions` (for compatibility with
+historical data); set it explicitly when creating a model.
+
+#### Responses stateful options and retention
+
+| Topic | Detail |
+|-------|--------|
+| Storage switch | `-allow-response-storage` (`AIGATE_ALLOW_RESPONSE_STORAGE`, default `true`). Once `false`, every request is treated as `store:false` and `store:true` / `previous_response_id` / `conversation` / `background` all return `400`. |
+| Retention | `-response-retention-days` (`AIGATE_RESPONSE_RETENTION_DAYS`, default `7`): days to retain `response_states` rows; `0` = keep forever; must be between `0` and `36500`. The gateway prunes once at startup and then hourly. |
+| Background timeout | `-response-background-timeout` (`AIGATE_RESPONSE_BACKGROUND_TIMEOUT`, default `30m`): total run time of a `background:true` job; must be positive. |
+| What is stored | Each row keeps the rewritten cumulative `items` snapshot (excluding `instructions`) and the response body. **Conversation content is user data** — configure the switch and retention to match your compliance requirements. |
+| Expiry | Once a row is pruned its ID can no longer be used as `previous_response_id` (`404`); a `conversation` whose newest row it was falls back to the previous row. |

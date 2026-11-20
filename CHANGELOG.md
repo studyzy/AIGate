@@ -27,6 +27,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `go build` still works without Node thanks to a committed `.gitkeep`
   placeholder. `make build` now builds the frontend first, the Dockerfile gains
   a Node stage, and CI adds a webui job with Vitest and Playwright.
+- **Responses API ingress** — `POST /v1/responses` plus the lifecycle endpoints
+  `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` and
+  `POST /v1/responses/{id}/cancel`, authenticated by `sk-` data-plane keys.
+  Streaming and non-streaming, with gateway-issued `resp_` IDs, Responses SSE
+  events on the translation path, and a `response.deleted` reply for deletes.
+- **`openai-responses` upstream protocol** — a new `ai_models.model_type` value
+  alongside `openai-completions` and `anthropic-messages`, completing the 3×3
+  ingress × upstream matrix: `/v1/responses` reaches every upstream type
+  (passthrough for `openai-responses`, translation through chat completions
+  otherwise), `/v1/chat/completions` and `/v1/messages` reach
+  `openai-responses` upstreams through the provider adapter. All paths force
+  the upstream `store:false`; the URL is joined as `<url>/responses`, so `url`
+  must include `/v1` (unlike `anthropic-messages`, whose `url` is a bare host).
+- **Stateful responses** — `store`, `previous_response_id`, `conversation` and
+  `background` on `/v1/responses`, backed by a `response_states` table holding
+  the cumulative item snapshot. **`store` defaults to `true`**, so a request
+  that omits it is still persisted (7 days by default); `store:false` only
+  stops the current turn from being written and does **not** prevent the
+  gateway from reading a `previous_response_id`/`conversation` history.
+  `background:true` returns a `queued` object immediately and runs the job
+  asynchronously with cancel propagation to the upstream; rows abandoned by a
+  restart are marked `failed` (`interrupted by restart`).
+- **New configuration** — `-allow-response-storage` /
+  `AIGATE_ALLOW_RESPONSE_STORAGE` (default `true`; `false` disables all stateful
+  features and rejects an explicit `store:true` with `400` rather than silently
+  rewriting it), `-response-retention-days` /
+  `AIGATE_RESPONSE_RETENTION_DAYS` (default `7`, `0` = keep forever, `<= 36500`),
+  and `-response-background-timeout` / `AIGATE_RESPONSE_BACKGROUND_TIMEOUT`
+  (default `30m`, must be positive).
 
 ## [0.1.0] - 2026-10-02
 

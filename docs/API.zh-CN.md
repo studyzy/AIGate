@@ -305,6 +305,297 @@ curl http://127.0.0.1:8080/v1/models \
 | 401 | `missing API key` / `invalid API key` |
 | 500 | `internal server error` |
 
+### POST /v1/responses
+
+OpenAI Responses API 入站。把 Responses 请求转发给密钥绑定命中的上游模型：对
+`openai-responses` 上游直通，对 `openai-completions` / `anthropic-messages` 上游经 chat
+completions 转换。支持流式与非流式、文本、图片与函数工具调用，以及 `store` /
+`previous_response_id` / `conversation` / `background` 四项有状态能力。
+
+**认证：** `Authorization: Bearer sk-…`。错误统一使用本文件的 `ErrorResponse` 信封
+（**不是** Anthropic 信封），`code` 等于 HTTP 状态码。
+
+> ⚠️ **隐私警示一：`store` 缺省为 `true`——不传 `store` 也会落库。**
+>
+> OpenAI 语义下 `store` 的默认值是 `true`。因此**客户端完全不带 `store` 字段时，网关同样会把
+> 本轮对话正文写入数据库**，默认保留 7 天（`-response-retention-days`）。这与「只有显式要求
+> 才保存」的直觉相反。
+>
+> | 需求 | 做法 |
+> |------|------|
+> | 本轮不落库 | 请求里**显式**传 `"store": false`。 |
+> | 站点整体禁止落库 | 以 `-allow-response-storage=false`（或 `AIGATE_ALLOW_RESPONSE_STORAGE=false`）启动：所有请求按 `store:false` 处理，有状态能力整体不可用。 |
+> | 缩短保留期 | `-response-retention-days`（默认 `7`，`0` = 永不清理）。 |
+>
+> 站点关闭存储后，**显式**传 `"store": true` 会返回 `400 response storage is disabled on this
+> gateway`——网关明确拒绝，而不是静默改写为 `store:false` 让你以为数据存下了、实际没有。
+
+> ⚠️ **隐私警示二：`store: false` ≠ 不读库。**
+>
+> 只要请求带了 `previous_response_id` 或 `conversation`，网关**仍会读取**父行的历史内容，
+> 并把它前置拼进本次 `input` 发给上游。`store: false` 只表示「**本轮结果不再写入存储**」，
+> 它**不是**隐私开关：上一轮的正文依然会作为上下文被读出、发往上游。
+>
+> 要完全不碰历史，就既不要传 `previous_response_id` / `conversation`，又显式传
+> `"store": false`。
+
+**请求字段**
+
+请求体是一个 OpenAI Responses 对象。网关只读取并改写下列字段，其余字段在直通路径上原样转发。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `model` | string | 否 | 目标模型，解析规则与 `/v1/chat/completions` 完全一致（含 primary 回退与 `requested model is not bound to this key`）。 |
+| `input` | string \| array | **是** | 字符串，或 input item 数组。转换路径上若无法产出任何 chat 消息则 `400 invalid input`。 |
+| `instructions` | string | 否 | 系统提示。转换路径映射为 system 消息；**不写入**会话历史快照（避免续接时重复注入）。 |
+| `stream` | bool | 否 | 为 `true` 时走 SSE 流式。 |
+| `max_output_tokens` | integer | 否 | 当密钥 `max_tokens` 上限 `> 0` 时被截断至该上限。 |
+| `tools` | array | 否 | Responses 扁平工具数组；非数组返回 `400 invalid tools`。 |
+| `tool_choice` / `text` / 其他任意字段 | — | 否 | 直通路径原样转发；转换路径按可映射范围转发。 |
+| `store` | bool | 否 | **缺省 `true`**（即缺省落库，见上方警示一）。非布尔值返回 `400 invalid store`。 |
+| `previous_response_id` | string | 否 | 以前一轮为前缀续接（见上方警示二）。 |
+| `conversation` | string \| `{"id": "…"}` | 否 | 以会话中最新完成的一行为前缀续接（见上方警示二）。 |
+| `background` | bool | 否 | 为 `true` 时异步执行（见下文「后台执行」）。 |
+
+**有状态规则**
+
+| 情形 | 行为 |
+|------|------|
+| `previous_response_id` 与 `conversation` 同时出现 | `400 previous_response_id and conversation are mutually exclusive`。 |
+| `previous_response_id` 指向的行不存在、**不属于本用户**，或已被保留期清理 | `404 previous response not found`。三种情形**同码同文**，不给枚举他人响应 ID 留缝隙。 |
+| `conversation` 指定的会话尚无可用行 | 按新会话处理（不报错）。 |
+| 会话中最新一行被 `DELETE` 删除 | 该 `conversation` 回退到上一行；若无更早的行，则按新会话处理。 |
+| 父行 `items` 快照损坏 | 降级为「无历史」（不让整条请求失败）。 |
+| 站点 `-allow-response-storage=false` + 任何有状态字段 | `400`：`previous_response_id`/`conversation` 报 `response storage is disabled on this gateway, previous_response_id and conversation are unavailable`；`background:true` 报 `response storage is disabled on this gateway, background is unavailable`。 |
+
+续接用的历史是**累积快照**：每行的快照 = 上一次的历史 + 本轮 `input` + 本轮输出 items，**不含**
+`instructions`。同一用户的另一把数据面密钥可以续接本人的行（归属只按用户校验，不按密钥）。
+
+**上游路径**
+
+命中模型的 `model_type` 决定走哪条路径：
+
+| 上游 | 行为 |
+|------|------|
+| `openai-responses` | **直通。** 请求体原样转发（仅把 `model` 替换为上游 ID，并**强制** `store:false`）到 `<url>/responses`。上游响应与 SSE 流原样回传，只改写终态事件的 `id` / `model`。 |
+| `openai-completions` / `anthropic-messages` | **转换。** Responses 请求转换为 OpenAI chat 请求（`instructions`/system → system 消息、input items → messages、`max_output_tokens` → `max_tokens`、`text.format` → `response_format`、扁平 `tools` → 嵌套 `tools`），chat 响应或 SSE 增量再回译为 Responses 响应 / 事件序列。 |
+
+两条路径都**强制上游 `store: false`**——网关不会把数据同时写进上游厂商的存储。
+两条路径的上游超时一致：非流式 5 分钟，流式 30 分钟。
+
+**响应 —— 非流式**
+
+`200` 返回 Responses 响应对象。`id` 恒为网关生成的 `resp_` + 32 位十六进制，不直接透传上游
+ID（上游 ID 记在响应体内部的 `upstream_id` 字段，不对外暴露）。
+
+```json
+{
+  "id": "resp_0f3a6c1d8b2e4a7c9d5f1b3e6a8c0d2e",
+  "object": "response",
+  "model": "glm-5.1",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+    }
+  ],
+  "usage": {
+    "input_tokens": 5,
+    "output_tokens": 2,
+    "total_tokens": 7,
+    "input_tokens_details": {"cached_tokens": 0},
+    "output_tokens_details": {"reasoning_tokens": 0}
+  }
+}
+```
+
+`status` 取值：`queued`、`in_progress`、`completed`、`incomplete`、`failed`、`cancelled`。
+上游 `finish_reason=length` 时状态为 `incomplete`，并带
+`incomplete_details: {"reason": "max_output_tokens"}`——截断显式告知，不静默当作成功。
+`failed` 时带 `error: {"message": "…", "type": "background_error"}`，常见 `message` 有
+`failed to connect to LLM backend`、`upstream returned status <code>`、`invalid upstream response`、
+`internal server error`。
+
+**响应 —— 流式（`stream: true`）**
+
+`Content-Type: text/event-stream`，带 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`。
+转换路径的事件顺序为：
+
+```text
+response.created → response.in_progress
+  → response.output_item.added → response.output_text.delta*
+  → response.completed（或 response.incomplete / response.failed）
+```
+
+直通路径原样转发上游自身的 Responses 事件流，仅改写终态事件里的 `id` / `model`。用量在流结束后记录。
+
+**后台执行（`background: true`）**
+
+1. 网关先完成鉴权、模型解析与配额校验——**被拒的请求不会在库里留下行**；随后建一行
+   `status: queued`，**立即返回该对象**（HTTP `200`）。
+2. 后台任务把状态推进为 `in_progress`，最终落到 `completed` / `failed`（或取消后的 `cancelled`）。
+3. 客户端用 `GET /v1/responses/{id}` 轮询。`POST` 的回包与后台写回之前的 `GET` 是**同一行、
+   逐字相同**的内容。
+4. 任务总时长受 `-response-background-timeout` 限制（默认 `30m`）。
+
+`background: true` 要求落库（结果要有地方存放）：`store` 恒为 `true`，显式 `store: false` 返回
+`400 background requires store to be true`（这是参数自身的矛盾，先于站点开关判定）。
+
+进程重启会留下无人推进的在途行：启动后网关每分钟把「老过后台超时」的 `queued` / `in_progress`
+行标记为 `failed`，`error.message` 为 `interrupted by restart`。多实例部署下，后台任务由**接收
+请求的那个实例**执行，不迁移；状态在数据库中，因此轮询打到别的实例也能读到正确状态。
+
+**错误**
+
+| 状态码 | `message` | 原因 |
+|--------|-----------|------|
+| 401 | `missing API key` / `invalid API key` | 无 `Authorization` 头 vs 格式错误、未知或已禁用。 |
+| 400 | `failed to read request body` | 请求体读取失败。 |
+| 413 | `request body too large` | 请求体超过 1 MiB；直接拒绝，不截断。 |
+| 400 | `invalid json body` | 请求体不是 JSON 对象。 |
+| 400 | `invalid input` / `invalid tools` | `input` 无法产出任何消息 / `tools` 不是数组（转换路径）。 |
+| 400 | `invalid store` / `invalid background` | 字段不是布尔值。 |
+| 400 | `previous_response_id and conversation are mutually exclusive` | 两个续接字段同时出现。 |
+| 404 | `previous response not found` | 父行不存在、不属于本用户或已被清理。 |
+| 400 | `background requires store to be true` | `background:true` 与显式 `store:false` 冲突。 |
+| 400 | `response storage is disabled on this gateway` | 站点关闭存储，但客户端显式要求 `store:true`。 |
+| 400 | `response storage is disabled on this gateway, previous_response_id and conversation are unavailable` | 站点关闭存储，但带续接字段。 |
+| 400 | `response storage is disabled on this gateway, background is unavailable` | 站点关闭存储，但请求 `background:true`。 |
+| 400 | `requested model is not bound to this key` / `no available model for this key` | 模型解析失败（规则同 `/v1/chat/completions`）。 |
+| 429 / 403 | 同 `/v1/chat/completions` 的配额文案 | 配额校验拒绝；状态码取 `-quota-exceeded-status`，带 `Retry-After`。 |
+| 500 | `internal server error` | 内部错误（含无法生成 `resp_` ID 的熵源故障）。 |
+| 502 | `failed to connect to LLM backend` / `invalid upstream response` | 无法连接上游 / 上游响应无法解析。 |
+
+**不支持的能力**
+
+- **内置工具**（`web_search`、`file_search`、`code_interpreter` 等）：转换路径没有对应物，
+  **被丢弃**；只有 `function` 类型工具会被映射。
+- **Responses 专有结构**：`reasoning` item、`encrypted_content`、内置工具输出、`annotations`
+  等在转换路径上**有损**（被丢弃）。需要端到端保留这些结构时请使用 `openai-responses` 上游。
+- **非函数工具、上游侧 `store`**：上游 `store` 恒被强制为 `false`，网关不接受让上游代存。
+- 未知请求字段在直通路径原样转发，在转换路径被忽略而非拒绝（前向兼容）。
+
+**请求示例 —— 无状态（显式不落库）**
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.1",
+    "input": "hello",
+    "store": false
+  }'
+```
+
+**请求示例 —— 有状态续接**
+
+```bash
+# 第一轮：缺省 store=true，本轮会被保存
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "glm-5.1", "input": "你好"}'
+# → {"id": "resp_0f3a…", "status": "completed", …}
+
+# 第二轮：以上一轮为前缀续接
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer <SK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.1",
+    "input": "再说一遍",
+    "previous_response_id": "resp_0f3a…"
+  }'
+```
+
+### GET /v1/responses/{id}
+
+读取一行已存储的响应。返回的响应对象与 `POST /v1/responses` 同一形状。
+
+**认证：** `Authorization: Bearer sk-…`
+
+**响应**：`200` 返回该行的响应对象——后台任务尚未写回时是 `status: queued` 的对象，写回后是
+终态对象（`completed` / `incomplete` / `failed` / `cancelled`）。
+
+```bash
+curl http://127.0.0.1:8080/v1/responses/resp_0f3a… \
+  -H "Authorization: Bearer <SK_TOKEN>"
+```
+
+**错误**
+
+| 状态码 | `message` |
+|--------|-----------|
+| 401 | `missing API key` / `invalid API key` |
+| 404 | `previous response not found`（不存在 / 不属于本用户 / 已过期清理，三者同文同码） |
+| 500 | `internal server error` |
+
+### DELETE /v1/responses/{id}
+
+删除已完成的响应。**仅终态**（`completed` / `failed` / `incomplete` / `cancelled`）可删除；
+在途的行必须先 `cancel`。
+
+**认证：** `Authorization: Bearer sk-…`
+
+**响应**：`200`
+
+```json
+{"id": "resp_0f3a…", "object": "response.deleted", "deleted": true}
+```
+
+删除会话中最新一行会使该 `conversation` 回退到上一行；若无更早的行，按新会话处理。删除后该
+ID 不能再作为 `previous_response_id` 使用（返回 404）。
+
+**错误**
+
+| 状态码 | `message` | 原因 |
+|--------|-----------|------|
+| 401 | `missing API key` / `invalid API key` | — |
+| 404 | `previous response not found` | 不存在 / 不属于本用户 / 已过期清理。 |
+| 400 | `response is still running, cancel it before deleting` | 行仍在 `queued` / `in_progress`。 |
+| 500 | `internal server error` | — |
+
+### POST /v1/responses/{id}/cancel
+
+取消一个在途（`queued` / `in_progress`）的响应：状态置为 `cancelled`，**并中断其正在进行的上游
+请求**（避免算力与配额白烧到后台超时）。
+
+**认证：** `Authorization: Bearer sk-…`
+
+**响应**：`200` 返回取消后的响应对象（`status: "cancelled"`）。
+
+**已终态的行不可取消**，返回 `400`，响应体是错误信封**加上当前响应对象**——客户端不必再发一次
+GET 就能拿到结果或失败原因：
+
+```json
+{
+  "error": {
+    "message": "response already finished and cannot be cancelled",
+    "type": "invalid_request_error"
+  },
+  "response": {
+    "id": "resp_0f3a…",
+    "object": "response",
+    "status": "completed",
+    "output": []
+  }
+}
+```
+
+取消与完成竞争时**以先到者为准**：若终态已被写入，取消只会返回该终态。
+
+**错误**
+
+| 状态码 | `message` | 原因 |
+|--------|-----------|------|
+| 401 | `missing API key` / `invalid API key` | — |
+| 404 | `previous response not found` | 不存在 / 不属于本用户 / 已过期清理。 |
+| 400 | `response already finished and cannot be cancelled` | 行已终态（响应体另含 `response` 字段）。 |
+| 500 | `internal server error` | — |
+
 ## 3. 管理面
 
 所有 `/admin/*` 路由都要求 `Authorization: Bearer <ADMIN_TOKEN>`，且该 token 属于
@@ -326,7 +617,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `model_name` | string | 展示名。 |
 | `url` | string | 上游基础地址。 |
 | `credential_id` | integer | 引用的凭据 ID；`0` 表示未引用（使用 `api_key`）。 |
-| `model_type` | string | `openai-completions` 或 `anthropic-messages`。 |
+| `model_type` | string | 上游协议：`openai-completions`、`anthropic-messages` 或 `openai-responses`。同时决定 `url` 的拼接方式（见 §6「运行须知」）。 |
 | `custom_http_headers` | object \| null | 允许透传的头（字符串值）。 |
 | `quota_day` | integer | 模型级日 token 配额；`-1` 表示不限。 |
 | `enabled` | bool | 禁用后立即不可路由。 |
@@ -344,7 +635,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `url` | string | **是** | — | 去空白后必须非空。 |
 | `api_key` | string | 否 | `""` | 上游凭据（`credential_id` 为 `0` 时使用）。 |
 | `credential_id` | integer | 否 | `0` | 必须引用存在的凭据，否则 `400 credential <id> not found`。 |
-| `model_type` | string | **是** | — | 必须为 `openai-completions` 或 `anthropic-messages`。 |
+| `model_type` | string | **是** | — | 必须为 `openai-completions`、`anthropic-messages` 或 `openai-responses`。 |
 | `custom_http_headers` | object | 否 | 无 | 字符串值的 JSON 对象；`null` 存为空值。 |
 | `quota_day` | integer | 否 | `-1` | |
 | `enabled` | bool | 否 | `true` | |
@@ -1167,7 +1458,7 @@ curl -X POST http://127.0.0.1:8080/admin/webhooks \
 | `models[].provider` / `model_id` | string | `model_id` 必填；`(provider, model_id)` 为幂等键。 |
 | `models[].url` | string | 必填。 |
 | `models[].api_key` | string | 可选。 |
-| `models[].model_type` | string | `openai-completions` 或 `anthropic-messages`。 |
+| `models[].model_type` | string | `openai-completions`、`anthropic-messages` 或 `openai-responses`。 |
 | `models[].quota_day` / `enabled` | integer / bool | 可选。 |
 | `keys[].token` | string | **明文**，必填。导入时哈希，明文不落库、不回显。 |
 | `keys[].user` | string | 属主**名**，必填且必须可解析。 |
@@ -1471,9 +1762,35 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 
 | 事项 | 说明 |
 |------|------|
-| 上游 URL 拼接 | `openai-completions` 转发到 `<url>/chat/completions`；`anthropic-messages` 转发到 `<url>/v1/messages`。`url` 末尾的斜杠会被去除。 |
+| 上游 URL 拼接 | 见下方「上游 URL 拼接规则」。`url` 末尾的斜杠会被去除。 |
 | SSRF 策略 | 出站请求（上游与 webhook 接收端）默认校验，会**拒绝私网/回环地址**。本地端点需以 `-allow-private-upstreams`（或 `AIGATE_ALLOW_PRIVATE_UPSTREAMS=true`）启动。 |
 | 请求体大小 | 每请求 1 MiB；超限直接拒绝（数据面 413、管理面/用户面 400），不截断。 |
 | 业务时区 | 仅影响配额窗口与用量/日期记账口径，不改变 API 响应。 |
 | 用量写入 | 用量异步写入；极端负载下可能丢失少量条目，网关不承担计费真源职责。 |
 | 投递保留 | `webhook_deliveries` 记录无限保留——没有 TTL、裁剪或表容量上限。 |
+
+#### 上游 URL 拼接规则
+
+`ai_models.model_type` 有三种取值，三者的 `url` 语义**不一致**——配置模型时务必逐条对照：
+
+| `model_type` | `url` 应写成 | 网关实际请求的地址 |
+|--------------|--------------|--------------------|
+| `openai-completions` | `<host>/v1` | `<url>/chat/completions` |
+| `openai-responses` | `<host>/v1` | `<url>/responses` |
+| `anthropic-messages` | `<host>`（**不含** `/v1`） | `<url>/v1/messages` |
+
+`url` 末尾的斜杠会被去除。因此：
+`https://api.openai.com/v1` 配 `openai-responses` → `https://api.openai.com/v1/responses`；
+同一条 `url` 配 `anthropic-messages` → 变成 `https://api.openai.com/v1/v1/messages`（错误）。
+
+`model_type` 为空或未知取值时按 `openai-completions` 处理（兼容历史数据）；新建模型建议显式填写。
+
+#### Responses 有状态能力与保留期
+
+| 事项 | 说明 |
+|------|------|
+| 存储开关 | `-allow-response-storage`（`AIGATE_ALLOW_RESPONSE_STORAGE`，默认 `true`）。置 `false` 后全部请求按 `store:false` 处理，`store:true` / `previous_response_id` / `conversation` / `background` 一律 `400`。 |
+| 保留期 | `-response-retention-days`（`AIGATE_RESPONSE_RETENTION_DAYS`，默认 `7`）：`response_states` 行的保留天数；`0` = 永不清理；取值须在 `0`–`36500` 之间。网关启动时清理一次，此后每小时清理一次。 |
+| 后台超时 | `-response-background-timeout`（`AIGATE_RESPONSE_BACKGROUND_TIMEOUT`，默认 `30m`）：`background:true` 任务的总时长上限；须为正数。 |
+| 落库内容 | 每行保存请求体改写后的 `items` 累积快照（不含 `instructions`）与响应体。**对话正文属于用户数据**，请据保留期与合规要求配置开关。 |
+| 过期 | 行被清理后，其 ID 不能再作为 `previous_response_id`（`404`）；以它为最新行的 `conversation` 回退到上一行。 |

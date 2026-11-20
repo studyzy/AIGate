@@ -176,6 +176,170 @@ paths:
         '502':
           $ref: '#/components/responses/AnthropicUpstreamError'
 
+  /v1/responses:
+    post:
+      tags: [data-plane]
+      summary: OpenAI Responses 入站（有状态 / 无状态，流式 / 非流式）
+      description: |
+        OpenAI Responses API 原生入站。鉴权为 `Authorization: Bearer sk-…`；错误统一为
+        `ErrorResponse`（`code` 等于 HTTP 状态码，不是 Anthropic 信封）。
+
+        **有状态字段**
+
+        | 字段 | 类型 | 缺省 | 说明 |
+        |---|---|---|---|
+        | `store` | bool | `true` | 是否把本轮的累积对话落库。非布尔值 → 400 `invalid store`。 |
+        | `previous_response_id` | string | — | 以该 ID 的历史为前缀续接。行不存在或不属于本用户 → 404 `previous response not found`（两者逐字节一致）。 |
+        | `conversation` | string 或 `{"id": "..."}` | — | 以会话中最新完成的一行为前缀续接；会话尚无可用行时按新会话处理。与 `previous_response_id` 互斥 → 400 `previous_response_id and conversation are mutually exclusive`。 |
+        | `background` | bool | `false` | 为 `true` 时立即返回 `queued` 对象，后台执行；`store` 恒为 `true`，显式 `store: false` → 400 `background requires store to be true`。非布尔值 → 400 `invalid background`。 |
+
+        **重要——`store` 缺省为 `true`**：不传 `store` 的请求同样会把本轮正文落库
+        （默认保留 `-response-retention-days` 天，默认 7 天）。要避免落库必须显式传
+        `"store": false`，或由站点以 `-allow-response-storage=false` 整体关闭。
+
+        **重要——`store: false` 不等于「不读库」**：携带 `previous_response_id` 或
+        `conversation` 时，网关仍会读取父行的历史内容并拼进本次 `input` 发给上游；
+        `store: false` 只表示「本轮结果不再写入存储」，不是隐私开关。
+
+        **站点关闭存储（`-allow-response-storage=false`）**：所有请求按 `store: false` 处理，
+        但下列情形一律 400（明确拒绝而非静默改写）——显式 `store: true`
+        （`response storage is disabled on this gateway`）、带 `previous_response_id`/`conversation`
+        （`response storage is disabled on this gateway, previous_response_id and conversation are unavailable`）、
+        `background: true`（`response storage is disabled on this gateway, background is unavailable`）。
+
+        **上游路径**：命中模型 `model_type` 为 `openai-responses` 时直通上游 `/responses`
+        （原样响应与 SSE）；为 `openai-completions` / `anthropic-messages` 时经 chat completions
+        转换（有损：reasoning item、内置工具等 Responses 专有结构被丢弃）。两条路径都强制上游
+        `store: false`，并在响应中把 `id` 改写为网关生成的 `resp_` + 32 位十六进制。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesCreateRequest'
+      responses:
+        '200':
+          description: |
+            Responses 响应对象；流式时为 Responses SSE 事件序列。`background: true` 时返回
+            `status: queued` 的对象。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesObject'
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Responses SSE 事件序列（`event:` + `data:`）。转换路径发
+                  `response.created` → `response.in_progress` / `response.output_item.added` /
+                  `response.output_text.delta`* → `response.completed`（或 `response.incomplete` /
+                  `response.failed`）；直通路径原样转发上游事件，仅改写终态事件里的 `id` / `model`。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '429':
+          $ref: '#/components/responses/QuotaExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /v1/responses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResponseID'
+    get:
+      tags: [data-plane]
+      summary: 读取一个已存储的响应
+      description: |
+        返回该行的响应对象（与 `POST /v1/responses` 的回包同一形状）。行不存在、不属于本用户
+        或已过期被清理时，一律 404 `previous response not found`（同文同码，不泄露存在性）。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 响应对象
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesObject'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ResponseNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [data-plane]
+      summary: 删除一个已完成的响应
+      description: |
+        仅终态（`completed` / `failed` / `incomplete` / `cancelled`）可删。在途（`queued` /
+        `in_progress`）→ 400 `response is still running, cancel it before deleting`，需先取消。
+        删除会话中最新一行会使该 `conversation` 回退到上一行，或（无更早行时）按新会话处理。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 删除结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesDeleted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ResponseNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/responses/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ResponseID'
+    post:
+      tags: [data-plane]
+      summary: 取消一个在途的后台响应
+      description: |
+        `queued` / `in_progress` 的行被置为 `cancelled` 并中断其在途上游请求，返回取消后的
+        响应对象（`status: cancelled`）。
+
+        已终态的行返回 400，响应体是错误信封**加上当前响应对象**，便于客户端不必再发一次 GET：
+
+        ```json
+        {
+          "error": {"message": "response already finished and cannot be cancelled", "type": "invalid_request_error"},
+          "response": {"id": "resp_…", "object": "response", "status": "completed", "output": []}
+        }
+        ```
+
+        取消与完成竞争时以先到者为准：若终态已写入，取消只会返回该终态。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 取消后的响应对象
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesObject'
+        '400':
+          description: 行已终态，不可取消（响应体含当前响应对象）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesCancelConflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ResponseNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/models:
     get:
       tags: [admin]
@@ -1583,6 +1747,15 @@ components:
         二者并存时 `x-api-key` 优先。
 
   parameters:
+    ResponseID:
+      name: id
+      in: path
+      required: true
+      description: |
+        网关生成的响应 ID：`resp_` + 32 位十六进制（如 `resp_0f3a…`）。空值按「不存在」处理（404）。
+      schema:
+        type: string
+        pattern: '^resp_[0-9a-f]{32}$'
     PathID:
       name: id
       in: path
@@ -1763,6 +1936,22 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AnthropicErrorResponse'
+    BadGateway:
+      description: |
+        数据面：无法连接上游。`message` 为 `failed to connect to LLM backend`（细节只记服务端日志，
+        不回显），或 Responses 入口的 `invalid upstream response`（上游响应无法解析）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ResponseNotFound:
+      description: |
+        Responses 行不存在、不属于本用户，或已被保留期清理。三者同码同文
+        （`previous response not found`），用于防止枚举他人的响应 ID。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
 
   schemas:
     # ------------------------------------------------------------------
@@ -2022,7 +2211,15 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages]
+          enum: [openai-completions, anthropic-messages, openai-responses]
+          description: |
+            上游协议（`ai_models.model_type` 的单一事实源）。它同时决定 `url` 的拼接方式：
+
+            - `openai-completions`：转发到 `<url>/chat/completions`
+            - `openai-responses`：转发到 `<url>/responses`（`url` 须含 `/v1`）
+            - `anthropic-messages`：转发到 `<url>/v1/messages`（`url` 只到 host）
+
+            `url` 末尾的斜杠会被去除。未知或空值按 `openai-completions` 处理（兼容历史数据）。
         custom_http_headers:
           type: object
           nullable: true
@@ -2075,7 +2272,7 @@ components:
           description: 上游凭据（不会出现在任何响应中）
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages]
+          enum: [openai-completions, anthropic-messages, openai-responses]
         custom_http_headers:
           type: object
           nullable: true
@@ -2113,7 +2310,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages]
+          enum: [openai-completions, anthropic-messages, openai-responses]
         custom_http_headers:
           type: object
           nullable: true
@@ -2968,7 +3165,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages]
+          enum: [openai-completions, anthropic-messages, openai-responses]
         quota_day:
           type: integer
           default: -1
@@ -3054,3 +3251,149 @@ components:
           items:
             $ref: '#/components/schemas/ImportDetail'
       required: [dry_run, summary, details]
+
+    # ------------------------------------------------------------------
+    # 数据面：OpenAI Responses
+    # ------------------------------------------------------------------
+    ResponsesCreateRequest:
+      type: object
+      description: |
+        OpenAI Responses 请求体。网关只读取并改写下列字段，其余字段原样转发给上游
+        （直通路径）。转换路径会把 Responses 形状映射到 chat completions。
+      properties:
+        model:
+          type: string
+          description: 目标模型。解析规则与 `/v1/chat/completions` 一致；缺失或空串时使用绑定的 `primary`。
+        input:
+          description: 输入内容。字符串，或 input item 数组（`message` / `function_call_output` 等）。
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+        instructions:
+          type: string
+          description: 系统提示。转换路径映射为 system 消息；**不写入**会话历史快照。
+        stream:
+          type: boolean
+          default: false
+        max_output_tokens:
+          type: integer
+          description: 受密钥 `max_tokens` 上限截断（上限 `> 0` 时）。
+        tools:
+          type: array
+          description: 工具数组（Responses 扁平形态）。非数组 → 400 `invalid tools`。内置工具在转换路径上被丢弃。
+          items:
+            type: object
+        tool_choice:
+          description: 工具选择。
+        text:
+          type: object
+          description: 输出格式等文本配置（转换路径由 `response_format` 映射而来）。
+        store:
+          type: boolean
+          default: true
+          description: |
+            **缺省为 `true`**：不传该字段时本轮正文同样落库（默认保留 7 天）。
+            显式 `false` 表示本轮结果不写入存储；非布尔值 → 400 `invalid store`。
+        previous_response_id:
+          type: string
+          description: |
+            以前一轮的历史为前缀续接。**无论 `store` 取值如何，网关都会读取该行的历史内容**并
+            拼进本次 `input` 发给上游。与 `conversation` 互斥。行不存在或不属于本用户 → 404
+            `previous response not found`。
+        conversation:
+          description: |
+            以会话中最新完成的一行为前缀续接（同样会读取历史）。与 `previous_response_id` 互斥。
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                id:
+                  type: string
+              required: [id]
+        background:
+          type: boolean
+          default: false
+          description: |
+            为 `true` 时立即返回 `status: queued` 的对象，任务在后台执行（受
+            `-response-background-timeout` 限制）。`store` 恒为 `true`，显式 `store: false`
+            → 400 `background requires store to be true`。
+      required: [input]
+
+    ResponsesObject:
+      type: object
+      description: |
+        Responses 响应对象。`id` 恒为网关生成的 `resp_` + 32 位十六进制（不透传上游 ID）。
+        流式请求的 `text/event-stream` 响应中，各事件的 `data` 为同一对象的快照。
+      properties:
+        id:
+          type: string
+          pattern: '^resp_[0-9a-f]{32}$'
+        object:
+          type: string
+          enum: [response]
+        created:
+          type: integer
+          description: 创建时刻的 Unix 秒（`queued` 后台对象带此字段）。
+        model:
+          type: string
+          description: 客户端请求的模型名（回显，非上游 ID）。
+        status:
+          type: string
+          enum: [queued, in_progress, completed, incomplete, failed, cancelled]
+        output:
+          type: array
+          description: 输出 item 数组（`message` / `function_call` 等）。
+          items:
+            type: object
+        incomplete_details:
+          type: object
+          description: 仅 `status=incomplete` 时出现；`reason` 如 `max_output_tokens`。
+          properties:
+            reason:
+              type: string
+        error:
+          type: object
+          nullable: true
+          description: 仅 `status=failed` 时出现的失败原因。
+        store:
+          type: boolean
+          description: 本行是否落库。由后台方式创建的行恒为 `true`。
+        usage:
+          type: object
+          nullable: true
+          description: 用量（输入/输出 token 等）；`queued` 时为 `null`。
+      required: [id, object, status, output]
+
+    ResponsesDeleted:
+      type: object
+      description: 删除结果。
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          enum: [response.deleted]
+        deleted:
+          type: boolean
+          enum: [true]
+      required: [id, object, deleted]
+
+    ResponsesCancelConflict:
+      type: object
+      description: |
+        取消一个已终态的行时的 400 响应体：错误信封 + 当前响应对象（客户端不必再发一次 GET）。
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+              example: response already finished and cannot be cancelled
+            type:
+              type: string
+              example: invalid_request_error
+        response:
+          $ref: '#/components/schemas/ResponsesObject'
+      required: [error]
