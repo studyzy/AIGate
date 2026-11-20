@@ -1250,3 +1250,45 @@ func TestResponseBackground_DeletedRowSkipsUpstream(t *testing.T) {
 	}
 	assertStatus(t, e.getResponse(t, token, id), http.StatusNotFound)
 }
+
+// ---------------------------------------------------------------------------
+// 12. 流式中途出错仍要记账（I-5）
+// ---------------------------------------------------------------------------
+
+// TestResponsesIngress_StreamingErrorStillLogsUsage：转换路径的流式上游中途出错时，网关向客户端
+// 如实中断流，但**已产生的 token 必须记账**——「出错/取消不等于没产生成本」是配额与计费口径的
+// 既定要求，且要与后台路径、以及同函数里「上游状态码异常」分支的记账保持一致。
+//
+// 如何稳定制造上游流错误：先写一个正常的增量分片（客户端已收到事件 → 走「已写出后中断」分支），
+// 再写一行超过 Scanner 单行上限（1 MiB）的 `data:` 行 → provider 的 scanner 返回 ErrTooLong
+// → ChatCompletionStream 返回 error。仅「连接提前关闭」不会报错（那等价于正常的流结束，
+// 上游是否发终态事件由翻译器自行收尾），因此不能用来构造本条路径。
+func TestResponsesIngress_StreamingErrorStillLogsUsage(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// 超长行：超过 bufio.Scanner 的 1 MiB 上限 → "token too long"。
+		_, _ = w.Write([]byte("data: " + strings.Repeat("x", 2*1024*1024) + "\n\n"))
+		w.(http.Flusher).Flush()
+	})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi","stream":true}`)
+	assertStatus(t, resp, http.StatusOK)
+	stream := readBody(t, resp)
+	// 前提：确实进入了「已写出部分事件后中断」那一支（否则本用例测的是另一条路径）。
+	if !strings.Contains(stream, "response.output_text.delta") {
+		t.Fatalf("expected deltas before the upstream stream error, got:\n%s", stream)
+	}
+
+	row := responsesLatestUsage(t, e)
+	if row.StatusCode != http.StatusBadGateway {
+		t.Fatalf("usage status_code = %d, want 502 (upstream stream error)", row.StatusCode)
+	}
+	if row.APIKeyID == 0 {
+		t.Fatalf("usage row must be attributed to the calling key, got %+v", row)
+	}
+}

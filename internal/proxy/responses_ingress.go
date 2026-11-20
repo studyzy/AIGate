@@ -288,6 +288,11 @@ func (h *Handler) forwardViaChatConversion(
 		if err != nil {
 			// 错误细节只进日志，不回显给调用方（避免泄漏内网地址/拓扑）。
 			slog.Error("upstream stream error", "error", err, "model", resolved.ModelID)
+			// 两条错误分支都要记账：上游已经收下请求、通常也已产出 token，
+			// 「出错」不等于「没成本」（与取消/后台失败同一口径），漏记会让同步与后台
+			// 两条路径的配额/计费口径不一致。记账放在写出错误响应之前，与下面
+			// 「上游状态码异常」分支的形态一致。
+			h.logUsage(key, resolved, streamResultUsage(result), http.StatusBadGateway, start)
 			// 契约：先判 Wrote() 再 Finish()（顺序颠倒会让已落盘的 body 吃到 502）。
 			if !tw.Wrote() {
 				httpx.WriteError(w, http.StatusBadGateway, msgUpstreamConnect)
