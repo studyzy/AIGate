@@ -20,16 +20,17 @@ import (
 	"aigate/internal/client"
 )
 
-// webhooksCommands 返回 webhooks 资源的 6 条子命令。带 id 的命令把 ctx.ID
-// 格式化进路径，create/update 以 ctx.Data 作为请求体；deliveries 按
-// docs/openapi.yaml 只暴露 --page / --page-size 两个 query flag，其余命令
-// 的 argv 只允许为空。全部经 Exec 统一编排退出码与输出。
+// webhooksCommands 返回 webhooks 资源的 6 条子命令。带 id 的命令经 execIDRequest
+// 校验 --id 后把 ctx.ID 格式化进路径，create/update 以 ctx.Data 作为请求体；
+// deliveries 按 docs/openapi.yaml 只暴露 --page / --page-size 两个 query flag，
+// 其余命令的 argv 只允许为空。全部经 execRequest 统一解析 flag、编排退出码与
+// 输出（解析失败退出 2 不发请求）。
 func webhooksCommands() map[string]Command {
 	return map[string]Command{
 		"list": {
 			Usage: "webhooks list",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/webhooks",
@@ -39,8 +40,8 @@ func webhooksCommands() map[string]Command {
 		},
 		"get": {
 			Usage: "webhooks get",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/webhooks/" + strconv.FormatUint(ctx.ID, 10),
@@ -50,8 +51,8 @@ func webhooksCommands() map[string]Command {
 		},
 		"create": {
 			Usage: "webhooks create",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPost,
 					Path:   "/admin/webhooks",
@@ -61,8 +62,8 @@ func webhooksCommands() map[string]Command {
 		},
 		"update": {
 			Usage: "webhooks update",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPut,
 					Path:   "/admin/webhooks/" + strconv.FormatUint(ctx.ID, 10),
@@ -72,8 +73,8 @@ func webhooksCommands() map[string]Command {
 		},
 		"delete": {
 			Usage: "webhooks delete",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodDelete,
 					Path:   "/admin/webhooks/" + strconv.FormatUint(ctx.ID, 10),
@@ -84,12 +85,11 @@ func webhooksCommands() map[string]Command {
 		"deliveries": {
 			Usage: "webhooks deliveries",
 			Run: func(ctx *Context, argv []string) int {
-				return Exec(ctx, client.Request{
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/webhooks/" + strconv.FormatUint(ctx.ID, 10) + "/deliveries",
-					Query:  queryValues(argv, "page", "page-size"),
-				})
+				}, "page", "page-size")
 			},
 		},
 	}

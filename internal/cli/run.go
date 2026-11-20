@@ -58,6 +58,7 @@ type Context struct {
 	Stdout, Stderr io.Writer
 	Data           []byte // --data 解析后的请求体；nil 表示无 body
 	ID             uint64 // --id 解析后的正整数；0 表示命令未用
+	IDSet          bool   // --id 是否被显式给出；带 id 命令据此拒绝 /.../0 伪请求
 }
 
 // Command 描述一条子命令：Usage 为用法说明，Run 自行解析 argv 中的查询 flag
@@ -153,7 +154,7 @@ func Exec(ctx *Context, req client.Request) int {
 // 并把本地错误统一映射为退出码 2。
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
 	if ok, path := helpTokens(args); ok {
-		printHelpForPath(stdout, path)
+		printHelpForPath(stdout, stderr, path)
 		return 0
 	}
 
@@ -230,6 +231,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		Stderr: stderr,
 		Data:   data,
 		ID:     id,
+		IDSet:  g.idSet,
 	}
 	return cmd.Run(ctx, argv[2:])
 }
@@ -326,39 +328,53 @@ func helpTokens(args []string) (bool, []string) {
 
 // printHelpForPath 按位置 token 路径分层输出帮助；层级 0 复用原 printHelp，
 // 保证顶层资源列表与全局 flag 说明保持不变。
-func printHelpForPath(w io.Writer, path []string) {
+// 本地命令 version / health 在此特判：version --help 展示本地命令信息而非
+// 「unknown resource」，health --help 展示 health 帮助而非冗余的 health health
+// 列表；未知资源/命令的英文诊断写 stderr，绝不污染 stdout。
+func printHelpForPath(stdout, stderr io.Writer, path []string) {
+	if len(path) > 0 {
+		switch path[0] {
+		case "version":
+			fmt.Fprintln(stdout, "aigatectl version - print the aigatectl version (local command)")
+			return
+		case "health":
+			fmt.Fprintln(stdout, "aigatectl health - check gateway health via GET /healthz (no token required)")
+			return
+		}
+	}
 	switch {
 	case len(path) == 0:
-		printHelp(w)
+		printHelp(stdout)
 	case len(path) == 1:
-		printResourceHelp(w, path[0])
+		printResourceHelp(stdout, stderr, path[0])
 	default:
-		printCommandHelp(w, path[0], path[1])
+		printCommandHelp(stdout, stderr, path[0], path[1])
 	}
 }
 
-// printResourceHelp 列出某资源已注册的命令名（排序）；未知资源给出英文提示。
-func printResourceHelp(w io.Writer, resource string) {
+// printResourceHelp 列出某资源已注册的命令名（排序）；未知资源的英文诊断写 stderr。
+func printResourceHelp(stdout, stderr io.Writer, resource string) {
 	cmds, ok := registry[resource]
 	if !ok {
-		fmt.Fprintf(w, "aigatectl: unknown resource %q (see --help)\n", resource)
+		fmt.Fprintf(stderr, "aigatectl: unknown resource %q (see --help)\n", resource)
 		return
 	}
-	fmt.Fprintf(w, "aigatectl %s <command> [command flags]\n\n", resource)
-	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintf(stdout, "aigatectl %s <command> [command flags]\n\n", resource)
+	fmt.Fprintln(stdout, "Commands:")
 	for _, name := range commandNames(cmds) {
-		fmt.Fprintln(w, "  "+name)
+		fmt.Fprintln(stdout, "  "+name)
 	}
 }
 
 // printCommandHelp 输出某条命令的 Usage；self 子组命令的 Usage 逐行列出子动作。
-func printCommandHelp(w io.Writer, resource, name string) {
+// 未知命令的英文诊断写 stderr。
+func printCommandHelp(stdout, stderr io.Writer, resource, name string) {
 	cmd, ok := registry[resource][name]
 	if !ok {
-		fmt.Fprintf(w, "aigatectl: unknown command %q %q (see --help)\n", resource, name)
+		fmt.Fprintf(stderr, "aigatectl: unknown command %q %q (see --help)\n", resource, name)
 		return
 	}
-	fmt.Fprintln(w, cmd.Usage)
+	fmt.Fprintln(stdout, cmd.Usage)
 }
 
 // localError 把本地错误写 stderr（英文诊断）并返回退出码 2。

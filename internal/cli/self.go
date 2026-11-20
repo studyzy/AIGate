@@ -22,7 +22,8 @@ import (
 )
 
 // selfLeaf 是子组下一级动作的执行函数；argv 为该动作剩余的 query flag 片段。
-// 每个叶子都构造好 client.Request 后统一 return Exec(...)，不自行判状态或写输出。
+// 每个叶子都经 execRequest/execIDRequest 统一解析 flag、发请求，不自行判状态
+// 或写输出。
 type selfLeaf func(ctx *Context, argv []string) int
 
 // runSelfSubgroup 取 argv[0] 作为子动作并在 leaves 中查找，命中则把 argv[1:]
@@ -41,98 +42,90 @@ func runSelfSubgroup(ctx *Context, argv []string, group string, leaves map[strin
 
 // selfUsageLeaves 返回 self usage 子组的 3 条动作。路径逐字取自 /api/user/*；
 // query flag 集合取自 query-flags.md：summary 独有 --group-by，logs 独有
-// --page/--page-size，by-model 只有过滤项，三者互不越界。
+// --page/--page-size，by-model 只有过滤项，三者互不越界。全部经 execRequest
+// 统一解析 flag（解析失败退出 2 不发请求）。
 func selfUsageLeaves() map[string]selfLeaf {
 	return map[string]selfLeaf{
 		"summary": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/usage/summary",
-				Query:  queryValues(argv, "group-by", "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id"),
-			})
+			}, "group-by", "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id")
 		},
 		"logs": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/usage/logs",
-				Query:  queryValues(argv, "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id", "page", "page-size"),
-			})
+			}, "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id", "page", "page-size")
 		},
 		"by-model": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/usage/by-model",
-				Query:  queryValues(argv, "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id"),
-			})
+			}, "start", "end", "user-id", "group-id", "api-key-id", "ai-model-id")
 		},
 	}
 }
 
-// selfKeysLeaves 返回 self keys 子组的 7 条动作。带 id 的动作把 ctx.ID 格式化
-// 进路径；create/update 以 ctx.Data 为请求体；7 条均接受 --user-id，其中 usage
-// 只额外接受 --start/--end（不暴露 group-id / api-key-id / ai-model-id）。
+// selfKeysLeaves 返回 self keys 子组的 7 条动作。带 id 的动作经 execIDRequest
+// 校验 --id 后把 ctx.ID 格式化进路径；create/update 以 ctx.Data 为请求体；
+// 7 条均接受 --user-id，其中 usage 只额外接受 --start/--end（不暴露
+// group-id / api-key-id / ai-model-id）。list/create 不带 id，走 execRequest。
 func selfKeysLeaves() map[string]selfLeaf {
 	return map[string]selfLeaf{
 		"list": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/keys",
-				Query:  queryValues(argv, "user-id"),
-			})
+			}, "user-id")
 		},
 		"get": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execIDRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/keys/" + strconv.FormatUint(ctx.ID, 10),
-				Query:  queryValues(argv, "user-id"),
-			})
+			}, "user-id")
 		},
 		"create": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodPost,
 				Path:   "/api/user/keys",
-				Query:  queryValues(argv, "user-id"),
 				Body:   ctx.Data,
-			})
+			}, "user-id")
 		},
 		"update": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execIDRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodPut,
 				Path:   "/api/user/keys/" + strconv.FormatUint(ctx.ID, 10),
-				Query:  queryValues(argv, "user-id"),
 				Body:   ctx.Data,
-			})
+			}, "user-id")
 		},
 		"delete": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execIDRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodDelete,
 				Path:   "/api/user/keys/" + strconv.FormatUint(ctx.ID, 10),
-				Query:  queryValues(argv, "user-id"),
-			})
+			}, "user-id")
 		},
 		"rotate": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execIDRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodPost,
 				Path:   "/api/user/keys/" + strconv.FormatUint(ctx.ID, 10) + "/rotate",
-				Query:  queryValues(argv, "user-id"),
-			})
+			}, "user-id")
 		},
 		"usage": func(ctx *Context, argv []string) int {
-			return Exec(ctx, client.Request{
+			return execIDRequest(ctx, argv, client.Request{
 				Plane:  client.PlaneUser,
 				Method: http.MethodGet,
 				Path:   "/api/user/keys/" + strconv.FormatUint(ctx.ID, 10) + "/usage",
-				Query:  queryValues(argv, "start", "end", "user-id"),
-			})
+			}, "start", "end", "user-id")
 		},
 	}
 }
@@ -144,8 +137,8 @@ func selfCommands() map[string]Command {
 	return map[string]Command{
 		"me": {
 			Usage: "self me",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneUser,
 					Method: http.MethodGet,
 					Path:   "/api/user/me",
@@ -155,12 +148,11 @@ func selfCommands() map[string]Command {
 		"quota": {
 			Usage: "self quota",
 			Run: func(ctx *Context, argv []string) int {
-				return Exec(ctx, client.Request{
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneUser,
 					Method: http.MethodGet,
 					Path:   "/api/user/quota",
-					Query:  queryValues(argv, "user-id"),
-				})
+				}, "user-id")
 			},
 		},
 		"usage": {

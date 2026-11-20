@@ -21,14 +21,15 @@ import (
 )
 
 // modelsCommands 返回 models 资源的全部子命令。路径与管理面契约逐字取自
-// docs/openapi.yaml；带 id 的命令把 ctx.ID 格式化进路径，create/update 以
-// ctx.Data 作为请求体，其余命令不带请求体，全部经 Exec 统一编排退出码与输出。
+// docs/openapi.yaml；带 id 的命令经 execIDRequest 校验 --id 后把 ctx.ID 格式化
+// 进路径，create/update 以 ctx.Data 作为请求体，其余命令不带请求体；全部经
+// execRequest 统一解析 flag、编排退出码与输出。
 func modelsCommands() map[string]Command {
 	return map[string]Command{
 		"list": {
 			Usage: "models list",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/models",
@@ -38,8 +39,8 @@ func modelsCommands() map[string]Command {
 		},
 		"get": {
 			Usage: "models get",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/models/" + strconv.FormatUint(ctx.ID, 10),
@@ -49,8 +50,8 @@ func modelsCommands() map[string]Command {
 		},
 		"create": {
 			Usage: "models create",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPost,
 					Path:   "/admin/models",
@@ -60,8 +61,8 @@ func modelsCommands() map[string]Command {
 		},
 		"update": {
 			Usage: "models update",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPut,
 					Path:   "/admin/models/" + strconv.FormatUint(ctx.ID, 10),
@@ -71,8 +72,8 @@ func modelsCommands() map[string]Command {
 		},
 		"delete": {
 			Usage: "models delete",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodDelete,
 					Path:   "/admin/models/" + strconv.FormatUint(ctx.ID, 10),
@@ -82,8 +83,8 @@ func modelsCommands() map[string]Command {
 		},
 		"connectivity": {
 			Usage: "models connectivity",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execIDRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPost,
 					Path:   "/admin/models/" + strconv.FormatUint(ctx.ID, 10) + "/connectivity",

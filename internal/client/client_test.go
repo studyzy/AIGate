@@ -304,6 +304,16 @@ func TestDoBodyAndQuery(t *testing.T) {
 	})
 }
 
+// TestNewRejectsMissingHost 覆盖 M-3：scheme 合法但缺 host 的 URL 必须在 New
+// 本地报错，避免继续走到传输阶段把「no Host in request URL」误判成退出码 5。
+func TestNewRejectsMissingHost(t *testing.T) {
+	for _, base := range []string{"http://", "https://"} {
+		if _, err := client.New(testConfig(base)); err == nil {
+			t.Errorf("New(%q) 期望返回 error（缺 host），实际 nil", base)
+		}
+	}
+}
+
 // TestDoTransportError 覆盖传输失败时 Do 返回包装后的 error。
 func TestDoTransportError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

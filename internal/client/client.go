@@ -67,7 +67,9 @@ type Result struct {
 	Body       []byte
 }
 
-// New 校验 BaseURL 并构造 Client；scheme 非 http/https 时返回 error。
+// New 校验 BaseURL 并构造 Client；scheme 非 http/https 或缺 host 时返回 error。
+// 缺 host 的 URL（如 http://）必须本地拒绝，否则 Do 会把它当作传输错误误判成
+// 退出码 5，spec §7 要求非法 --url 一律本地报错退出 2。
 func New(cfg Config) (*Client, error) {
 	u, err := url.Parse(cfg.BaseURL)
 	if err != nil {
@@ -75,6 +77,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("invalid base URL scheme %q: must be http or https", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid base URL %q: missing host", cfg.BaseURL)
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),

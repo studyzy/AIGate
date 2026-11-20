@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`aigatectl` management CLI** — a second binary (`make build-cli` → `bin/aigatectl`)
-  that exposes all 52 admin/user-plane endpoints plus `GET /healthz` as discoverable
-  commands, built on a reusable `internal/client` HTTP client and covered by end-to-end
-  tests. Credentials are read only from the environment; see [docs/CLI.md](docs/CLI.md).
+  that exposes all 52 non-`/v1/*` endpoints (39 `/admin/*` + 12 `/api/user/*` +
+  `GET /healthz`) as discoverable commands, built on a reusable `internal/client` HTTP
+  client and covered by end-to-end tests. Credentials are read only from the environment;
+  see [docs/CLI.md](docs/CLI.md).
 
 ## [0.1.0] - 2026-10-02
 

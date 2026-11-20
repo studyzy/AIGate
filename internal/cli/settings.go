@@ -20,14 +20,14 @@ import (
 )
 
 // settingsCommands 返回 settings 资源的 2 条子命令。get 无请求体，
-// update 以 ctx.Data 作为请求体；二者都不带 query flag，全部经 Exec
-// 统一编排退出码与输出。
+// update 以 ctx.Data 作为请求体；二者都不带 query flag，全部经 execRequest
+// 统一解析 flag、编排退出码与输出（多余参数退出 2 不发请求）。
 func settingsCommands() map[string]Command {
 	return map[string]Command{
 		"get": {
 			Usage: "settings get",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodGet,
 					Path:   "/admin/settings",
@@ -37,8 +37,8 @@ func settingsCommands() map[string]Command {
 		},
 		"update": {
 			Usage: "settings update",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPut,
 					Path:   "/admin/settings",

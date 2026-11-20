@@ -20,14 +20,14 @@ import (
 )
 
 // importCommands 返回 import 资源的 1 条子命令。run 以 ctx.Data 作为请求体，
-// 单条失败仍返回 HTTP 200，成败只由 HTTP 状态判定，响应体原样输出；
-// 退出码与输出全部经 Exec 统一编排。
+// 单条失败仍返回 HTTP 200，成败只由 HTTP 状态判定，响应体原样输出；多余参数
+// 退出 2 不发请求，退出码与输出全部经 execRequest 统一编排。
 func importCommands() map[string]Command {
 	return map[string]Command{
 		"run": {
 			Usage: "import run",
-			Run: func(ctx *Context, _ []string) int {
-				return Exec(ctx, client.Request{
+			Run: func(ctx *Context, argv []string) int {
+				return execRequest(ctx, argv, client.Request{
 					Plane:  client.PlaneAdmin,
 					Method: http.MethodPost,
 					Path:   "/admin/import",
