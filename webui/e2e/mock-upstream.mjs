@@ -9,7 +9,14 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     if (req.method === "GET" && req.url === "/v1/models") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ data: [{ id: "mock-model-e2e", object: "model" }] }));
+      res.end(
+        JSON.stringify({
+          data: [
+            { id: "mock-model-e2e", object: "model" },
+            { id: "mock-model-fallback", object: "model" },
+          ],
+        }),
+      );
       return;
     }
     if (req.method === "POST" && req.url === "/v1/chat/completions") {

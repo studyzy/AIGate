@@ -235,7 +235,11 @@ function KeyDrawer({
           <div className="text-sm font-medium text-slate-700">{t("key.bindings")}</div>
           {form.bindings.map((binding, index) => (
             <div key={index} className="grid grid-cols-[1.6fr_0.8fr_auto] gap-2">
-              <Select value={binding.ai_model_id} onChange={(e) => setBinding(index, { ai_model_id: Number(e.target.value) })}>
+              <Select
+                value={binding.ai_model_id}
+                data-testid={"binding-model-" + index}
+                onChange={(e) => setBinding(index, { ai_model_id: Number(e.target.value) })}
+              >
                 <option value={0}>{t("common.select")}</option>
                 {(models.data?.models ?? []).map((m) => (
                   <option key={m.id} value={m.id}>
@@ -243,9 +247,13 @@ function KeyDrawer({
                   </option>
                 ))}
               </Select>
-              <Select value={binding.role} onChange={(e) => setBinding(index, { role: e.target.value })}>
+              <Select
+                value={binding.role}
+                data-testid={"binding-role-" + index}
+                onChange={(e) => setBinding(index, { role: e.target.value })}
+              >
                 <option value="primary">{t("key.role.primary")}</option>
-                <option value="secondary">{t("key.role.secondary")}</option>
+                <option value="fallback">{t("key.role.fallback")}</option>
               </Select>
               <Button
                 variant="ghost"

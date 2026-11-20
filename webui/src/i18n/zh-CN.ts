@@ -155,7 +155,7 @@ export const zhCN: Record<MessageKey, string> = {
   "key.addBinding": "添加绑定",
   "key.role": "角色",
   "key.role.primary": "主",
-  "key.role.secondary": "备",
+  "key.role.fallback": "备用",
   "key.rotate": "轮换",
   "key.rotateConfirm": "轮换该密钥？旧 token 立即失效。",
   "key.prefix": "前缀",

@@ -154,7 +154,7 @@ export const en = {
   "key.addBinding": "Add binding",
   "key.role": "Role",
   "key.role.primary": "Primary",
-  "key.role.secondary": "Secondary",
+  "key.role.fallback": "Fallback",
   "key.rotate": "Rotate",
   "key.rotateConfirm": "Rotate this key? The old token stops working immediately.",
   "key.prefix": "Prefix",

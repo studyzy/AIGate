@@ -15,6 +15,7 @@ test("guides an empty install to a working key", async ({ page }) => {
   await page.getByPlaceholder("sk-...").fill("sk-mock");
   await page.getByRole("button", { name: "Fetch models" }).click();
   await expect(page.getByRole("checkbox", { name: "mock-model-e2e" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "mock-model-fallback" })).toBeChecked();
   await page.getByRole("button", { name: "Save" }).click();
 
   const providerRow = page.getByText("openai", { exact: true }).first();
@@ -32,12 +33,17 @@ test("guides an empty install to a working key", async ({ page }) => {
   await expect(page.getByTestId("token-value")).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
 
+  // 主模型 + 备用模型：后端只认 primary / fallback，且必须恰好一个 primary。
   await page.getByRole("link", { name: "Keys" }).click();
   await page.getByRole("button", { name: "New key" }).click();
   await page.getByLabel("Name").fill("e2e-key");
   await page.getByLabel("User").selectOption({ label: "e2e-user" });
   await page.getByRole("button", { name: "Add binding" }).click();
-  await page.getByRole("combobox").nth(3).selectOption({ label: "mock-model-e2e" });
+  await page.getByTestId("binding-model-0").selectOption({ label: "mock-model-e2e" });
+  await page.getByTestId("binding-role-0").selectOption("primary");
+  await page.getByRole("button", { name: "Add binding" }).click();
+  await page.getByTestId("binding-model-1").selectOption({ label: "mock-model-fallback" });
+  await page.getByTestId("binding-role-1").selectOption("fallback");
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByTestId("token-value")).toBeVisible();
   await expect(page.getByTestId("token-value")).toHaveText(/^sk-/);
