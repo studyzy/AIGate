@@ -2,7 +2,6 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 
 import { AppLayout } from "./components/AppLayout";
 import { AuthGuard } from "./components/AuthGuard";
-import { CredentialsPage } from "./pages/credentials";
 import { DashboardPage } from "./pages/dashboard";
 import { GroupsPage } from "./pages/groups";
 import { ImportPage } from "./pages/import";
@@ -28,7 +27,6 @@ export const router = createBrowserRouter(
             { path: "usage", element: <UsagePage /> },
             { path: "providers", element: <ProvidersPage /> },
             { path: "models", element: <Navigate to="/providers" replace /> },
-            { path: "credentials", element: <CredentialsPage /> },
             { path: "keys", element: <KeysPage /> },
             { path: "users", element: <UsersPage /> },
             { path: "groups", element: <GroupsPage /> },

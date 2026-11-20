@@ -87,8 +87,8 @@ export function DashboardPage() {
           title={t("dashboard.emptyTitle")}
           description={t("dashboard.emptyHint")}
           action={
-            <Link className="text-sm font-medium text-blue-600 hover:underline" to="/credentials">
-              {t("credential.new")}
+            <Link className="text-sm font-medium text-blue-600 hover:underline" to="/providers">
+              {t("provider.new")}
             </Link>
           }
         />
