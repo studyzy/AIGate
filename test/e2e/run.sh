@@ -21,6 +21,7 @@ MYSQL_USER="${MYSQL_USER:-root}"
 
 INIT_SQL="${REPO_ROOT}/sql/init.sql"
 AIGATE_BIN="${REPO_ROOT}/bin/aigate"
+CLI_BIN="${REPO_ROOT}/bin/aigatectl"
 
 log() { printf '[e2e] %s\n' "$*"; }
 
@@ -51,7 +52,11 @@ log "Building gateway binary ${AIGATE_BIN} ..."
 mkdir -p "${REPO_ROOT}/bin"
 go build -o "${AIGATE_BIN}" ./cmd/aigate
 
+log "Building CLI binary ${CLI_BIN} ..."
+go build -o "${CLI_BIN}" ./cmd/aigatectl
+
 export AIGATE_E2E_BIN="${AIGATE_BIN}"
+export AIGATE_E2E_CLI_BIN="${CLI_BIN}"
 export AIGATE_E2E_DSN="${MYSQL_USER}@tcp(${MYSQL_HOST}:${MYSQL_PORT})/${DB_NAME}?charset=utf8mb4&parseTime=True&loc=Local"
 log "AIGATE_E2E_DSN=${AIGATE_E2E_DSN}"
 

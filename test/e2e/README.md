@@ -1,10 +1,11 @@
 # Tencent Cloud AIGate end-to-end smoke test
 
 `test/e2e/` is an end-to-end smoke suite that is independent from the unit tests: it drives the
-**real gateway binary** as a black box, starts in-process mock upstreams (both the OpenAI and the
-Anthropic protocol), covers five independent scenario groups
-(M1 forwarding smoke, M2 quota & usage, M3 Anthropic ingress, M3b gateway ops, M4 webhooks) over
-real HTTP, and connects directly to MySQL to assert that usage is persisted. It **does not import the `internal` package**, so it can be
+**real gateway binary** and the **real `aigatectl` CLI binary** as black boxes, starts in-process mock
+upstreams (both the OpenAI and the Anthropic protocol), covers the independent scenario groups below
+(M1 forwarding smoke, M2 quota & usage, M3 Anthropic ingress, M3b gateway ops, M4 webhooks,
+and the aigatectl CLI groups) over real HTTP, and connects directly to MySQL to
+assert that usage is persisted. It **does not import the `internal` package**, so it can be
 maintained independently while the gateway internals evolve in parallel.
 
 ## How to run
@@ -14,19 +15,31 @@ bash test/e2e/run.sh
 ```
 
 The script performs the following steps in order: reset the test database `aigate_e2e` ->
-import `sql/init.sql` from the repository root -> `go build -o bin/aigate ./cmd/aigate` -> export
-environment variables -> `go test -tags e2e -count=1 -v ./test/e2e/`. The script is repeatable: every
-run recreates the database and the binary.
+import `sql/init.sql` from the repository root -> `go build -o bin/aigate ./cmd/aigate` ->
+`go build -o bin/aigatectl ./cmd/aigatectl` -> export environment variables ->
+`go test -tags e2e -count=1 -v ./test/e2e/`. The script is repeatable: every
+run recreates the database and both binaries.
 
-To only re-run the test cases (database and binary already in place):
+To only re-run the test cases (database and binaries already in place):
 
 ```bash
 AIGATE_E2E_BIN="$(pwd)/bin/aigate" \
+AIGATE_E2E_CLI_BIN="$(pwd)/bin/aigatectl" \
 AIGATE_E2E_DSN='root@tcp(127.0.0.1:3306)/aigate_e2e?charset=utf8mb4&parseTime=True&loc=Local' \
 go test -tags e2e -count=1 -v ./test/e2e/
 ```
 
-If either `AIGATE_E2E_BIN` or `AIGATE_E2E_DSN` is missing, the test cases `t.Skip` (they do not fail).
+Three environment variables point the suite at the built artifacts:
+
+| Variable | Meaning |
+|----------|---------|
+| `AIGATE_E2E_BIN` | Path to the gateway binary (`bin/aigate`) |
+| `AIGATE_E2E_CLI_BIN` | Path to the management CLI binary (`bin/aigatectl`), used by `cli_test.go` |
+| `AIGATE_E2E_DSN` | MySQL DSN of the `aigate_e2e` database |
+
+By convention, if any of `AIGATE_E2E_BIN`, `AIGATE_E2E_CLI_BIN` or `AIGATE_E2E_DSN` is missing,
+the test cases call `t.Skip` (they do not fail), so the suite also compiles and runs cleanly in an
+environment without MySQL. The CLI group additionally checks `AIGATE_E2E_CLI_BIN` via `requireEnv`.
 
 ## Prerequisites
 
@@ -39,9 +52,10 @@ If either `AIGATE_E2E_BIN` or `AIGATE_E2E_DSN` is missing, the test cases `t.Ski
 
 ## Covered groups
 
-`e2e_test.go` contains five independent groups; run them all with
+`e2e_test.go` and `cli_test.go` contain the groups below; run them all with
 `go test -tags e2e -count=1 -v ./test/e2e/`. Each group starts its own gateway
-process against the shared test database.
+process against the shared test database; `cli_test.go` additionally drives the real
+`bin/aigatectl` binary against that gateway.
 
 | Group | Scope | Key assertions |
 |-------|-------|----------------|
@@ -50,6 +64,10 @@ process against the shared test database.
 | `TestE2E_M3_AnthropicIngress` | `/v1/messages` conversion (Anthropic to/from OpenAI) and native passthrough | Stream and non-stream event sequences; `cache_control` preserved on the passthrough path; persisted usage |
 | `TestE2E_M3b_GatewayOps` | Credentials (ciphertext at rest), import dry-run/idempotency, connectivity probes, self-service keys, key TTL lifecycle, model-deletion fallback promotion | `enc:v1:` ciphertext in the database; idempotent import; an expired key is rejected and records `expired_at`; the promoted fallback binding serves the next request |
 | `TestE2E_M4_Webhooks` | Subscription CRUD, signed delivery, event coverage, delivery records | The HMAC signature verifies; `request.completed` / `quota.exceeded` / `key.disabled` / `key.expired` are delivered; `key.expired` fires once per validity window; `GET .../deliveries` paginates |
+| `TestE2E_CLI_ClosedLoop` (`cli_test.go`) | Drive the real `aigatectl` binary through the 8-step closed loop: `health` → `models create` → `models list`/`get` → `users create` → `keys create` → data-plane forwarding → `self me`/`self keys list` → `keys rotate` | Every step exits 0 with JSON on stdout and empty stderr; the created model row exists in `ai_models` (direct MySQL query); the `sk-` token issued by the CLI really drives `/v1/chat/completions` and its usage lands in `llm_usage_logs`; the rotated-away token is rejected with 401 |
+| `TestE2E_CLI_ExitCodes` (`cli_test.go`) | One case per CLI exit code: 0 / 2 / 3 / 4 / 5 | Errors appear only on stderr and stdout is empty |
+| `TestE2E_CLI_SpecialSemantics` (`cli_test.go`) | `models connectivity` (`ok:false` but HTTP 200), `import run` (partial failure but HTTP 200), `usage export --format csv` | All still exit 0 with the body verbatim; CSV is raw text and is never JSON-decoded |
+
 ## Troubleshooting
 
 - **Port already in use**: the gateway listen port is a free loopback port allocated dynamically by
@@ -74,8 +92,8 @@ process against the shared test database.
 
 ## Notes
 
-- This suite only covers the M1 main flows (models / keys / forwarding / usage); quotas and the
-  user-facing API (M2) will be added later.
+- This suite is a black-box smoke test: the M1–M4 groups exercise the gateway over real HTTP, and
+  the CLI groups drive the real `aigatectl` binary against that same gateway.
 - The contract is defined by the interface frozen by the main owner; when you find a deviation
   between the implementation and the contract, flag it in `test/e2e/` first and sync with the main
   owner.

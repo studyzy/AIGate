@@ -1087,56 +1087,65 @@ func TestE2E_M2_QuotaAndUsage(t *testing.T) {
 		}
 
 		// 行级隔离：user 角色传他人 user_id 被忽略，仍只返回自己的记录。
-		st, b = doRequest(
-			t,
-			http.MethodGet,
-			gw.baseURL+"/api/user/usage/logs?user_id=999999&page_size=50",
-			userTok,
-			nil,
-		)
-		if st != http.StatusOK {
-			t.Fatalf("GET /api/user/usage/logs expected 200, got %d, response: %s", st, b)
-		}
+		// 用量为异步写入，且 ListUsageLogs 的 Count 与 Find 是两条独立 SQL：
+		// 必须轮询到 total 与 logs 数组一致且都达到 2 条，避免读到「total 落后于 rows」的中间态。
 		var logs struct {
 			Total int64 `json:"total"`
 			Logs  []struct {
 				UserID int64 `json:"user_id"`
 			} `json:"logs"`
 		}
-		if err := json.Unmarshal(b, &logs); err != nil {
-			t.Fatalf("failed to parse the user-facing log response: %v, response: %s", err, b)
-		}
-		if logs.Total < 2 {
-			t.Errorf("the user-facing logs should have at least 2 entries (total=%d)", logs.Total)
-		}
+		waitFor(t, "user-facing usage logs settle (total and rows agree)", usagePollTimeout, func() error {
+			st, b := doRequest(
+				t,
+				http.MethodGet,
+				gw.baseURL+"/api/user/usage/logs?user_id=999999&page_size=50",
+				userTok,
+				nil,
+			)
+			if st != http.StatusOK {
+				return fmt.Errorf("GET /api/user/usage/logs returned %d: %s", st, b)
+			}
+			if err := json.Unmarshal(b, &logs); err != nil {
+				return err
+			}
+			if logs.Total < 2 || int64(len(logs.Logs)) < 2 || logs.Total != int64(len(logs.Logs)) {
+				return fmt.Errorf("usage not settled yet (total=%d rows=%d)", logs.Total, len(logs.Logs))
+			}
+			return nil
+		})
 		for i, row := range logs.Logs {
 			if row.UserID != userID {
 				t.Errorf("the user-facing log entry[%d] contains another user's data, user_id=%d", i, row.UserID)
 			}
 		}
 
-		// 管理员可显式查询指定用户。
-		st, b = doRequest(
-			t,
-			http.MethodGet,
-			fmt.Sprintf("%s/api/user/usage/logs?user_id=%d&page_size=50", gw.baseURL, userID),
-			adminAuth,
-			nil,
-		)
-		if st != http.StatusOK {
-			t.Fatalf("the admin query for user logs expected 200, got %d, response: %s", st, b)
-		}
+		// 管理员可显式查询指定用户；同样等异步写入稳定后再断言。
 		var adminLogs struct {
 			Total int64 `json:"total"`
+			Logs  []struct {
+				UserID int64 `json:"user_id"`
+			} `json:"logs"`
 		}
-		if err := json.Unmarshal(b, &adminLogs); err != nil || adminLogs.Total < 2 {
-			t.Fatalf(
-				"the admin query should return >=2 logs for that user: %+v (err=%v), response: %s",
-				adminLogs,
-				err,
-				b,
+		waitFor(t, "admin usage logs for that user settle", usagePollTimeout, func() error {
+			st, b := doRequest(
+				t,
+				http.MethodGet,
+				fmt.Sprintf("%s/api/user/usage/logs?user_id=%d&page_size=50", gw.baseURL, userID),
+				adminAuth,
+				nil,
 			)
-		}
+			if st != http.StatusOK {
+				return fmt.Errorf("GET /api/user/usage/logs returned %d: %s", st, b)
+			}
+			if err := json.Unmarshal(b, &adminLogs); err != nil {
+				return err
+			}
+			if adminLogs.Total < 2 || int64(len(adminLogs.Logs)) < 2 || adminLogs.Total != int64(len(adminLogs.Logs)) {
+				return fmt.Errorf("usage not settled yet (total=%d rows=%d)", adminLogs.Total, len(adminLogs.Logs))
+			}
+			return nil
+		})
 
 		// by-model 固定按模型聚合。
 		st, b = doRequest(t, http.MethodGet, gw.baseURL+"/api/user/usage/by-model", userTok, nil)
