@@ -108,8 +108,21 @@ func (h *Handler) ResponseBackgroundTimeout() time.Duration {
 
 // startResponseBackground 为一条 background 请求落 queued 行，并启动后台 goroutine。
 //
-// 调用点在 handleResponses **写出 200 之前**：先建行再返回，客户端拿到 id 立刻 GET
-// 就不会 404（规格 §5.6 background 流程第 1 步）。
+// 【顺序保证 —— 改这里之前请先读完这一段】
+//
+// 建行**必须先于**启动后台 goroutine、**先于**回包（本函数在 handleResponses 写出 200 之前
+// 被调用）。这是「客户端拿到 queued 回包后立即 GET 必须能查到这一行、且不会 404」的前提
+// （规格 §5.6 background 流程第 1 步）。
+//
+// 该顺序由**代码结构**保证，不是由测试观测保证：「回包那一刻行是否存在」经由 HTTP 没有
+// 可观测点——客户端读到 EOF 时后台 goroutine 早已执行完建行，任何「回包后再查」的用例在
+// 「回包后建行」的改动下都会存活（实测矩阵见 task-9-report.md §Fix round 1 §3）。
+// 因此**不要**调整下面 CreateResponseState 与 `go h.runResponseBackground` 的相对顺序，
+// 也不要把它挪到回包之后：这类改动的正确锚点是结构本身，用例抓不住。
+//
+// 相关的行为断言（客户端可见口径）：
+//   - TestResponseBackground_ReturnsQueued：状态序列从 queued 开始，回包与随后 GET 逐字节相同；
+//   - TestResponseBackground_RowExistsBeforePostReturns：回包后行存在、GET 回包即该行快照。
 func (h *Handler) startResponseBackground(bg *responsesBackgroundRequest) error {
 	row := &model.ResponseState{
 		ID:                 bg.respID,
