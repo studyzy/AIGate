@@ -375,16 +375,36 @@ func extractRequestedModel(reqBody map[string]any) string {
 }
 
 // maxTokensChatFields 是 chat 协议的输出长度字段（缺少时以 max_tokens 注入上限）。
-var maxTokensChatFields = []string{"max_tokens", "max_completion_tokens"}
+// 用数组而非切片：包级变量不可被误改写。
+var maxTokensChatFields = [...]string{"max_tokens", "max_completion_tokens"}
 
 // maxTokensCappedFields 是全部受密钥上限压制的输出长度字段：
 // chat 协议的 max_tokens / max_completion_tokens，以及 Responses 协议的 max_output_tokens。
-var maxTokensCappedFields = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+var maxTokensCappedFields = [...]string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+// maxTokensFieldsProvided 报告请求是否在某组字段上给出了有效数值。
+//
+// 只有 float64 才算「有效数值」，与压制循环的判定一致：
+//   - JSON null 经 json.Unmarshal 得到 nil 但 key 保留，实质等同于「未提供」；
+//   - 字符串 "9999"、布尔 true 等非数值同样不构成上限（逐字约束：非数值忽略）。
+//
+// 三种情况都不算客户端自己给了上限，否则会留下「有字段、无上限、也不注入」的空窗，
+// 让上游收到无上限的输出预算。
+func maxTokensFieldsProvided(reqBody map[string]any, fields []string) bool {
+	for _, key := range fields {
+		if _, ok := reqBody[key].(float64); ok {
+			return true
+		}
+	}
+	return false
+}
 
 // enforceMaxTokens 对请求体的输出长度字段施加密钥上限（三个数据面入口共用）。
-// 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限；
-// 没有任何 chat 字段带有效数值时注入 max_tokens=上限——但请求里出现 max_output_tokens
-// 就不注入，避免 Responses 请求被塞入 chat 专有字段。同一请求体的各字段只会属于一种协议。
+// 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限。
+//
+// 注入规则：chat 字段与 max_output_tokens 都没有有效数值时注入 max_tokens=上限
+// （与既有 chat 语义一致，只保留一条注入路径）；请求里有 max_output_tokens 就改写它、
+// 不塞 chat 专有的 max_tokens，避免 Responses 请求被污染。同一请求体的各字段只会属于一种协议。
 func enforceMaxTokens(reqBody map[string]any, limit int) {
 	if limit <= 0 {
 		return
@@ -403,13 +423,14 @@ func enforceMaxTokens(reqBody map[string]any, limit int) {
 			reqBody[key] = float64(limit)
 		}
 	}
-	if _, ok := reqBody["max_output_tokens"]; ok {
+	if maxTokensFieldsProvided(reqBody, maxTokensChatFields[:]) ||
+		maxTokensFieldsProvided(reqBody, maxTokensCappedFields[:]) {
 		return
 	}
-	for _, key := range maxTokensChatFields {
-		if _, ok := reqBody[key].(float64); ok {
-			return
-		}
+	// 只写了 max_output_tokens（含 null / 非数值）：这是 Responses 请求，别注入 chat 专有字段。
+	if _, ok := reqBody["max_output_tokens"]; ok {
+		reqBody["max_output_tokens"] = float64(limit)
+		return
 	}
 	reqBody["max_tokens"] = float64(limit)
 }

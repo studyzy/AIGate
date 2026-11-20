@@ -235,6 +235,40 @@ func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 			absent:  []string{"max_completion_tokens"},
 			context: "两个字段各自按上限收敛、互不干扰",
 		},
+		{
+			// null 经 json.Unmarshal 得到 nil 但 key 保留，实质等于「没有有效上限」：
+			// 不能当作「客户端已给上限」而短路，否则上游收到无上限的输出预算。
+			// 仍是 Responses 请求，故注回 max_output_tokens，而不是塞 chat 专有的 max_tokens。
+			name:    "null counts as absent and injects a cap",
+			body:    `{"model":"mock-a","max_output_tokens":null,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 100},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "null 等同于未提供，且不得注入 chat 专有的 max_tokens",
+		},
+		{
+			// 非数值（字符串）同样没有有效上限：不压制（逐字约束：非数值忽略），但必须补上限。
+			// 与 chat 字段的 hasNumeric 语义对齐：只有「有效数值」才算客户端自己给了上限。
+			name:    "non-numeric output tokens count as absent and inject a cap",
+			body:    `{"model":"mock-a","max_output_tokens":"9999","messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 100},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "非数值不压制，但也不得让上游无上限",
+		},
+		{
+			name:    "boolean output tokens count as absent and inject a cap",
+			body:    `{"model":"mock-a","max_output_tokens":true,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 100},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "布尔同样不是有效上限",
+		},
+		{
+			// chat 侧既有语义不变：max_completion_tokens 非数值 → 注入 max_tokens。
+			name:    "non-numeric chat field still injects max_tokens",
+			body:    `{"model":"mock-a","max_completion_tokens":"9999","messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_tokens": 100},
+			absent:  []string{"max_output_tokens"},
+			context: "chat 字段的非数值同样不算有效上限",
+		},
 	}
 
 	for _, tc := range tests {
