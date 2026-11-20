@@ -181,3 +181,28 @@ CREATE TABLE IF NOT EXISTS `webhook_deliveries` (
     KEY `idx_webhook_deliveries_webhook_id` (`webhook_id`),
     KEY `idx_webhook_deliveries_created_at` (`created_at`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+-- Responses API session state: items is the accumulated conversation snapshot (complete input + output items),
+-- response_body is the full Responses JSON returned by GET /v1/responses/{id}. Rows are pruned by created_at.
+CREATE TABLE IF NOT EXISTS `response_states` (
+    `id`                   VARCHAR(64)     NOT NULL,
+    `conversation_id`      VARCHAR(64)     NOT NULL DEFAULT '',
+    `owner_user_id`        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    `owner_api_key_id`     BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    `request_model`        VARCHAR(191)    NOT NULL DEFAULT '',
+    `previous_response_id` VARCHAR(64)     NOT NULL DEFAULT '',
+    `status`               VARCHAR(16)     NOT NULL DEFAULT 'queued',
+    `items`                LONGTEXT        NOT NULL,
+    `response_body`        LONGTEXT        NOT NULL,
+    `input_tokens`         INT             NOT NULL DEFAULT 0,
+    `output_tokens`        INT             NOT NULL DEFAULT 0,
+    `total_tokens`         INT             NOT NULL DEFAULT 0,
+    `reasoning_tokens`     INT             NOT NULL DEFAULT 0,
+    `error`                TEXT            NOT NULL,
+    `created_at`           DATETIME(3)     NOT NULL,
+    `updated_at`           DATETIME(3)     NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_response_states_created_at` (`created_at`),
+    KEY `idx_response_states_owner` (`owner_user_id`, `owner_api_key_id`),
+    KEY `idx_response_states_conversation` (`conversation_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

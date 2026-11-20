@@ -107,6 +107,7 @@ func (s *Store) AutoMigrate() error {
 		&Credential{},
 		&Webhook{},
 		&WebhookDelivery{},
+		&ResponseState{},
 	)
 }
 
