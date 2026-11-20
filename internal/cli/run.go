@@ -43,6 +43,10 @@ const (
 // defaultTimeout 是未指定 --timeout 时的请求超时。
 const defaultTimeout = 30 * time.Second
 
+// DefaultBaseURL 是 AIGATE_URL 与 --url 都未指定时使用的网关根地址，
+// 与服务端默认监听地址（:8080）及 docs/CLI.md 声明的默认值一致。
+const DefaultBaseURL = "http://127.0.0.1:8080"
+
 // Version 是 CLI 版本号，与 cmd/aigate 的 Version 保持一致；
 // 供 cmd/aigatectl 复用，避免两处硬编码。
 const Version = "0.1.0"
@@ -163,12 +167,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return 0
 	}
 
-	baseURL := getenv("AIGATE_URL")
-	if g.urlSet {
-		baseURL = g.url
-	}
 	cfg := client.Config{
-		BaseURL:    baseURL,
+		BaseURL:    ResolveBaseURL(getenv, g.url, g.urlSet),
 		AdminToken: getenv("AIGATE_ADMIN_TOKEN"),
 		UserToken:  getenv("AIGATE_USER_TOKEN"),
 		Timeout:    defaultTimeout,
@@ -232,6 +232,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		ID:     id,
 	}
 	return cmd.Run(ctx, argv[2:])
+}
+
+// ResolveBaseURL 按 --url > AIGATE_URL > DefaultBaseURL 的优先级选出网关根地址。
+// 抽成纯函数便于表驱动测试：不读取进程环境、不发请求，getenv 由调用方注入。
+// urlSet 为 true 时即便 urlFlag 为空也尊重用户显式给出的值（非法 URL 仍由
+// client.New 本地报错退出 2），不回退到环境变量或默认值。
+func ResolveBaseURL(getenv func(string) string, urlFlag string, urlSet bool) string {
+	if urlSet {
+		return urlFlag
+	}
+	if u := getenv("AIGATE_URL"); u != "" {
+		return u
+	}
+	return DefaultBaseURL
 }
 
 // globals 是抽取出的四个全局 flag 及其「是否被指定」标记。

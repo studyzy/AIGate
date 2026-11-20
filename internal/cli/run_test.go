@@ -124,6 +124,102 @@ func TestParseID(t *testing.T) {
 	}
 }
 
+// TestResolveBaseURL 覆盖根地址解析的优先级：--url > AIGATE_URL > 默认值；
+// 并确认显式给出空 --url 时不回退，仍由 client.New 本地报错退出 2。
+func TestResolveBaseURL(t *testing.T) {
+	const envURL = "http://env.example:9000"
+	const flagURL = "http://flag.example:9001"
+	cases := []struct {
+		name    string
+		env     map[string]string
+		urlFlag string
+		urlSet  bool
+		want    string
+	}{
+		{
+			name: "env 有值",
+			env:  map[string]string{"AIGATE_URL": envURL},
+			want: envURL,
+		},
+		{
+			name:    "--url 覆盖 env",
+			env:     map[string]string{"AIGATE_URL": envURL},
+			urlFlag: flagURL,
+			urlSet:  true,
+			want:    flagURL,
+		},
+		{
+			name: "都空→默认",
+			env:  map[string]string{},
+			want: cli.DefaultBaseURL,
+		},
+		{
+			name:    "显式空 --url 不回退",
+			env:     map[string]string{"AIGATE_URL": envURL},
+			urlFlag: "",
+			urlSet:  true,
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(k string) string { return tc.env[k] }
+			if got := cli.ResolveBaseURL(getenv, tc.urlFlag, tc.urlSet); got != tc.want {
+				t.Fatalf("ResolveBaseURL() = %q, 期望 %q", got, tc.want)
+			}
+		})
+	}
+	if cli.DefaultBaseURL != "http://127.0.0.1:8080" {
+		t.Fatalf("DefaultBaseURL = %q, 期望 http://127.0.0.1:8080", cli.DefaultBaseURL)
+	}
+}
+
+// TestRunBaseURLSources 经 cli.Run 验证根地址确实按优先级送达客户端：env 有值 /
+// --url 覆盖 都命中动态端口的 httptest（不占用固定 8080）；两者都空时 client.New
+// 不再因空 URL 失败，命令继续走到分发阶段。
+func TestRunBaseURLSources(t *testing.T) {
+	srv, ch := newRecordingServer(t, http.StatusOK, []byte(`{"ok":true}`))
+
+	t.Run("env 有值", func(t *testing.T) {
+		env := defaultEnv()
+		env["AIGATE_URL"] = srv.URL
+		got := runCLIWithInput(t, strings.NewReader(""), env, "health")
+		if got.code != 0 {
+			t.Fatalf("code = %d, 期望 0 (stderr=%q)", got.code, got.stderr)
+		}
+		if rec := recvRecorded(t, ch); rec.path != "/healthz" {
+			t.Fatalf("请求路径 = %q, 期望 /healthz", rec.path)
+		}
+	})
+
+	t.Run("--url 覆盖 env", func(t *testing.T) {
+		env := defaultEnv()
+		env["AIGATE_URL"] = "http://127.0.0.1:1"
+		got := runCLIWithInput(t, strings.NewReader(""), env, "--url", srv.URL, "health")
+		if got.code != 0 {
+			t.Fatalf("code = %d, 期望 0 (stderr=%q)", got.code, got.stderr)
+		}
+		if rec := recvRecorded(t, ch); rec.path != "/healthz" {
+			t.Fatalf("请求路径 = %q, 期望 /healthz", rec.path)
+		}
+	})
+
+	// 不连固定 8080：用未知命令停在命令分发阶段，client.New 若仍拿到空 URL
+	// 会先报「invalid base URL scheme」；修复后应继续走到「unknown resource」。
+	t.Run("两者都空→默认地址", func(t *testing.T) {
+		got := runCLIWithInput(t, strings.NewReader(""), map[string]string{}, "nosuch", "cmd")
+		if got.code != 2 {
+			t.Fatalf("code = %d, 期望 2 (stderr=%q)", got.code, got.stderr)
+		}
+		if strings.Contains(got.stderr, "invalid base URL") {
+			t.Fatalf("根地址解析不应再报空 URL 错误：stderr=%q", got.stderr)
+		}
+		if !strings.Contains(got.stderr, "unknown resource") {
+			t.Fatalf("应继续到命令分发阶段：stderr=%q", got.stderr)
+		}
+	})
+}
+
 // TestRunLocalErrors 覆盖本地错误：非法 --id、未知命令、--data 读文件失败，
 // 均返回 2、stderr 含英文错误、且不发出任何 HTTP 请求。
 func TestRunLocalErrors(t *testing.T) {
