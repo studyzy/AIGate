@@ -49,6 +49,7 @@ func NewHandler(store *model.Store, usage *UsageWriter, quotaExceededStatus int)
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", h.handleAnthropicMessages)
+	mux.HandleFunc("POST /v1/responses", h.handleResponses)
 	mux.HandleFunc("GET /v1/models", h.handleModels)
 }
 
@@ -156,6 +157,33 @@ func (h *Handler) prepareForward(
 	key *model.APIKey,
 	reqBody map[string]any,
 ) (resolved *model.Resolved, body []byte, ok bool) {
+	// 解析模型 + 配额检查。
+	res, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
+	if !ok {
+		return nil, nil, false
+	}
+
+	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
+	enforceMaxTokens(reqBody, key.MaxTokens)
+	reqBody["model"] = res.ModelID
+	modifiedBody, err := json.Marshal(reqBody)
+	if err != nil {
+		h.writeIngressError(w, r, http.StatusInternalServerError, msgInvalidJSON)
+		return nil, nil, false
+	}
+	return res, modifiedBody, true
+}
+
+// resolveAndCheckQuota 只完成 prepareForward 的前半段：「模型解析 → 配额检查」；
+// 不做 max_tokens 压制与 body 重写。两段拆开是为了让 Responses 入口能先对
+// Responses 形态的 body 调 enforceMaxTokens（design §5.4.1 的顺序约束），
+// 之后再做 chat 转换。失败时已写出错误响应并返回 ok=false。
+func (h *Handler) resolveAndCheckQuota(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	reqBody map[string]any,
+) (*model.Resolved, bool) {
 	// 解析密钥绑定的目标模型（显式未绑定 → 400；未指定 → primary）。
 	reqModelName := extractRequestedModel(reqBody)
 	res, err := h.store.ResolveModelForKey(r.Context(), key, reqModelName)
@@ -171,24 +199,15 @@ func (h *Handler) prepareForward(
 			slog.Error("resolve model failed", "error", err, "key_id", key.ID)
 			h.writeIngressError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
-		return nil, nil, false
+		return nil, false
 	}
 
 	// 配额检查（全局 → 模型日配额 → 用户 → 密钥；首个超限即拒绝，带 Retry-After）。
 	if st := quota.CheckRequest(r.Context(), h.store, key, res, time.Now()); st.Exceeded {
 		h.writeIngressQuotaExceeded(w, r, key, res, st)
-		return nil, nil, false
+		return nil, false
 	}
-
-	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
-	enforceMaxTokens(reqBody, key.MaxTokens)
-	reqBody["model"] = res.ModelID
-	modifiedBody, err := json.Marshal(reqBody)
-	if err != nil {
-		h.writeIngressError(w, r, http.StatusInternalServerError, msgInvalidJSON)
-		return nil, nil, false
-	}
-	return res, modifiedBody, true
+	return res, true
 }
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
