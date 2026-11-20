@@ -3,12 +3,29 @@ import { useMemo, useState } from "react";
 
 import type { AIGateModel, ConnectivityResult, Credential, SecretItem } from "@/api/types";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
+import { QueryError } from "@/components/ui/QueryError";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, EmptyState, ErrorText, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 
 type ProviderGroup = { key: string; models: AIGateModel[] };
+
+// MAX_AUTO_SELECT 是「拉取模型」后默认勾选的上限：超过就一个都不勾，避免一次点出上百个请求。
+const MAX_AUTO_SELECT = 20;
+
+/** runBatch 串行执行并收集失败数：批量操作要能告诉调用方「几项没成功」，而不是静默半途而废。 */
+async function runBatch<T>(items: T[], fn: (item: T) => Promise<unknown>): Promise<number> {
+  let failed = 0;
+  for (const item of items) {
+    try {
+      await fn(item);
+    } catch {
+      failed += 1;
+    }
+  }
+  return failed;
+}
 type DiscoverResult = { ok: boolean; models?: string[]; error_kind?: string; message?: string };
 
 /** 厂商只是模型上的字符串字段，分组全部在前端按 provider 归并。 */
@@ -71,15 +88,19 @@ export function ProvidersPage() {
     });
 
   async function deleteModels(ids: number[]) {
-    for (const id of ids) await api("/admin/models/" + id, { method: "DELETE" });
+    const failed = await runBatch(ids, (id) => api("/admin/models/" + id, { method: "DELETE" }));
     await client.invalidateQueries({ queryKey: ["models"] });
     setDeletingModel(null);
     setDeletingProvider(null);
+    if (failed > 0) toast(t("provider.batchFailed", { failed, total: ids.length }));
   }
 
   async function setEnabledAll(ids: number[], enabled: boolean) {
-    for (const id of ids) await api("/admin/models/" + id, { method: "PUT", body: JSON.stringify({ enabled }) });
+    const failed = await runBatch(ids, (id) =>
+      api("/admin/models/" + id, { method: "PUT", body: JSON.stringify({ enabled }) }),
+    );
     await client.invalidateQueries({ queryKey: ["models"] });
+    if (failed > 0) toast(t("provider.batchFailed", { failed, total: ids.length }));
   }
 
   async function test(id: number) {
@@ -114,13 +135,21 @@ export function ProvidersPage() {
         }
       />
 
-      {loading ? (
+      {models.isError || credentials.isError ? (
+        <QueryError
+          error={models.error ?? credentials.error}
+          onRetry={() => {
+            void models.refetch();
+            void credentials.refetch();
+          }}
+        />
+      ) : loading ? (
         <Spinner label={t("common.loading")} />
       ) : visible.length === 0 ? (
         <EmptyState title={t("provider.empty")} description={t("provider.emptyHint")} />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-          <div className="grid grid-cols-[minmax(220px,1.2fr)_80px_minmax(160px,1fr)_minmax(200px,1fr)_160px] items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <div className="grid min-w-[840px] grid-cols-[minmax(220px,1.2fr)_80px_minmax(160px,1fr)_minmax(200px,1fr)_160px] items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-wide text-slate-500">
             <div>{t("provider.name")}</div>
             <div>{t("provider.models")}</div>
             <div>{t("provider.credential")}</div>
@@ -136,28 +165,30 @@ export function ProvidersPage() {
             const endpoints = [...new Set(group.models.map((m) => m.url).filter(Boolean))];
             return (
               <div key={group.key} className="border-b border-slate-100 last:border-b-0">
-                <div
-                  className="grid cursor-pointer grid-cols-[minmax(220px,1.2fr)_80px_minmax(160px,1fr)_minmax(200px,1fr)_160px] items-center gap-3 px-4 py-2.5 hover:bg-slate-50"
-                  onClick={() => toggleExpanded(group.key)}
-                >
-                  <div className="flex min-w-0 items-center gap-3">
+                <div className="grid min-w-[840px] grid-cols-[minmax(220px,1.2fr)_80px_minmax(160px,1fr)_minmax(200px,1fr)_160px] items-center gap-3 px-4 py-2.5 hover:bg-slate-50">
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => toggleExpanded(group.key)}
+                    className="flex min-w-0 items-center gap-3 rounded-md text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+                  >
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-900 text-[11px] font-semibold text-white">
                       {providerInitials(group.key || "?")}
                     </span>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{group.key || t("provider.unnamed")}</div>
-                      <div className="truncate text-xs text-slate-500">
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium">{group.key || t("provider.unnamed")}</span>
+                      <span className="block truncate text-xs text-slate-500">
                         {[...new Set(group.models.map((m) => m.model_type))].join(", ")}
-                      </div>
-                    </div>
-                  </div>
+                      </span>
+                    </span>
+                  </button>
                   <div><Badge>{group.models.length}</Badge></div>
                   <div className="truncate text-xs text-slate-600">{credentialNames.join(", ") || "—"}</div>
                   <div className="truncate font-mono text-xs text-slate-500" title={endpoints.join("\n")}>
                     {endpoints[0] ?? "—"}
                     {endpoints.length > 1 ? " +" + (endpoints.length - 1) : ""}
                   </div>
-                  <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-end gap-1">
                     <button
                       type="button"
                       className="rounded-md px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
@@ -178,7 +209,7 @@ export function ProvidersPage() {
                       {group.models.map((model) => (
                         <div
                           key={model.id}
-                          className="grid grid-cols-[minmax(200px,1.4fr)_minmax(120px,1fr)_80px_minmax(120px,0.8fr)_210px] items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm"
+                          className="grid min-w-[760px] grid-cols-[minmax(200px,1.4fr)_minmax(120px,1fr)_80px_minmax(120px,0.8fr)_210px] items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm"
                         >
                           <div className="min-w-0">
                             <div className="truncate font-medium">{model.model_name}</div>
@@ -259,6 +290,9 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
   const [name, setName] = useState(group?.key ?? "");
   const [url, setUrl] = useState(first?.url ?? "");
   const [modelType, setModelType] = useState(first?.model_type || "openai-completions");
+  // url/type 只有被真正编辑过才回写：同组模型可能有不同端点，改名不该把它们压平。
+  const [urlDirty, setUrlDirty] = useState(false);
+  const [typeDirty, setTypeDirty] = useState(false);
   const [credentialName, setCredentialName] = useState("");
   const [keys, setKeys] = useState<SecretItem[]>([{ key: "api_key", value: "", location: "header" }]);
   const [fetched, setFetched] = useState<string[] | null>(null);
@@ -280,6 +314,8 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
   }
 
   const existingIDs = new Set((group?.models ?? []).map((m) => m.model_id));
+  const candidateIDs = (fetched ?? []).filter((id) => !existingIDs.has(id));
+  const distinctURLCount = new Set((group?.models ?? []).map((m) => m.url)).size;
 
   async function fetchModels() {
     setError("");
@@ -300,8 +336,10 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
         return;
       }
       const list = res.models ?? [];
+      const candidates = list.filter((id) => !existingIDs.has(id));
+      // 上游常一次返回上百个模型；超过上限就默认不勾，让用户显式选择，避免一次点击创建大量模型。
       setFetched(list);
-      setSelected(new Set(list.filter((id) => !existingIDs.has(id))));
+      setSelected(new Set(candidates.length > MAX_AUTO_SELECT ? [] : candidates));
       toast(t("provider.fetched", { count: list.length }), "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -335,23 +373,20 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
         }
       }
 
-      for (const model of group?.models ?? []) {
-        await api("/admin/models/" + model.id, {
-          method: "PUT",
-          body: JSON.stringify({
-            provider: name,
-            url,
-            model_type: modelType,
-            ...(targetCredential > 0 ? { credential_id: targetCredential } : {}),
-          }),
-        });
-      }
+      const patch: Record<string, unknown> = { provider: name };
+      if (!group || urlDirty) patch.url = url;
+      if (!group || typeDirty) patch.model_type = modelType;
+      if (targetCredential > 0) patch.credential_id = targetCredential;
+
+      const failedUpdates = await runBatch(group?.models ?? [], (model) =>
+        api("/admin/models/" + model.id, { method: "PUT", body: JSON.stringify(patch) }),
+      );
 
       const toCreate = [...(fetched ?? []).filter((id) => selected.has(id)), manual.trim()].filter(
         (id) => id !== "" && !existingIDs.has(id),
       );
-      for (const id of toCreate) {
-        await api("/admin/models", {
+      const failedCreates = await runBatch(toCreate, (id) =>
+        api("/admin/models", {
           method: "POST",
           body: JSON.stringify({
             provider: name,
@@ -362,11 +397,17 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
             enabled: true,
             ...(targetCredential > 0 ? { credential_id: targetCredential } : {}),
           }),
-        });
-      }
+        }),
+      );
 
       await client.invalidateQueries({ queryKey: ["models"] });
       await client.invalidateQueries({ queryKey: ["credentials"] });
+
+      const failed = failedUpdates + failedCreates;
+      if (failed > 0) {
+        setError(t("provider.batchFailed", { failed, total: (group?.models.length ?? 0) + toCreate.length }));
+        return;
+      }
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -400,10 +441,26 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
           <Input value={name} onChange={(e) => setName(e.target.value)} data-testid="provider-input" />
         </Field>
         <Field label={t("provider.endpoint")}>
-          <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
+          <Input
+            value={url}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setUrlDirty(true);
+            }}
+            placeholder="https://api.openai.com/v1"
+          />
         </Field>
+        {group && distinctURLCount > 1 && !urlDirty ? (
+          <p className="-mt-1 text-xs text-amber-600">{t("provider.multiEndpoint", { count: distinctURLCount })}</p>
+        ) : null}
         <Field label={t("model.type")}>
-          <Select value={modelType} onChange={(e) => setModelType(e.target.value)}>
+          <Select
+            value={modelType}
+            onChange={(e) => {
+              setModelType(e.target.value);
+              setTypeDirty(true);
+            }}
+          >
             <option value="openai-completions">openai-completions</option>
             <option value="anthropic-messages">anthropic-messages</option>
           </Select>
@@ -454,6 +511,9 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
         {fetched ? (
           <div className="rounded-lg border border-slate-200 p-3">
             <div className="mb-2 text-xs font-medium text-slate-500">{t("provider.modelsToAdd")}</div>
+            {candidateIDs.length > MAX_AUTO_SELECT ? (
+              <p className="mb-2 text-xs text-amber-600">{t("provider.tooManyHint", { count: candidateIDs.length })}</p>
+            ) : null}
             <div className="max-h-56 space-y-1 overflow-y-auto">
               {fetched.map((id) => {
                 const exists = existingIDs.has(id);
