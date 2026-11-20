@@ -15,7 +15,7 @@ export function Button({
   return (
     <button
       type="button"
-      className={clsx("rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50", styles, className)}
+      className={clsx("whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50", styles, className)}
       {...props}
     />
   );

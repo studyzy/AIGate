@@ -106,7 +106,9 @@ export function ProvidersPage() {
         title={t("provider.title")}
         actions={
           <>
-            <Input className="w-64" placeholder={t("provider.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            <span className="w-64">
+              <Input placeholder={t("provider.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            </span>
             <Button onClick={() => setCreating(true)}>{t("provider.new")}</Button>
           </>
         }
