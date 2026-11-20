@@ -1374,3 +1374,40 @@ func TestResponsesStreamTranslator_FinishKeepsWroteFromDelta(t *testing.T) {
 		t.Fatalf("last event = %q, want response.completed", names[len(names)-1])
 	}
 }
+
+// TestResponsesRequestToChat_InvalidTools（复审 Important 1）断言 tools 存在且非 null、
+// 但不是数组时报错，而不是静默丢弃后让 tool_choice 单独透传（部分上游会 400）。
+func TestResponsesRequestToChat_InvalidTools(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"tools 是对象", `{"model":"m","input":"hi","tools":{"type":"x"},"tool_choice":"auto"}`},
+		{"tools 是字符串", `{"model":"m","input":"hi","tools":"oops"}`},
+		{"tools 是数字", `{"model":"m","input":"hi","tools":42}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := responsesRequestToChat([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("responsesRequestToChat(%s) = %v, want an error", tc.body, out)
+			}
+			if !strings.Contains(err.Error(), "invalid tools") {
+				t.Fatalf("error = %q, want it to mention \"invalid tools\"", err.Error())
+			}
+		})
+	}
+}
+
+// TestResponsesRequestToChat_ToolsNullOrAbsent 断言 tools 缺失或为 null 时不报错也不写入。
+func TestResponsesRequestToChat_ToolsNullOrAbsent(t *testing.T) {
+	for _, body := range []string{`{"model":"m","input":"hi"}`, `{"model":"m","input":"hi","tools":null}`} {
+		out, err := responsesRequestToChat([]byte(body))
+		if err != nil {
+			t.Fatalf("responsesRequestToChat(%s): unexpected error: %v", body, err)
+		}
+		if _, exists := out["tools"]; exists {
+			t.Fatalf("responsesRequestToChat(%s): tools = %#v, want it absent", body, out["tools"])
+		}
+	}
+}

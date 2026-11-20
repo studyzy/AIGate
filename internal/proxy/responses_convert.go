@@ -103,11 +103,14 @@ func responsesRequestToChat(body []byte) (map[string]any, error) {
 		}
 	}
 	// 扁平 tool → 嵌套 {type:function, function:{...}}。
-	// 显式传入的 tools（含空数组）原样保留：部分上游见到 tool_choice 却没有 tools 会 400。
+	// tools：显式传入的数组（含空数组）原样保留——部分上游见到 tool_choice 却没有 tools 会 400。
+	// 存在但非数组（对象/字符串/数字等）是客户端错误：静默丢弃同样会造出
+	// 「tool_choice 有值、tools 缺失」的组合，因此与 invalid input 一样直接拒绝。
 	if rawTools, exists := req["tools"]; exists && rawTools != nil {
-		if tools := responsesToolsToChat(rawTools); tools != nil {
-			out["tools"] = tools
+		if _, ok := rawTools.([]any); !ok {
+			return nil, errors.New("invalid tools")
 		}
+		out["tools"] = responsesToolsToChat(rawTools)
 	}
 	// 流式：让上游在末片带上 usage，供记账与终态事件使用。
 	if stream, _ := req["stream"].(bool); stream {
@@ -319,12 +322,9 @@ func responsesToolOutput(v any) string {
 
 // responsesToolsToChat 把扁平的 Responses function 工具转为 chat 嵌套形态。
 // 非 function 类型（内置工具）在 chat 上游没有对应物，丢弃。
-// 入参是数组时返回非 nil 切片（空数组返回空切片），以便调用方区分「没传」与「显式传了空」。
+// 调用方保证入参是数组（非数组已在 responsesRequestToChat 里拒绝为 "invalid tools"）。
 func responsesToolsToChat(v any) []any {
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
+	items, _ := v.([]any)
 	out := make([]any, 0, len(items))
 	for _, raw := range items {
 		tool, ok := raw.(map[string]any)
@@ -522,10 +522,11 @@ type responsesStreamTranslator struct {
 	// 语义边界（I-3 / I-5）：
 	//   - 只由真实「上游增量驱动的输出」置位：文本/工具调用增量事件，以及流中的 error 事件。
 	//     流中错误说明已经开流，无法回退成 JSON 502，因此算已写出。
-	//   - 流开始**之前**的上游错误（HTTP 非 200、连接失败、首块解析失败）由 Task 6 在调用
-	//     本翻译器之前判断并返回 JSON 502，**不会**走到这里。
-	//   - 收尾事件由 Finish() 补发时**不**置位：上游 200 但零增量时 Wrote() 必须仍为 false，
-	//     Task 6 才能据此把「空响应」回退成 502。
+	//   - 收尾事件由 Finish() 补发时**不**置位。
+	//   - 【重要】Wrote()==false 只表示「没有由增量驱动过输出」，**不**表示「没向 w 写过字节」：
+	//     零增量时 Finish() 仍会把 created/in_progress/completed 真实写进 w（见 Finish 注释），
+	//     上游只发 "[DONE]" 时同样如此。因此**不要**用「Wrote() 为假」单独决定回退 502——
+	//     见 Wrote 方法注释里的回退判定建议。
 	wrote bool
 
 	// opened 标记 created/in_progress 是否已发出；
@@ -611,14 +612,28 @@ func (t *responsesStreamTranslator) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Wrote 返回是否已向客户端写出过任何字节（调用方用于「未写出即失败 → 502」判断）。
+// Wrote 报告是否已有「增量驱动」的输出写到客户端，用于区分「上游 200 但什么也没产出」。
+//
+// 回退 502 的正确判定（Task 6 契约）：**以「上游状态码异常」为主要依据**，而不是「Wrote() 为假」。
+// 原因：Finish() 在零增量场景下也会把 created/in_progress/completed 真实写进 w，
+// 若此时只凭 Wrote()==false 回退成 502，就会写出「既有 SSE 事件体、又是 502」的自相矛盾响应。
+// 推荐顺序：上游状态码异常 → 直接 502（此时代未调用过翻译器）；
+// 上游 2xx → 一律按 SSE 收尾，最多依据 Wrote() 记录「空响应」的日志/用量，不改状态码。
+//
+// 另注意：本方法必须在调用 Finish() **之前**读取（Finish 之后它的值不再变化，但此前写入的
+// 收尾事件已经落盘，见 Finish 注释）。
 func (t *responsesStreamTranslator) Wrote() bool { return t.wrote }
 
 // Finish 幂等收尾：补发剩余事件直到 response.completed。
 //
-// 注意：Finish() **不改变** Wrote() 的语义。上游 200 但零增量时，Finish() 仍会写出一条
-// 最小合法事件序列（created/in_progress/completed）以免客户端拿到「200 + 空 body」，
-// 但 Wrote() 保持 false，调用方据此把该响应回退成 502 JSON。
+// 【调用顺序契约 —— 必须遵守】Finish() 会把收尾事件**真实写进 w**，即使在零增量场景下
+// （上游 200 无任何 chunk、或只发了 "[DONE]"）。因此调用方**必须先判断 Wrote() 再调用
+// Finish()**；先 Finish 再判断会让已写出的 body 落盘、502 回退失效。
+// 正确先例见 anthropic_ingress.go 的 `if !tw.Wrote() { 502 }` 之后再 `tw.Finish()`。
+//
+// Finish() **不改变** Wrote() 的语义（收尾阶段写出的事件不计入 wrote）：上游 200 但零增量时
+// Wrote() 保持 false，供调用方识别「空响应」；但如 Wrote 注释所述，回退 502 的依据应当是
+// 上游状态码异常，而不是 Wrote()==false。
 func (t *responsesStreamTranslator) Finish() { t.finalize() }
 
 // processEvent 处理一个完整 SSE 事件块（多行 data: 会被拼接）。
@@ -793,6 +808,12 @@ func (t *responsesStreamTranslator) ensureTextItem() *responsesStreamItem {
 // finalize 收尾：按开启顺序补齐每个未收尾 item 的 done 级事件，再以 response.completed 结束。幂等。
 // 上游 200 但从未产生增量输出（空流）时也补发最小合法事件序列，
 // 避免客户端拿到「200 + 空 body」的非法 SSE 流。
+//
+// 两个「写了字节但 Wrote()==false」的场景（Task 6 必须知道）：
+//   - 上游 2xx 且零 chunk，随后调用方 Finish()；
+//   - 上游只发 "[DONE]"（同样零增量），由 [DONE] 触发 finalize。
+//
+// 两者都会真实写出 created/in_progress/completed。因此 Wrote()==false **不代表** w 未被写入。
 func (t *responsesStreamTranslator) finalize() {
 	if t.closed || t.failed {
 		return
