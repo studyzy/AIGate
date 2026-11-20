@@ -399,17 +399,37 @@ func maxTokensFieldsProvided(reqBody map[string]any, fields []string) bool {
 	return false
 }
 
+// isResponsesShaped 判断请求体是否 Responses 形态：带 max_output_tokens 且没有 chat 的 messages。
+//
+// 三个入口进来时都是 chat 形态（chat 入口原样、Anthropic 入口转换后必有 messages）；
+// Responses 入口会先把 Responses 请求体转成 chat 请求体（含 messages）再进本函数，
+// 只有调方直接传入、未经转换的 Responses 请求体才表现为「无 messages」。
+func isResponsesShaped(reqBody map[string]any) bool {
+	if _, ok := reqBody["max_output_tokens"]; !ok {
+		return false
+	}
+	_, hasMessages := reqBody["messages"]
+	return !hasMessages
+}
+
 // enforceMaxTokens 对请求体的输出长度字段施加密钥上限（三个数据面入口共用）。
 // 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限。
 //
-// 注入规则：chat 字段与 max_output_tokens 都没有有效数值时注入 max_tokens=上限
-// （与既有 chat 语义一致，只保留一条注入路径）；请求里有 max_output_tokens 就改写它、
-// 不塞 chat 专有的 max_tokens，避免 Responses 请求被污染。同一请求体的各字段只会属于一种协议。
+// 哪些请求形态会把 max_output_tokens 转为数值下发：
+//   - Responses 形态（带 max_output_tokens、无 messages）：字段超限/非正数时收敛为上限；
+//     没有有效数值（null / 字符串 / 布尔）时改写为上限；此时不注入 chat 专有的 max_tokens。
+//   - chat 形态（带 messages）：max_output_tokens 是非标准字段，逐字透传——不压制、不改写、不删除，
+//     上限一律经 chat 字段按既有语义施加，避免严格校验的上游因多出的字段 400。
 func enforceMaxTokens(reqBody map[string]any, limit int) {
 	if limit <= 0 {
 		return
 	}
-	for _, key := range maxTokensCappedFields {
+	cappedFields := maxTokensChatFields[:]
+	outputTokensIsResponses := isResponsesShaped(reqBody)
+	if outputTokensIsResponses {
+		cappedFields = maxTokensCappedFields[:]
+	}
+	for _, key := range cappedFields {
 		v, ok := reqBody[key]
 		if !ok {
 			continue
@@ -423,12 +443,12 @@ func enforceMaxTokens(reqBody map[string]any, limit int) {
 			reqBody[key] = float64(limit)
 		}
 	}
-	if maxTokensFieldsProvided(reqBody, maxTokensChatFields[:]) ||
-		maxTokensFieldsProvided(reqBody, maxTokensCappedFields[:]) {
+	if maxTokensFieldsProvided(reqBody, cappedFields) {
 		return
 	}
-	// 只写了 max_output_tokens（含 null / 非数值）：这是 Responses 请求，别注入 chat 专有字段。
-	if _, ok := reqBody["max_output_tokens"]; ok {
+	// Responses 形态且没有有效数值（null / 非数值）：补 max_output_tokens，
+	// 别注入 chat 专有的 max_tokens，避免污染 Responses 请求体。
+	if outputTokensIsResponses {
 		reqBody["max_output_tokens"] = float64(limit)
 		return
 	}

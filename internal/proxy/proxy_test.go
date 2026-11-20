@@ -191,9 +191,13 @@ func TestChatCompletions_EnforceMaxTokens(t *testing.T) {
 	})
 }
 
-// TestEnforceMaxTokens_MaxOutputTokens 覆盖 Responses 协议的 max_output_tokens 字段：
-// 与 chat 字段同样受密钥上限压制；且出现该字段时不得注入 chat 专有的 max_tokens。
-// 黑盒方式：经 /v1/chat/completions 入站、断言上游实际收到的请求体。
+// TestEnforceMaxTokens_MaxOutputTokens 覆盖 Responses 形态请求的 max_output_tokens：
+// 与 chat 字段同样受密钥上限压制；出现该字段时不得注入 chat 专有的 max_tokens。
+//
+// 测试手段说明：入站走 /v1/chat/completions（上游 mock 最稳），但请求体本身是
+// Responses 形态（带 max_output_tokens、不带 messages），由 enforceMaxTokens 按
+// 「请求体形态」对待——这正是 fix round 2 引入的判定依据。chat 形态由
+// TestEnforceMaxTokens_ChatShapedMaxOutputTokens 覆盖。
 func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, okChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
@@ -209,54 +213,53 @@ func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 	}{
 		{
 			name:    "over limit is capped and no max_tokens injected",
-			body:    `{"model":"mock-a","max_output_tokens":9999,"messages":[{"role":"user","content":"hi"}]}`,
+			body:    `{"model":"mock-a","max_output_tokens":9999}`,
 			want:    map[string]float64{"max_output_tokens": 100},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "超限收敛为上限；出现 max_output_tokens 时不得注入 chat 专有的 max_tokens",
 		},
 		{
 			name:    "negative is capped",
-			body:    `{"model":"mock-a","max_output_tokens":-1,"messages":[{"role":"user","content":"hi"}]}`,
+			body:    `{"model":"mock-a","max_output_tokens":-1}`,
 			want:    map[string]float64{"max_output_tokens": 100},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "非正数视作「不限」，收敛为上限",
 		},
 		{
 			name:    "under limit is untouched",
-			body:    `{"model":"mock-a","max_output_tokens":50,"messages":[{"role":"user","content":"hi"}]}`,
+			body:    `{"model":"mock-a","max_output_tokens":50}`,
 			want:    map[string]float64{"max_output_tokens": 50},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "未超限不动",
 		},
 		{
 			name:    "output and chat fields are independent",
-			body:    `{"model":"mock-a","max_output_tokens":50,"max_tokens":9999,"messages":[{"role":"user","content":"hi"}]}`,
+			body:    `{"model":"mock-a","max_output_tokens":50,"max_tokens":9999}`,
 			want:    map[string]float64{"max_output_tokens": 50, "max_tokens": 100},
 			absent:  []string{"max_completion_tokens"},
 			context: "两个字段各自按上限收敛、互不干扰",
 		},
 		{
-			// null 经 json.Unmarshal 得到 nil 但 key 保留，实质等于「没有有效上限」：
-			// 不能当作「客户端已给上限」而短路，否则上游收到无上限的输出预算。
-			// 仍是 Responses 请求，故注回 max_output_tokens，而不是塞 chat 专有的 max_tokens。
-			name:    "null counts as absent and injects a cap",
-			body:    `{"model":"mock-a","max_output_tokens":null,"messages":[{"role":"user","content":"hi"}]}`,
+			// Responses 形态（无 messages）：null 经 json.Unmarshal 得到 nil 但 key 保留，
+			// 实质等于「没有有效上限」，不能当作「客户端已给上限」而短路。
+			// 注回 max_output_tokens，而不是塞 chat 专有的 max_tokens。
+			name:    "responses-shaped null counts as absent and injects a cap",
+			body:    `{"model":"mock-a","max_output_tokens":null}`,
 			want:    map[string]float64{"max_output_tokens": 100},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "null 等同于未提供，且不得注入 chat 专有的 max_tokens",
 		},
 		{
-			// 非数值（字符串）同样没有有效上限：不压制（逐字约束：非数值忽略），但必须补上限。
-			// 与 chat 字段的 hasNumeric 语义对齐：只有「有效数值」才算客户端自己给了上限。
-			name:    "non-numeric output tokens count as absent and inject a cap",
-			body:    `{"model":"mock-a","max_output_tokens":"9999","messages":[{"role":"user","content":"hi"}]}`,
+			// Responses 形态：非数值（字符串）没有有效上限：不压制（逐字约束：非数值忽略），但必须补上限。
+			name:    "responses-shaped non-numeric counts as absent and injects a cap",
+			body:    `{"model":"mock-a","max_output_tokens":"9999"}`,
 			want:    map[string]float64{"max_output_tokens": 100},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "非数值不压制，但也不得让上游无上限",
 		},
 		{
-			name:    "boolean output tokens count as absent and inject a cap",
-			body:    `{"model":"mock-a","max_output_tokens":true,"messages":[{"role":"user","content":"hi"}]}`,
+			name:    "responses-shaped boolean counts as absent and injects a cap",
+			body:    `{"model":"mock-a","max_output_tokens":true}`,
 			want:    map[string]float64{"max_output_tokens": 100},
 			absent:  []string{"max_tokens", "max_completion_tokens"},
 			context: "布尔同样不是有效上限",
@@ -287,6 +290,76 @@ func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 				if v, ok := body[key]; ok {
 					t.Fatalf("upstream body must not contain %s, got %#v: %s", key, v, tc.context)
 				}
+			}
+		})
+	}
+}
+
+// TestEnforceMaxTokens_ChatShapedMaxOutputTokens 固定「chat 形态请求的 max_output_tokens 行为」：
+// 带 messages 的请求是 chat 请求，max_output_tokens 是非标准字段，网关既不压制也不改写也不删除，
+// 只在客户端确实给了 max_output_tokens 时原样透传；上限一律按 chat 既有语义经 max_tokens 施加。
+// 否则严格校验的 openai-completions 上游可能因被塞入的 max_output_tokens 而 400。
+func TestEnforceMaxTokens_ChatShapedMaxOutputTokens(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, okChatBody))
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, cappedToken := mustCreateKey(t, e.store, e.user.ID, 100, primary(m.ID, 0))
+
+	tests := []struct {
+		name string
+		body string
+		// wantOutput 断言 max_output_tokens 原样保留（nil 表示仍为 JSON null）。
+		wantOutput any
+		// wantMaxTokens 断言按 chat 语义注入的 max_tokens。
+		wantMaxTokens float64
+		context       string
+	}{
+		{
+			// null 原样透传，同时按 chat 语义注入 max_tokens=limit。
+			name:          "null max_output_tokens is passed through untouched",
+			body:          `{"model":"mock-a","max_output_tokens":null,"messages":[{"role":"user","content":"hi"}]}`,
+			wantOutput:    nil,
+			wantMaxTokens: 100,
+			context:       "不得把 null 改写为 100 下发给 chat 上游",
+		},
+		{
+			// 未超限的数值不动，也不压制。
+			name:          "in-range max_output_tokens is not rewritten",
+			body:          `{"model":"mock-a","max_output_tokens":50,"messages":[{"role":"user","content":"hi"}]}`,
+			wantOutput:    float64(50),
+			wantMaxTokens: 100,
+			context:       "chat 形态不压制 max_output_tokens",
+		},
+		{
+			// 超出 limit 的数值在 chat 形态下也不改写，上限由 max_tokens 承担。
+			name:          "over-limit max_output_tokens is not rewritten",
+			body:          `{"model":"mock-a","max_output_tokens":9999,"messages":[{"role":"user","content":"hi"}]}`,
+			wantOutput:    float64(9999),
+			wantMaxTokens: 100,
+			context:       "chat 形态不改写 max_output_tokens，上限经 max_tokens 施加",
+		},
+		{
+			name:          "string max_output_tokens is passed through untouched",
+			body:          `{"model":"mock-a","max_output_tokens":"9999","messages":[{"role":"user","content":"hi"}]}`,
+			wantOutput:    "9999",
+			wantMaxTokens: 100,
+			context:       "非数值同样原样透传，交给上游拒绝",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := e.postChat(t, cappedToken, tc.body, nil)
+			assertStatus(t, resp, http.StatusOK)
+			_ = readBody(t, resp)
+
+			body := e.rec.Body()
+			if got, ok := body["max_output_tokens"]; !ok || got != tc.wantOutput {
+				t.Fatalf("upstream max_output_tokens = %#v (present=%v), want %#v: %s",
+					got, ok, tc.wantOutput, tc.context)
+			}
+			if got, ok := bodyNumber(t, body, "max_tokens"); !ok || got != tc.wantMaxTokens {
+				t.Fatalf("upstream max_tokens = %v (present=%v), want %v: chat 形态必须经 max_tokens 施加上限",
+					got, ok, tc.wantMaxTokens)
 			}
 		})
 	}
