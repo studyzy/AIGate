@@ -23,6 +23,7 @@ coverage.out
 # Local-only process artifacts (kept on disk, not published)
 /openspec/
 /docs/superpowers/
+/docs/plans/
 /.codebuddy/
 /graphify-out/
 
