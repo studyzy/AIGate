@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import type { Settings } from "@/api/types";
 import { QuotaRuleEditor } from "@/components/QuotaRuleEditor";
+import { QueryError } from "@/components/ui/QueryError";
 import { useToast } from "@/components/ui/Toast";
 import { Button, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useApiMutation } from "@/hooks/useApiMutation";
@@ -27,6 +28,8 @@ export function SettingsPage() {
     },
   });
 
+  // 失败必须先于 loading 判断，否则 form 永远为 null，页面会一直转圈。
+  if (query.isError) return <QueryError error={query.error} onRetry={() => void query.refetch()} />;
   if (!form) return <Spinner label={t("common.loading")} />;
 
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setForm((f) => (f ? { ...f, [key]: value } : f));

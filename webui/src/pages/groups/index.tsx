@@ -5,6 +5,7 @@ import type { UserGroup } from "@/api/types";
 import { QuotaRuleEditor } from "@/components/QuotaRuleEditor";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
 import { Table, type Column } from "@/components/ui/Table";
+import { QueryError } from "@/components/ui/QueryError";
 import { Button, EmptyState, Field, Input, PageHeader, Spinner } from "@/components/ui/primitives";
 import { useApiMutation } from "@/hooks/useApiMutation";
 import { useI18n } from "@/i18n";
@@ -44,7 +45,9 @@ export function GroupsPage() {
   return (
     <section>
       <PageHeader title={t("group.title")} actions={<Button onClick={() => setCreating(true)}>{t("group.new")}</Button>} />
-      {list.isLoading ? (
+      {list.isError ? (
+        <QueryError error={list.error} onRetry={() => void list.refetch()} />
+      ) : list.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <Table

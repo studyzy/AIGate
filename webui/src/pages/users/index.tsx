@@ -5,6 +5,7 @@ import type { User, UserGroup } from "@/api/types";
 import { TokenDialog } from "@/components/TokenDialog";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
 import { Table, type Column } from "@/components/ui/Table";
+import { QueryError } from "@/components/ui/QueryError";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useApiMutation } from "@/hooks/useApiMutation";
 import { useI18n } from "@/i18n";
@@ -65,7 +66,9 @@ export function UsersPage() {
   return (
     <section>
       <PageHeader title={t("user.title")} actions={<Button onClick={() => setCreating(true)}>{t("user.new")}</Button>} />
-      {list.isLoading ? (
+      {list.isError ? (
+        <QueryError error={list.error} onRetry={() => void list.refetch()} />
+      ) : list.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <Table

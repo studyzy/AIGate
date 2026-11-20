@@ -4,12 +4,17 @@ import { useSearchParams } from "react-router-dom";
 
 import type { AIGateModel, ApiKey, GroupBy, UsageLogRow, UsageSummaryRow, User, UserGroup } from "@/api/types";
 import { Table, type Column } from "@/components/ui/Table";
+import { QueryError } from "@/components/ui/QueryError";
 import { Badge, Button, EmptyState, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
+import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/i18n";
 import { api, downloadFile } from "@/lib/api";
 import { formatDateTime, formatLatency, formatNumber, todayISO } from "@/lib/format";
 
 const PAGE_SIZE = 20;
+
+// GROUP_BY 是列表接口接受的统计维度；URL 里出现别的值一律回退日期。
+const GROUP_BY: GroupBy[] = ["date", "model", "key", "user", "group"];
 
 // 名称映射命中时显示名称，未命中回退 "#id"。
 function nameOrId(names: Map<number, string>, id?: number | null): string {
@@ -23,12 +28,15 @@ function idText(id: number, name: string | undefined): string {
 
 export function UsagePage() {
   const { t } = useI18n();
+  const toast = useToast();
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "logs" ? "logs" : "summary";
-  const groupBy = (params.get("group_by") ?? "date") as GroupBy;
+  const rawGroup = params.get("group_by");
+  const groupBy: GroupBy = GROUP_BY.includes(rawGroup as GroupBy) ? (rawGroup as GroupBy) : "date";
   const start = params.get("start") ?? todayISO(-6);
   const end = params.get("end") ?? todayISO();
-  const page = Number(params.get("page") ?? "1");
+  const rawPage = Number(params.get("page") ?? "1");
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1;
   const [expanded, setExpanded] = useState<number | null>(null);
 
   function patch(next: Record<string, string>) {
@@ -68,7 +76,11 @@ export function UsagePage() {
             </span>
             <Button
               variant="secondary"
-              onClick={() => downloadFile("/admin/usage/export?format=csv&" + filter, "usage-" + start + "_" + end + ".csv")}
+              onClick={() =>
+                void downloadFile("/admin/usage/export?format=csv&" + filter, "usage-" + start + "_" + end + ".csv").catch(
+                  (err) => toast(err instanceof Error ? err.message : String(err)),
+                )
+              }
             >
               {t("usage.export")}
             </Button>
@@ -184,7 +196,9 @@ function SummaryTab({
         </Select>
         </span>
       </label>
-      {query.isLoading ? (
+      {query.isError ? (
+        <QueryError error={query.error} onRetry={() => void query.refetch()} />
+      ) : query.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <Table
@@ -250,7 +264,9 @@ function LogsTab({
 
   return (
     <div>
-      {query.isLoading ? (
+      {query.isError ? (
+        <QueryError error={query.error} onRetry={() => void query.refetch()} />
+      ) : query.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <>

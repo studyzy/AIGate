@@ -81,7 +81,7 @@ export function DashboardPage() {
     .slice(0, 5);
 
   const loading = summary.isLoading || models.isLoading || keys.isLoading || users.isLoading;
-  const failed = summary.error ?? byUser.error ?? models.error ?? keys.error ?? users.error;
+  const failed = summary.error ?? byModel.error ?? byUser.error ?? models.error ?? keys.error ?? users.error;
 
   return (
     <section>

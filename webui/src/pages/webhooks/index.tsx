@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { Webhook, WebhookDelivery } from "@/api/types";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
 import { Table, type Column } from "@/components/ui/Table";
+import { QueryError } from "@/components/ui/QueryError";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, Spinner } from "@/components/ui/primitives";
 import { useApiMutation } from "@/hooks/useApiMutation";
 import { useI18n } from "@/i18n";
@@ -55,7 +56,9 @@ export function WebhooksPage() {
   return (
     <section>
       <PageHeader title={t("webhook.title")} actions={<Button onClick={() => setCreating(true)}>{t("webhook.new")}</Button>} />
-      {list.isLoading ? (
+      {list.isError ? (
+        <QueryError error={list.error} onRetry={() => void list.refetch()} />
+      ) : list.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <Table
@@ -174,7 +177,9 @@ function DeliveriesDrawer({ webhook, onClose }: { webhook: Webhook; onClose: () 
 
   return (
     <Drawer open title={t("webhook.deliveries") + " · " + webhook.name} onClose={onClose}>
-      {query.isLoading ? (
+      {query.isError ? (
+        <QueryError error={query.error} onRetry={() => void query.refetch()} />
+      ) : query.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
         <Table columns={columns} rows={query.data?.deliveries ?? []} rowKey={(d) => d.id} empty={<EmptyState title={t("common.empty")} />} />
