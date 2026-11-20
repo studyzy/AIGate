@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { Brand } from "@/components/Brand";
 import { LangSwitch } from "@/components/LangSwitch";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
@@ -39,8 +40,10 @@ export function LoginPage() {
         className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
         onSubmit={onSubmit}
       >
+        <div className="mb-5">
+          <Brand name={t("app.name")} size="lg" />
+        </div>
         <h1 className="text-lg font-semibold">{t("login.title")}</h1>
-        <p className="mt-1 text-sm text-slate-500">{t("app.name")}</p>
         <label className="mt-5 block text-sm font-medium text-slate-700" htmlFor="token">
           {t("login.token")}
         </label>

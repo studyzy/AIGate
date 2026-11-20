@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useI18n } from "@/i18n";
 import type { MessageKey } from "@/i18n/en";
 
+import { Brand } from "./Brand";
 import { LangSwitch } from "./LangSwitch";
 import { clearToken } from "@/lib/session";
 
@@ -45,8 +46,8 @@ export function AppLayout() {
   return (
     <div className="flex h-full">
       <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
-        <div className="flex h-14 items-center border-b border-slate-200 px-4 font-semibold">
-          {t("app.name")}
+        <div className="flex h-14 items-center border-b border-slate-200 px-4">
+          <Brand name={t("app.name")} />
         </div>
         <nav className="flex-1 overflow-y-auto p-3">
           {GROUPS.map((group) => (
