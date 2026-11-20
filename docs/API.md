@@ -368,6 +368,14 @@ history + this turn's `input` + this turn's output items, **excluding** `instruc
 data-plane key belonging to the same user may continue that user's rows (ownership is checked per
 user, not per key).
 
+> ⚠️ **All data-plane keys of the same user share one conversation space.**
+> Ownership is checked per **user**, not per key — that way rotating a key does not orphan existing
+> conversations. The trade-off: if you issue several keys for one user to serve **different
+> downstream applications**, application B can read application A's full conversation history if it
+> obtains A's `previous_response_id`. `conversation` deserves extra care: its ID is an arbitrary
+> client-supplied string, so the same name refers to the same history for that user.
+> **To isolate applications, give each one its own user** rather than relying on separate keys.
+
 **Upstream paths**
 
 The resolved model's `model_type` selects the path:
@@ -384,8 +392,7 @@ upstream vendor's storage. Upstream timeouts are the same on both: 5 minutes non
 **Response — non-streaming**
 
 `200` returns a Responses response object. `id` is always a gateway-generated `resp_` + 32 hex
-digits, never a passthrough of the upstream ID (the upstream ID is kept in the internal
-`upstream_id` field and is not exposed).
+digits, never a passthrough of the upstream ID; the upstream ID is not recorded or exposed.
 
 ```json
 {
@@ -424,9 +431,23 @@ translation path's event order is:
 
 ```text
 response.created → response.in_progress
-  → response.output_item.added → response.output_text.delta*
-  → response.completed（or response.incomplete / response.failed）
+  → response.output_item.added → response.content_part.added
+  → response.output_text.delta* → response.output_text.done
+  → response.content_part.done → response.output_item.done
+  → response.completed（or response.incomplete / response.failed / error）
 ```
+
+When the chat upstream streams tool calls, each one becomes its own `function_call` item:
+
+```text
+response.output_item.added
+  → response.function_call_arguments.delta* → response.function_call_arguments.done
+  → response.output_item.done
+```
+
+`message` and `function_call` items do not share `output_index`. If the upstream fails mid-stream,
+the gateway emits `event: error` followed by a terminal event — a truncated stream is never reported
+as `status: "completed"`.
 
 The passthrough path relays the upstream's own Responses event stream as-is, rewriting only `id` /
 `model` in terminal events. Usage is recorded after the stream ends.

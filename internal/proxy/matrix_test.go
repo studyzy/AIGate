@@ -239,13 +239,14 @@ type matrixCall struct {
 // matrixUpstreamServer 是矩阵用例专用的 mock 上游：按请求路径返回对应协议的响应，
 // 并记录每次请求（路径、鉴权头、请求体）。
 //
-// 为什么不用共享夹具 startUpstream（httptest.NewServer）：在本仓库的工具链环境下，
-// httptest 的 mock 上游收到的是**零字节 body**（Content-Length 与请求头都在，body 读
-// 出来是 0 字节）——这一点对三个入口、三种上游全部一致，与本用例无关但与「按请求体
-// 形状断言」直接冲突。换用 net.Listen + http.Server 自建监听后 body 正常到达，
-// 已用「同一条请求分别打到 httptest 与自建监听」对照确认。
-// 该现象同时意味着**任何依赖上游请求体的既有黑盒用例在本机都会读到空 body**，
-// 需要在独立任务里核实（本任务不修改共享夹具）。
+// 为什么不用共享夹具 startUpstream（httptest.NewServer）：本用例需要按**请求路径**
+// 分派三种协议、并逐格统计每个上游收到的调用次数与请求体；自建监听可以直接在
+// Handler 里做这两件事，不必再叠一层 httptest。
+//
+// 说明：最初曾观察到「httptest 上游读到零字节 body」，事后经独立复核**无法复现**——
+// 裸 httptest 能正常收到请求体，且把既有用例（如 TestChatCompletions_EnforceMaxTokens）
+// 的期望值故意改错后，测试会明确指出读到的是真实 body（如 upstream max_tokens = 100）。
+// 因此该现象不作为本用例的选型理由，也不代表既有黑盒用例失效。
 type matrixUpstreamServer struct {
 	url    string
 	server *http.Server
