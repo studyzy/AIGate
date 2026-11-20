@@ -35,6 +35,7 @@ import (
 	"aigate/internal/provider"
 	"aigate/internal/proxy"
 	"aigate/internal/userapi"
+	"aigate/internal/webui"
 )
 
 func main() {
@@ -139,6 +140,16 @@ func run() error {
 	proxy.NewHandler(store, usage, cfg.QuotaExceededStatus).Register(mux)
 	admin.Register(mux, store)
 	userapi.Register(mux, store)
+
+	// 管控 WebUI：静态资源挂在 /ui/，根路径跳转过去；其余未匹配路径保持 404。
+	mux.Handle("/ui/", webui.Handler())
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
