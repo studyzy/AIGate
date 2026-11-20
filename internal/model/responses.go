@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -41,6 +42,9 @@ const (
 // ErrResponseStateNotFound 表示 Responses 会话状态行不存在（已被清理或 ID 非法）。
 var ErrResponseStateNotFound = errors.New("response state not found")
 
+// ErrResponseStateInvalid 表示待写入的会话状态行字段非法（如空 ID）。
+var ErrResponseStateInvalid = errors.New("invalid response state")
+
 // ResponseState 是 OpenAI Responses API 的一次响应状态：items 为累积的对话快照，
 // 供 previous_response_id / conversation 拼接历史；response_body 为 GET /v1/responses/{id} 的原样回包。
 // 归属用 (owner_user_id, owner_api_key_id) 双键校验，失配按不存在处理。
@@ -64,8 +68,13 @@ type ResponseState struct {
 }
 
 // CreateResponseState 落一行会话状态；调用方负责生成 ID 与填写归属字段。
-// CreatedAt/UpdatedAt 为空时取当前时间。
+// CreatedAt/UpdatedAt 为空时取当前时间；Items / ResponseBody 为 nil 时分别兜底为 "[]" / "{}"
+// （两列为 NOT NULL，且后续 UpdateResponseStateStatus 的零值永不落库，见该方法注释）。
+// ID 为空（或全空白）返回 ErrResponseStateInvalid：空主键会落一行「谁都能命中」的脏数据。
 func (s *Store) CreateResponseState(ctx context.Context, st *ResponseState) error {
+	if strings.TrimSpace(st.ID) == "" {
+		return fmt.Errorf("%w: response state id is empty", ErrResponseStateInvalid)
+	}
 	if st.CreatedAt.IsZero() {
 		st.CreatedAt = time.Now().UTC()
 	}
@@ -89,10 +98,20 @@ func (s *Store) GetResponseState(ctx context.Context, id string) (*ResponseState
 	return s.getResponseState(s.db.WithContext(ctx).Where("id = ?", id))
 }
 
-// UpdateResponseStateStatus 条件更新状态与终态载荷：已取消（cancelled）的行不会被覆盖。
-// errMsg 与 items/body 按「非空才写」处理，避免后台任务在中间态跃迁时清空已有内容。
-// 行不存在（含已取消）时静默返回 nil——后台任务据此判定「已被取消/清理」即可，
+// UpdateResponseStateStatus 条件更新状态与终态载荷：已取消（cancelled）的行不会被覆盖
+// （WHERE status <> 'cancelled'），防止后台任务完成时把用户刚发出的取消态改回终态。
+//
+// items/body 的零值（nil 或空切片）永不落库：本方法只在非空时把列写入 UPDATE，
+// 因此「传空切片期待清空已有内容」不会生效。清空没有语义——CreateResponseState 已把
+// 两列兜底为 "[]" / "{}"，且后台任务只在终态一次性写回累积载荷；
+// 需要清空的历史设计若出现，应新增显式方法而不是复用本方法的零值。
+// 同理 errMsg 为空时不写 error 列（保留上一次失败原因，避免成功跃迁抹掉排查线索）。
+//
+// 行不存在（含已取消/已被清理）时静默返回 nil——后台任务据此判定「无需再写回」即可，
 // 无需区分两种原因；调用方要区分时用 GetResponseState。
+//
+// 不加 status 白名单：状态机（queued→in_progress→completed|failed|incomplete）由调用方保证，
+// 唯一需要在本层兜住的竞争是「用户取消 vs 后台写回」，已由上面的 WHERE 条件覆盖。
 func (s *Store) UpdateResponseStateStatus(
 	ctx context.Context,
 	id, status, errMsg string,
@@ -121,7 +140,13 @@ func (s *Store) UpdateResponseStateStatus(
 }
 
 // PruneResponseStates 删除创建时间早于 before 的行，返回删除行数。
-// 后台清理循环（保留期以天计，默认 30 天）只需按返回值记录日志。
+// 后台清理循环（保留期以天计，-response-retention-days 默认 7 天）只需按返回值记录日志。
+//
+// 与 PruneWebhookDeliveries 同一论证：清理按 created_at 严格小于 cutoff，而单条响应的存活时间
+// 上界是后台执行超时 responseBackgroundTimeout（默认 30 分钟），保留期（默认 7 天）远大于它，
+// 因此 queued / in_progress 的在途行不会被误删。只有在保留期被配置成小于后台超时的病态场景下
+// 才可能删到在途行——那时后台任务的下一次 UpdateResponseStateStatus 会命中 0 行并静默返回 nil，
+// 表现为「状态不再更新」而非读写错乱；进程崩溃遗留的孤儿在途行也会被正常清理。
 func (s *Store) PruneResponseStates(ctx context.Context, before time.Time) (int64, error) {
 	res := s.db.WithContext(ctx).Where("created_at < ?", before.UTC()).Delete(&ResponseState{})
 	if res.Error != nil {

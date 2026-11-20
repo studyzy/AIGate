@@ -225,3 +225,62 @@ func TestLatestResponseStateInConversation(t *testing.T) {
 		t.Fatalf("missing conversation err = %v, want ErrResponseStateNotFound", err)
 	}
 }
+
+// TestLatestResponseStateInConversation_SameCreatedAt 钉住「created_at DESC, id DESC」的排序稳定性：
+// 同一毫秒内（created_at 相同）必须取 id 较大的一条，而不是依赖数据库的返回顺序。
+func TestLatestResponseStateInConversation_SameCreatedAt(t *testing.T) {
+	store, dsn := newTestStoreAt(t)
+	ctx := testCtx()
+	created := time.Now().UTC().Truncate(time.Millisecond)
+
+	smaller := newTestResponseState("resp_66666666666666666666666666666666", "conv_tie", created)
+	larger := newTestResponseState("resp_77777777777777777777777777777777", "conv_tie", created)
+	// 先走 Store 插入 id 较大的一条，再绕过 Store 直插 id 较小的一条：
+	// 此时物理插入顺序（rowid）与 id 顺序相反，任何「按插入序/rowid 返回」的实现都会取错。
+	if err := store.CreateResponseState(ctx, larger); err != nil {
+		t.Fatalf("CreateResponseState(%s): %v", larger.ID, err)
+	}
+	db := openReadDB(t, dsn)
+	if err := db.Exec(
+		`INSERT INTO response_states
+		 (id, conversation_id, owner_user_id, owner_api_key_id, request_model, previous_response_id,
+		  status, items, response_body, input_tokens, output_tokens, total_tokens, reasoning_tokens,
+		  error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, '', ?, ?)`,
+		smaller.ID, smaller.ConversationID, smaller.OwnerUserID, smaller.OwnerAPIKeyID,
+		smaller.RequestModel, smaller.PreviousResponseID, smaller.Status,
+		string(smaller.Items), string(smaller.ResponseBody),
+		smaller.CreatedAt.Format("2006-01-02 15:04:05.999999999-07:00"),
+		smaller.UpdatedAt.Format("2006-01-02 15:04:05.999999999-07:00"),
+	).Error; err != nil {
+		t.Fatalf("direct insert smaller id: %v", err)
+	}
+
+	got, err := store.LatestResponseStateInConversation(ctx, "conv_tie")
+	if err != nil {
+		t.Fatalf("LatestResponseStateInConversation: %v", err)
+	}
+	if got.ID != larger.ID {
+		t.Fatalf("latest = %q, want %q (same created_at must break ties by id DESC)", got.ID, larger.ID)
+	}
+}
+
+// TestCreateResponseState_EmptyID 钉住空 ID 的防御：空主键会落一行「谁都可能命中」的脏数据。
+func TestCreateResponseState_EmptyID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testCtx()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	for _, id := range []string{"", "   "} {
+		st := newTestResponseState(id, "conv_1", now)
+		err := store.CreateResponseState(ctx, st)
+		if !errors.Is(err, model.ErrResponseStateInvalid) {
+			t.Fatalf("CreateResponseState(id=%q) err = %v, want ErrResponseStateInvalid", id, err)
+		}
+	}
+
+	// 脏行不得落库。
+	if _, err := store.GetResponseState(ctx, ""); !errors.Is(err, model.ErrResponseStateNotFound) {
+		t.Fatalf("GetResponseState(\"\") err = %v, want ErrResponseStateNotFound", err)
+	}
+}
