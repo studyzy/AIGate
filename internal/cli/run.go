@@ -200,6 +200,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		}
 	}
 
+	// 单 token 默认 action 约定：resource 含同名 action 时（如 health），
+	// aigatectl health 等价于 health health，argv[2:] 仍为空；其余单 token
+	// 维持「缺 resource 与 command」的本地错误，不改变退出码契约。
+	if len(argv) == 1 {
+		if cmds, ok := registry[argv[0]]; ok {
+			if _, ok := cmds[argv[0]]; ok {
+				argv = append(argv, argv[0])
+			}
+		}
+	}
 	if len(argv) < 2 {
 		return localError(stderr, errors.New("missing resource and command (see --help)"))
 	}
