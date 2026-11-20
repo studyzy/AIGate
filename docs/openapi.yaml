@@ -330,6 +330,69 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /admin/models/discover:
+    post:
+      tags: [admin]
+      summary: 拉取上游模型列表
+      description: |
+        用密钥向上游 `/models` 查询可用模型 ID，供控制台做选择器。
+
+        **结果一律以 HTTP 200 返回**，成功/失败体现在 body 的 `ok`：
+
+        - 成功：`{"ok":true,"models":["gpt-4o",…]}`；
+        - 失败：`{"ok":false,"error_kind":"…","message":"…"}`，`error_kind` 与连通性探测同一枚举。
+
+        出站复用数据面 SSRF 防护；默认严格模式下私网/回环地址被拦截并归类为
+        `network_unreachable`，需要放行时启动加 `-allow-private-upstreams`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model_type, url]
+              properties:
+                model_type:
+                  type: string
+                  enum: [openai-completions, anthropic-messages]
+                url:
+                  type: string
+                  description: 与 model.url 语义一致（openai 带 /v1，anthropic 为 host）
+                api_key:
+                  type: string
+                  description: 直接使用该密钥（尚未落库时）
+                credential_id:
+                  type: integer
+                  description: 改用已保存凭据的第一个 header 密钥
+      responses:
+        '200':
+          description: 拉取结果（成功或失败）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  models:
+                    type: array
+                    items:
+                      type: string
+                  error_kind:
+                    type: string
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /admin/credentials:
     get:
       tags: [admin]

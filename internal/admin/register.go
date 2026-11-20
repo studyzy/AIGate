@@ -36,6 +36,7 @@ func Register(mux *http.ServeMux, store *model.Store) {
 	m.HandleFunc("PUT /admin/models/{id}", handleUpdateModel(store))
 	m.HandleFunc("DELETE /admin/models/{id}", handleDeleteModel(store))
 	m.HandleFunc("POST /admin/models/{id}/connectivity", handleModelConnectivity(store))
+	m.HandleFunc("POST /admin/models/discover", handleDiscoverModels(store))
 
 	m.HandleFunc("POST /admin/credentials", handleCreateCredential(store))
 	m.HandleFunc("GET /admin/credentials", handleListCredentials(store))

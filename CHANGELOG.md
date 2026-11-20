@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Model discovery** — `POST /admin/models/discover` lists the model ids an
+  upstream exposes, using a stored credential or a one-off key. Outbound calls
+  share the data-plane SSRF protection and reuse the connectivity `error_kind`
+  enum. The admin console uses it to populate the model picker when a provider
+  is added.
 - **Admin Web UI** — a React SPA embedded in the same binary and served under
   `/ui/` (with `/` redirecting there). Covers models, credentials, keys, users,
   groups, usage (summary, request logs, CSV export), settings, webhooks and

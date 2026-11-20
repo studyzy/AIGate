@@ -475,6 +475,36 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 | 404 | 模型不存在。 |
 | 500 | 凭据/密钥解析失败。 |
 
+#### POST /admin/models/discover
+
+用一把密钥向上游查询可用模型 ID，供管理界面列出候选模型，避免手工抄写 `model_id`。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `model_type` | string，必填 | `openai-completions` 或 `anthropic-messages`。 |
+| `url` | string，必填 | 与 `model.url` 语义一致：`openai-completions` 是带 `/v1` 的 base，`anthropic-messages` 是 host。 |
+| `api_key` | string，可选 | 直接使用（适用于尚未落库的新密钥）。 |
+| `credential_id` | number，可选 | 改用已保存凭据的第一个 header 密钥。 |
+
+两种密钥来源必须给一个；同时给时以 `api_key` 为准。
+
+返回沿用连通性探测的口径：一律 HTTP `200`，成功/失败体现在 body：
+
+| Body | 含义 |
+|------|------|
+| `{"ok": true, "models": ["gpt-4o", …]}` | 上游 `/models` 返回的模型 ID 列表。 |
+| `{"ok": false, "error_kind": "…", "message": "…"}` | `error_kind` 与连通性探测同一枚举。 |
+
+出站请求复用数据面 SSRF 防护：默认严格模式下私网/回环地址被拦截，归类为 `network_unreachable`，需要放行时启动加 `-allow-private-upstreams`。
+
+| 状态码 | 条件 |
+|--------|------|
+| 200 | 探测完成（无论 `ok` 真假）。 |
+| 400 | `model_type`/`url` 非法、未给密钥来源、或凭据没有 header 密钥。 |
+| 404 | `credential_id` 不存在。 |
+
 ### 3.2 凭据
 
 上游凭据把一条或多条密钥组织在一起，由模型的 `credential_id` 引用。转发时网关实时解析

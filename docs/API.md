@@ -460,6 +460,36 @@ Only an invalid path id (`400`) and a missing model (`404`) use the standard err
 | 404 | Model not found. |
 | 500 | Credential/secret resolution failed. |
 
+#### POST /admin/models/discover
+
+List the model ids an upstream exposes, so a console can offer a picker instead of asking operators to copy `model_id` by hand.
+
+Request body:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `model_type` | string, required | `openai-completions` or `anthropic-messages`. |
+| `url` | string, required | Same semantics as `model.url`: `openai-completions` is a base ending in `/v1`, `anthropic-messages` is the host. |
+| `api_key` | string, optional | Used directly — for a key that has not been stored yet. |
+| `credential_id` | number, optional | Resolve the credential's first header secret instead of passing a key. |
+
+Exactly one key source is required: `api_key` wins when both are present.
+
+The result follows the connectivity convention — always HTTP `200`, with success or failure in the body:
+
+| Body | Meaning |
+|------|---------|
+| `{"ok": true, "models": ["gpt-4o", …]}` | Model ids reported by the upstream `/models` endpoint. |
+| `{"ok": false, "error_kind": "…", "message": "…"}` | Same `error_kind` enum as the connectivity probe. |
+
+Outbound requests use the data-plane SSRF protection: private/loopback targets are blocked unless `-allow-private-upstreams` is set, and are reported as `network_unreachable`.
+
+| Status | Condition |
+|--------|-----------|
+| 200 | Discovery completed (whether `ok` is true or false). |
+| 400 | Invalid `model_type`/`url`, or neither key source given, or the credential has no header secret. |
+| 404 | `credential_id` not found. |
+
 ### 3.2 Credentials
 
 Upstream credentials group one or more secrets and are referenced by a model's `credential_id`. At forward time the gateway resolves the credential live (no snapshot) and uses its first `location=header` secret; if the credential is missing, disabled, or has no header secret it falls back to the model's own `api_key`.
