@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"aigate/internal/model"
 )
 
@@ -256,6 +258,9 @@ func TestLatestResponseStateInConversation_SameCreatedAt(t *testing.T) {
 		t.Fatalf("direct insert smaller id: %v", err)
 	}
 
+	// 前提核对必须在取最新一条之前：否则前提被破坏时用例会退化成空测试。
+	assertTieBaseline(t, db, "conv_tie", smaller.ID, larger.ID)
+
 	got, err := store.LatestResponseStateInConversation(ctx, "conv_tie")
 	if err != nil {
 		t.Fatalf("LatestResponseStateInConversation: %v", err)
@@ -265,9 +270,53 @@ func TestLatestResponseStateInConversation_SameCreatedAt(t *testing.T) {
 	}
 }
 
+// assertTieBaseline 核对 tie-break 用例的前提成立（会话 2 行、created_at 完全相等、id 不同）。
+//
+// 没有这一步时，直插语句里的 conversation_id / status / 时间字面量一旦漂移，
+// 该会话只剩一行（或两行时间不等），用例会退化成「取唯一一行」或「按时间取胜」的**空测试**，
+// 排序键 id DESC 不再被检验，而 go test 依旧全绿——静默失效比编译失败危险得多。
+func assertTieBaseline(t *testing.T, db *gorm.DB, conversationID, firstID, secondID string) {
+	t.Helper()
+
+	var n int64
+	if err := db.Model(&model.ResponseState{}).
+		Where("conversation_id = ?", conversationID).
+		Count(&n).Error; err != nil {
+		t.Fatalf("count conversation rows: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("conversation %q has %d rows, want 2 (tie-break premise broken: literal drift?)", conversationID, n)
+	}
+
+	// 读原始文本而非 time.Time：断言的是「库里两行的 created_at 字面完全相等」，
+	// 而不是「两者解析到同一时刻」（后者会把时区/精度差异掩盖掉）。
+	var rows []struct {
+		ID        string
+		CreatedAt string
+	}
+	if err := db.Raw(
+		"SELECT id, created_at FROM response_states WHERE conversation_id = ? ORDER BY id", conversationID,
+	).Scan(&rows).Error; err != nil {
+		t.Fatalf("read tie rows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("read %d tie rows, want 2", len(rows))
+	}
+	if rows[0].CreatedAt != rows[1].CreatedAt {
+		t.Fatalf("created_at differs (%q vs %q), want identical (tie-break premise broken)",
+			rows[0].CreatedAt, rows[1].CreatedAt)
+	}
+	if rows[0].ID == rows[1].ID {
+		t.Fatalf("ids are equal (%q), want distinct (tie-break premise broken)", rows[0].ID)
+	}
+	if rows[0].ID != firstID || rows[1].ID != secondID {
+		t.Fatalf("row ids = %q/%q, want %q/%q", rows[0].ID, rows[1].ID, firstID, secondID)
+	}
+}
+
 // TestCreateResponseState_EmptyID 钉住空 ID 的防御：空主键会落一行「谁都可能命中」的脏数据。
 func TestCreateResponseState_EmptyID(t *testing.T) {
-	store := newTestStore(t)
+	store, dsn := newTestStoreAt(t)
 	ctx := testCtx()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -279,8 +328,13 @@ func TestCreateResponseState_EmptyID(t *testing.T) {
 		}
 	}
 
-	// 脏行不得落库。
+	// 脏行不得落库。除按 id 点查外再做一次全表计数：若守卫将来改成
+	// 「TrimSpace 后判空但仍写入原值」，空白 ID 会落库而点查断言依旧绿，全表计数才能拦住。
 	if _, err := store.GetResponseState(ctx, ""); !errors.Is(err, model.ErrResponseStateNotFound) {
 		t.Fatalf("GetResponseState(\"\") err = %v, want ErrResponseStateNotFound", err)
+	}
+	db := openReadDB(t, dsn)
+	if n := countRows(t, db, &model.ResponseState{}, ""); n != 0 {
+		t.Fatalf("response_states has %d rows after rejected creates, want 0 (dirty row leaked)", n)
 	}
 }

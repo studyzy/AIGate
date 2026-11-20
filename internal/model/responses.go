@@ -147,6 +147,10 @@ func (s *Store) UpdateResponseStateStatus(
 // 因此 queued / in_progress 的在途行不会被误删。只有在保留期被配置成小于后台超时的病态场景下
 // 才可能删到在途行——那时后台任务的下一次 UpdateResponseStateStatus 会命中 0 行并静默返回 nil，
 // 表现为「状态不再更新」而非读写错乱；进程崩溃遗留的孤儿在途行也会被正常清理。
+//
+// 保留期 ≤ 0 时整个清理循环不启动（-response-retention-days=0 表示不清理、不按 0 天全删），
+// 与 webhook 投递清理的 if d.retention > 0 口径一致——该判断属于装配层，本方法不重复实现，
+// 直接调用本方法传入零值 before 会删光全表，调用方须自行守住这个前提。
 func (s *Store) PruneResponseStates(ctx context.Context, before time.Time) (int64, error) {
 	res := s.db.WithContext(ctx).Where("created_at < ?", before.UTC()).Delete(&ResponseState{})
 	if res.Error != nil {
