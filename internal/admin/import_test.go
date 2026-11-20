@@ -481,6 +481,35 @@ func TestImport_InvalidQuotaRulesRecordsError(t *testing.T) {
 	}
 }
 
+// TestImport_AcceptsOpenAIResponsesModelType 验证导入路径接受第三种上游协议 openai-responses。
+func TestImport_AcceptsOpenAIResponsesModelType(t *testing.T) {
+	srv, store, adminToken := newAdminServer(t)
+	ctx := context.Background()
+
+	payload := map[string]any{
+		"dry_run": false,
+		"models": []map[string]any{
+			{
+				"provider": "openai", "model_id": "gpt-5-responses", "model_name": "GPT-5",
+				"url": "https://upstream.example/v1", "api_key": "sk-up",
+				"model_type": "openai-responses", "quota_day": -1, "enabled": true,
+			},
+		},
+	}
+	resp, _ := runImport(t, srv, adminToken, payload)
+
+	if want := (importSummaryResp{Created: 1}); resp.Summary != want {
+		t.Fatalf("summary = %+v, want %+v", resp.Summary, want)
+	}
+	models, err := store.ListAIModels(ctx)
+	if err != nil || len(models) != 1 {
+		t.Fatalf("responses model not persisted: models=%+v err=%v", models, err)
+	}
+	if models[0].ModelType != model.ModelTypeResponses {
+		t.Fatalf("model_type = %q, want %q", models[0].ModelType, model.ModelTypeResponses)
+	}
+}
+
 // TestImport_DryRunValidatesReferences 验证预演同样做引用与绑定校验（与真实导入结论一致）。
 func TestImport_DryRunValidatesReferences(t *testing.T) {
 	srv, _, adminToken := newAdminServer(t)

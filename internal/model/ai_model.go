@@ -31,6 +31,7 @@ import (
 const (
 	ModelTypeOpenAI    = protocol.TypeOpenAICompletions // OpenAI 兼容端点（URL 含 /v1，转发时拼 /chat/completions）
 	ModelTypeAnthropic = protocol.TypeAnthropicMessages // Anthropic Messages（URL 为 host，转发时拼 /v1/messages）
+	ModelTypeResponses = protocol.TypeOpenAIResponses   // OpenAI Responses（URL 含 /v1，转发时拼 /responses）
 )
 
 // AIModel 上游模型配置。

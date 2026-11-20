@@ -280,7 +280,7 @@ func validateModelCreate(req *modelCreateRequest) string {
 		return "url is required"
 	}
 	if !validModelType(req.ModelType) {
-		return "model_type must be openai-completions or anthropic-messages"
+		return "model_type must be openai-completions, anthropic-messages or openai-responses"
 	}
 	// 自备 Key 模式：不保存共享密钥（照搬 hatchery：UserKeyRequired=true 时 api_key 必须为空）。
 	if req.UserKeyRequired != nil && *req.UserKeyRequired {
@@ -335,7 +335,7 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 	}
 	if req.ModelType != nil {
 		if !validModelType(*req.ModelType) {
-			return nil, "model_type must be openai-completions or anthropic-messages"
+			return nil, "model_type must be openai-completions, anthropic-messages or openai-responses"
 		}
 		fields["model_type"] = *req.ModelType
 	}
@@ -356,7 +356,7 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 
 // validModelType 校验模型接口类型取值。
 func validModelType(t string) bool {
-	return t == model.ModelTypeOpenAI || t == model.ModelTypeAnthropic
+	return t == model.ModelTypeOpenAI || t == model.ModelTypeAnthropic || t == model.ModelTypeResponses
 }
 
 // modelZeroValuePatch 返回创建后需要补写的零值字段（见 handleCreateModel 中说明）。

@@ -22,4 +22,6 @@ const (
 	TypeOpenAICompletions = "openai-completions"
 	// TypeAnthropicMessages 是 Anthropic Messages 协议（URL 为 host，转发时拼 /v1/messages）。
 	TypeAnthropicMessages = "anthropic-messages"
+	// TypeOpenAIResponses 是 OpenAI Responses 协议（URL 含 /v1，转发时拼 /responses）。
+	TypeOpenAIResponses = "openai-responses"
 )
