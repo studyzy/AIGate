@@ -401,9 +401,15 @@ func maxTokensFieldsProvided(reqBody map[string]any, fields []string) bool {
 
 // isResponsesShaped 判断请求体是否 Responses 形态：带 max_output_tokens 且没有 chat 的 messages。
 //
-// 三个入口进来时都是 chat 形态（chat 入口原样、Anthropic 入口转换后必有 messages）；
-// Responses 入口会先把 Responses 请求体转成 chat 请求体（含 messages）再进本函数，
-// 只有调方直接传入、未经转换的 Responses 请求体才表现为「无 messages」。
+// 协议完全由请求体自身的形态判定，不依赖 model_type（签名拿不到，见 design §5.4.1）。
+//
+// 顺序契约（design §5.4.1）：调用方必须**在把 Responses 请求转成 chat 形状之前**调用
+// enforceMaxTokens。Responses 入口的既定流程是
+// 「对 Responses 形态 body 先调 enforceMaxTokens → 再 responsesRequestToChat 转 chat 形状
+// → 再走 prepareForward 的其余步骤」，转换后得到的 chat 字段 max_tokens 已是压制后的值。
+//
+// 顺序颠倒（先转 chat 再压制）会让 Responses 请求退化为 chat 形态（带 messages），
+// max_output_tokens 随之失去密钥上限保护——这是明令禁止的执行顺序，不是设计意图。
 func isResponsesShaped(reqBody map[string]any) bool {
 	if _, ok := reqBody["max_output_tokens"]; !ok {
 		return false

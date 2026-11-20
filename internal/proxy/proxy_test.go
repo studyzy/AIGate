@@ -196,8 +196,12 @@ func TestChatCompletions_EnforceMaxTokens(t *testing.T) {
 //
 // 测试手段说明：入站走 /v1/chat/completions（上游 mock 最稳），但请求体本身是
 // Responses 形态（带 max_output_tokens、不带 messages），由 enforceMaxTokens 按
-// 「请求体形态」对待——这正是 fix round 2 引入的判定依据。chat 形态由
-// TestEnforceMaxTokens_ChatShapedMaxOutputTokens 覆盖。
+// 「请求体形态」对待——这正是 fix round 2 引入的判定依据。
+//
+// 当前进度事实（非契约）：生产入口尚未在转换前调用 enforceMaxTokens（design §5.4.1
+// 要求 Responses 入口先压制再转换，Task 8 落地），因此 Responses 形态请求体目前仅由
+// 本测试直接构造。接入入口后这些用例继续作为该路径的回归护栏。
+// chat 形态由 TestEnforceMaxTokens_ChatShapedMaxOutputTokens 覆盖。
 func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, okChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
