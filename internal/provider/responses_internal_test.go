@@ -28,7 +28,7 @@ func TestExtractResponsesUsage(t *testing.T) {
 		`"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":6},` +
 		`"output_tokens_details":{"reasoning_tokens":3}}}`
 
-	u := extractResponsesUsage(data, nil)
+	u := extractResponsesUsage(data)
 	if u == nil {
 		t.Fatalf("usage = nil, want 解析结果")
 	}
@@ -48,9 +48,14 @@ func TestExtractResponsesUsage(t *testing.T) {
 		t.Fatalf("PromptCacheWriteTokens = %d, want 6", u.PromptCacheWriteTokens)
 	}
 
-	// 无 usage 的 chunk 沿用上一次解析结果。
-	if got := extractResponsesUsage(`{"type":"response.created"}`, u); got != u {
-		t.Fatalf("无 usage 时应沿用 prev，得到 %+v", got)
+	// 不含 usage 的事件返回 nil（O-1：prev 参数已移除，沿用逻辑由调用方负责）。
+	if got := extractResponsesUsage(`{"type":"response.created"}`); got != nil {
+		t.Fatalf("无 usage 时应返回 nil，得到 %+v", got)
+	}
+	// 嵌套在 response.usage 里的用量也要能取到（response.completed 的形态）。
+	nested := extractResponsesUsage(`{"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}`)
+	if nested == nil || nested.PromptTokens != 7 || nested.CompletionTokens != 2 {
+		t.Fatalf("嵌套 usage = %+v, want prompt 7 / completion 2", nested)
 	}
 }
 

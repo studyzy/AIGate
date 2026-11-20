@@ -90,7 +90,7 @@ func (p *OpenAIResponsesProvider) ChatCompletion(
 	if err != nil {
 		return &CompletionResult{Body: respBody}, resp.StatusCode, nil
 	}
-	return &CompletionResult{Body: chatBody, Usage: extractResponsesUsage(string(respBody), nil)}, http.StatusOK, nil
+	return &CompletionResult{Body: chatBody, Usage: extractResponsesUsage(string(respBody))}, http.StatusOK, nil
 }
 
 // ChatCompletionStream 发送流式请求，把 Responses SSE 译为 chat chunk 并补 data: [DONE]。
@@ -519,11 +519,11 @@ func (u *responsesUsage) toUsage() *Usage {
 
 // extractResponsesUsage 从 Responses 响应体或 SSE data 中提取用量。
 // 不能复用 extractOpenAIUsage：它读 prompt_tokens/completion_tokens，会把 Responses 静默记成 0。
-// 无 usage 字段时返回 prev（流式中间事件依赖此语义保留已有用量）。
-func extractResponsesUsage(data string, prev *Usage) *Usage {
+// 该事件不含 usage 时返回 nil，由调用方决定是否沿用已有值（流式路径见 handleData）。
+func extractResponsesUsage(data string) *Usage {
 	var env responsesUsageEnvelope
 	if json.Unmarshal([]byte(data), &env) != nil {
-		return prev
+		return nil
 	}
 	if env.Usage != nil {
 		return env.Usage.toUsage()
@@ -531,7 +531,7 @@ func extractResponsesUsage(data string, prev *Usage) *Usage {
 	if env.Response != nil && env.Response.Usage != nil {
 		return env.Response.Usage.toUsage()
 	}
-	return prev
+	return nil
 }
 
 // responsesStreamToChat 逐行读取 Responses SSE，译为 chat chunk 写往 w，
@@ -592,26 +592,36 @@ type responsesStreamState struct {
 	terminalSeen bool
 	// toolIndex 记录 output_index → chat tool_calls[].index，保证同一工具始终落在同一序号上。
 	toolIndex map[int]int
-	// argsEmitted 记录已在 output_item.added 里下发过完整参数的 output_index，
-	// 后续 arguments.delta 必须跳过，否则参数会被重复拼接成非法 JSON。
-	argsEmitted map[int]bool
+	// argsWritten 记录已经写出过参数分片的 output_index。
+	// 用于保证「任何输入顺序下累计参数都是合法 JSON 且不重复」：
+	//   - added 带完整参数时若已有 delta 写出过，则跳过完整参数（以已写出内容为准）；
+	//   - added 带完整参数并写出后，后续 arguments.delta 一律跳过。
+	argsWritten map[int]bool
+	// argsFromAdded 区分「已写出」的来源：
+	// true = 参数来自 output_item.added 的完整参数，后续 delta 必须跳过；
+	// false = 来自 arguments.delta 增量，后续 delta 应继续拼接。
+	argsFromAdded map[int]bool
 	// nextToolIndex 是「下一个待分配的 tool_calls index」的独立计数器。
 	// 不能用 len(toolIndex)：output_index 缺失/乱序时会让两个工具复用同一序号。
 	nextToolIndex int
 	// missingIndexSeq 是「上游未给 output_index」时合成键的递减计数器，
 	// 从 -2 起向下取值，既与真实 output_index(>=0) 不撞车、也不与无主键 -1 重叠。
 	missingIndexSeq int
-	// openMissingIndex 是最近一次 output_item.added 开启的合成键（0 表示当前没有）。
-	openMissingIndex int
+	// openMissingIndex 是最近一次 output_item.added 开启的合成键；
+	// 该值可能是负数，故用 hasOpenMissingIndex 显式表达「当前是否有开启中的工具」，
+	// 避免拿 0 当哨兵（0 本身是合法的 output_index）。
+	openMissingIndex    int
+	hasOpenMissingIndex bool
 }
 
 // newResponsesStreamState 创建流式翻译状态。
 func newResponsesStreamState(w http.ResponseWriter, flusher http.Flusher) *responsesStreamState {
 	return &responsesStreamState{
-		w:           w,
-		flusher:     flusher,
-		toolIndex:   map[int]int{},
-		argsEmitted: map[int]bool{},
+		w:             w,
+		flusher:       flusher,
+		toolIndex:     map[int]int{},
+		argsWritten:   map[int]bool{},
+		argsFromAdded: map[int]bool{},
 	}
 }
 
@@ -626,7 +636,7 @@ func (s *responsesStreamState) handleData(data string) {
 
 	// usage 可能出现在终止事件里（response.completed 的 response.usage），
 	// 也可能作为独立的 response.usage 事件下发（--enable-usage 时）。
-	if u := extractResponsesUsage(data, nil); u != nil {
+	if u := extractResponsesUsage(data); u != nil {
 		s.usage = u
 		s.usageSeen = true
 	}
@@ -696,8 +706,14 @@ func (s *responsesStreamState) handleOutputItemAdded(event map[string]interface{
 		},
 	}, nil))
 
-	if args, _ := item["arguments"].(string); args != "" {
-		s.argsEmitted[outputIndex] = true
+	// 参数处理：
+	//   - arguments 为空串（真实上游常态，随后用 arguments.delta 逐块下发）→ 什么都不做；
+	//   - arguments 非空且该工具**尚未**写出过参数 → 一次性下发完整参数（兼容不发 delta 的上游）；
+	//   - arguments 非空但该工具**已经**写出过 delta（乱序窗口：delta 先到）→ 跳过，
+	//     以已写出的增量内容为准，避免 `{"b":` + `{"b":2}` 这类非法拼接。
+	if args, _ := item["arguments"].(string); args != "" && !s.argsWritten[outputIndex] {
+		s.argsWritten[outputIndex] = true
+		s.argsFromAdded[outputIndex] = true
 		s.writeArgumentsDelta(idx, args)
 	}
 }
@@ -706,13 +722,15 @@ func (s *responsesStreamState) handleOutputItemAdded(event map[string]interface{
 // 已在 output_item.added 里下发过完整参数的 output_index 直接跳过（防重复拼接）。
 func (s *responsesStreamState) handleArgumentsDelta(event map[string]interface{}) {
 	outputIndex := s.outputIndexOf(event, false)
-	if s.argsEmitted[outputIndex] {
-		return
-	}
 	delta, _ := event["delta"].(string)
 	if delta == "" {
 		return
 	}
+	// 已在 output_item.added 里下发过完整参数的工具，不再接受 delta（防重复拼接）。
+	if s.argsWritten[outputIndex] && s.argsFromAdded[outputIndex] {
+		return
+	}
+	s.argsWritten[outputIndex] = true
 	s.writeArgumentsDelta(s.toolIndexFor(outputIndex), delta)
 }
 
@@ -727,9 +745,10 @@ func (s *responsesStreamState) outputIndexOf(event map[string]interface{}, isAdd
 	if isAdded {
 		s.missingIndexSeq--
 		s.openMissingIndex = s.missingIndexSeq
+		s.hasOpenMissingIndex = true
 		return s.openMissingIndex
 	}
-	if s.openMissingIndex != 0 {
+	if s.hasOpenMissingIndex {
 		return s.openMissingIndex
 	}
 	return -1 // 无主 delta：没有 opened 的工具，统一归到一个合成键
@@ -795,7 +814,7 @@ func (s *responsesStreamState) writeChunk(chunk map[string]interface{}) {
 // chatUsageFromResponses 从响应体 / SSE data 中提取并渲染 chat 形状的 usage 对象。
 // 统一走 chatUsageFromResponsesUsage，避免两处口径漂移。
 func chatUsageFromResponses(data string) map[string]interface{} {
-	u := extractResponsesUsage(data, nil)
+	u := extractResponsesUsage(data)
 	if u == nil {
 		return map[string]any{}
 	}

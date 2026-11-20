@@ -88,6 +88,12 @@ func parseChatStream(t *testing.T, raw string) (chunks []streamChunk, sawDone bo
 	return chunks, sawDone, toolArgs, toolNames
 }
 
+// sseLine 把一个事件对象序列化为一行 SSE `data: ...`（含结尾空行）。
+func sseLine(event map[string]interface{}) string {
+	b, _ := json.Marshal(event)
+	return "data: " + string(b) + "\n\n"
+}
+
 // responsesSSE 用 data 行拼装 Responses SSE（事件名与 data 行都写出，贴近真实上游）。
 func responsesSSE(pairs ...string) string {
 	var b strings.Builder
@@ -342,7 +348,7 @@ func TestResponsesStream_DataWithoutSpace(t *testing.T) {
 func TestChatUsageFromResponses_MatchesUsageRenderer(t *testing.T) {
 	data := `{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,` +
 		`"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":6}}}`
-	got, want := chatUsageFromResponses(data), chatUsageFromResponsesUsage(extractResponsesUsage(data, nil))
+	got, want := chatUsageFromResponses(data), chatUsageFromResponsesUsage(extractResponsesUsage(data))
 	if len(got) != len(want) {
 		t.Fatalf("字段数不同: got %v want %v", got, want)
 	}
@@ -372,6 +378,144 @@ func TestIntField_ReportsPresence(t *testing.T) {
 	}
 	if v, ok := intField(m, "str"); v != 0 || ok {
 		t.Fatalf("str: got (%d,%v), want (0,false)", v, ok)
+	}
+}
+
+// TestResponsesStreamToolCall_AddedNonEmptyAndDeltaConflict（C1 有效门，round 2）
+//
+// 这是 review 要求的**真冲突序列**：output_item.added 带**非空** arguments（完整 `{"a":1}`），
+// 随后同一 output_index 仍发 function_call_arguments.delta（同样的 `{"a":1}`，或它的一半）。
+// 若守卫失效，累计参数会变成 `{"a":1}{"a":1}` 这种非法 JSON。
+//
+// 变异验证：删掉 handleOutputItemAdded / handleArgumentsDelta 的 argsEmitted 守卫，
+// 本用例必须变红（见 fix report）。
+func TestResponsesStreamToolCall_AddedNonEmptyAndDeltaConflict(t *testing.T) {
+	tests := []struct {
+		name   string
+		deltas []string
+	}{
+		{name: "delta repeats full args", deltas: []string{`{"a":1}`}},
+		{name: "delta splits full args", deltas: []string{`{"a":`, `1}`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			b.WriteString(`data: {"type":"response.output_item.added","output_index":0,`)
+			b.WriteString(`"item":{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"a\":1}"}}` + "\n\n")
+			for _, d := range tc.deltas {
+				// delta 用 JSON 编码拼接，避免手写转义出错。
+				payload, _ := json.Marshal(map[string]interface{}{
+					"type":         "response.function_call_arguments.delta",
+					"output_index": 0,
+					"delta":        d,
+				})
+				b.WriteString("data: " + string(payload) + "\n\n")
+			}
+			b.WriteString(`data: {"type":"response.completed","response":{"status":"completed",`)
+			b.WriteString(`"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n")
+
+			rec := httptest.NewRecorder()
+			if _, err := responsesStreamToChat(rec, rec, strings.NewReader(b.String())); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			_, _, toolArgs, _ := parseChatStream(t, rec.Body.String())
+			if got := toolArgs[0]; got != `{"a":1}` {
+				t.Fatalf("tool index 0 arguments = %q, want %q（不得与 added 的完整参数重复拼接）", got, `{"a":1}`)
+			}
+			if !json.Valid([]byte(toolArgs[0])) {
+				t.Fatalf("拼接后的 arguments 不是合法 JSON: %q", toolArgs[0])
+			}
+		})
+	}
+}
+
+// TestResponsesStreamToolCall_DeltaBeforeAddedWithFullArgs（I-1，round 2）
+//
+// 「delta 先于 added」与「added 带非空参数」叠加的窗口：
+// 工具1(index1) 的 delta 先写出，随后它的 added 又带完整参数 —— 不得再追加一次。
+// 复审实测该序列曾得到 beta = `{"b":{"b":2}}`（非法 JSON）。
+func TestResponsesStreamToolCall_DeltaBeforeAddedWithFullArgs(t *testing.T) {
+	const sse = `data: {"type":"response.output_item.added","output_index":0,` +
+		`"item":{"type":"function_call","call_id":"call_0","name":"alpha","arguments":"{\"a\":1}"}}` + "\n\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"b\":"}` + "\n\n" +
+		`data: {"type":"response.output_item.added","output_index":1,` +
+		`"item":{"type":"function_call","call_id":"call_1","name":"beta","arguments":"{\"b\":2}"}}` + "\n\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"2}"}` + "\n\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"a\":1}"}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"status":"completed",` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"
+
+	rec := httptest.NewRecorder()
+	if _, err := responsesStreamToChat(rec, rec, strings.NewReader(sse)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, _, toolArgs, toolNames := parseChatStream(t, rec.Body.String())
+	byName := map[string]string{}
+	for idx, name := range toolNames {
+		byName[name] = toolArgs[idx]
+	}
+	if got := byName["alpha"]; got != `{"a":1}` {
+		t.Fatalf("alpha = %q, want %q（toolArgs=%v）", got, `{"a":1}`, toolArgs)
+	}
+	if got := byName["beta"]; !json.Valid([]byte(got)) || got != `{"b":2}` {
+		t.Fatalf("beta = %q, want %q 且为合法 JSON（toolArgs=%v names=%v）", got, `{"b":2}`, toolArgs, toolNames)
+	}
+}
+
+// TestResponsesStreamToolCall_ArgumentsAlwaysValidJSON（不变量测试）
+//
+// 任意输入顺序下，每个 tool 的累计参数都必须是合法 JSON 且与上游语义一致。
+// 覆盖 added↔delta 的四种交错组合（含 C1 冲突与 I-1 的 delta-先行窗口）。
+func TestResponsesStreamToolCall_ArgumentsAlwaysValidJSON(t *testing.T) {
+	added := func(idx int, args string) string {
+		return sseLine(map[string]interface{}{
+			"type":         "response.output_item.added",
+			"output_index": idx,
+			"item": map[string]interface{}{
+				"type": "function_call", "call_id": "c0", "name": "f0", "arguments": args,
+			},
+		})
+	}
+	delta := func(idx int, d string) string {
+		return sseLine(map[string]interface{}{
+			"type":         "response.function_call_arguments.delta",
+			"output_index": idx,
+			"delta":        d,
+		})
+	}
+	done := sseLine(map[string]interface{}{
+		"type": "response.completed",
+		"response": map[string]interface{}{
+			"status": "completed",
+			"usage":  map[string]interface{}{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+		},
+	})
+
+	cases := map[string]string{
+		"added empty then delta":   added(0, "") + delta(0, `{"x":`) + delta(0, `1}`) + done,
+		"added full then delta":    added(0, `{"x":1}`) + delta(0, `{"x":1}`) + done,
+		"delta before empty added": delta(0, `{"x":`) + delta(0, `1}`) + added(0, "") + done,
+		"delta before full added":  delta(0, `{"x":1}`) + added(0, `{"x":1}`) + done,
+	}
+	for name, sse := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if _, err := responsesStreamToChat(rec, rec, strings.NewReader(sse)); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			_, _, toolArgs, _ := parseChatStream(t, rec.Body.String())
+			if len(toolArgs) == 0 {
+				t.Fatalf("未产出任何 tool 分片:\n%s", rec.Body.String())
+			}
+			for idx, args := range toolArgs {
+				if !json.Valid([]byte(args)) {
+					t.Fatalf("tool %d arguments 不是合法 JSON: %q", idx, args)
+				}
+				if args != `{"x":1}` {
+					t.Fatalf("tool %d arguments = %q, want %q", idx, args, `{"x":1}`)
+				}
+			}
+		})
 	}
 }
 
