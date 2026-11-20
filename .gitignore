@@ -24,3 +24,9 @@ coverage.out
 /openspec/
 /.codebuddy/
 /graphify-out/
+
+# WebUI：前端产物由 vite 构建进 embed 目录，仅保留 .gitkeep 让 go:embed 可用
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep
+/webui/node_modules/
+/webui/dist/
