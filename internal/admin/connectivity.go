@@ -47,7 +47,7 @@ type connectivityFailure struct {
 }
 
 // handleModelConnectivity 实现 `POST /admin/models/{id}/connectivity`：
-// 以最小对话请求（max_tokens=1）探测模型配置是否可用。
+// 以最小对话请求（要求模型只回一个 hello，max_tokens=8）探测模型配置是否可用。
 //
 // 口径说明：
 //   - 探测结果一律以 HTTP 200 返回，成功/失败体现在 body 的 ok 字段（探测失败不是接口调用失败）；

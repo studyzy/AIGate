@@ -260,7 +260,7 @@ func firstPositiveInt(values ...int) int {
 }
 
 // CheckConnectivityWithChat probes an OpenAI-compatible endpoint by issuing a
-// minimal POST /chat/completions request (one user message, max_tokens=1).
+// minimal POST /chat/completions request (one user message asking for "hello").
 //
 // This probe validates both network reachability, the apiKey, and that the
 // supplied model name is actually invocable.
@@ -275,9 +275,9 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 	req := map[string]interface{}{
 		"model": model,
 		"messages": []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			{"role": "user", "content": probePrompt},
 		},
-		"max_tokens": 1,
+		"max_tokens": probeMaxTokens,
 		"stream":     false,
 	}
 	normalizeMaxTokensParam(req, model)

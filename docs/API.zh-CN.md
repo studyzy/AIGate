@@ -440,7 +440,7 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 
 #### POST /admin/models/{id}/connectivity
 
-以最小请求（单条 user 消息、`max_tokens=1`）探测上游，验证地址可达、凭据有效且模型可调用。
+以最小请求（单条 user 消息，要求模型只回一个 `hello`，`max_tokens=8`）探测上游，验证地址可达、凭据有效且模型可调用。
 
 **探测结果一律以 HTTP `200` 返回**，成功/失败体现在 body 的 `ok`：
 

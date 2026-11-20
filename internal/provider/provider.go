@@ -97,6 +97,14 @@ func (e *ConnectivityError) Error() string {
 // Unwrap returns the sentinel kind so errors.Is(err, ErrInvalidAPIKey) works.
 func (e *ConnectivityError) Unwrap() error { return e.Kind }
 
+// 连通性探测的固定请求参数：真实发一次对话请求，但只要求回一个词，控制消耗。
+const (
+	// probePrompt 让模型只回一个 hello（比 "hi" 更能验证模型真的产生了输出）。
+	probePrompt = "Reply with the single word: hello"
+	// probeMaxTokens 只需容纳 "hello" 这几个 token；留一点余量避免被截断成空响应。
+	probeMaxTokens = 8
+)
+
 // classifyHTTPStatus maps an HTTP status code (>=400) to the matching sentinel.
 // Returns nil for 2xx/3xx, signalling success.
 func classifyHTTPStatus(status int) error {
@@ -141,7 +149,7 @@ type Provider interface {
 	) (result *StreamResult, statusCode int, err error)
 
 	// CheckConnectivityWithChat probes the upstream provider by issuing a
-	// minimal chat completion request (one user message, max_tokens=1).
+	// minimal chat completion request (one user message asking for "hello").
 	// This is more expensive than CheckConnectivity but works on providers
 	// that don't expose a list-models endpoint, and additionally validates
 	// that the specified model is actually invocable with the supplied key.

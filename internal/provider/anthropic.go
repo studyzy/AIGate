@@ -1062,7 +1062,7 @@ func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, chunk map[string
 }
 
 // CheckConnectivityWithChat probes the Anthropic Messages API by issuing a
-// minimal POST /v1/messages request (one user message, max_tokens=1).
+// minimal POST /v1/messages request (one user message asking for "hello").
 //
 // This probe validates both network reachability, the apiKey, and that the
 // supplied model name is actually invocable.
@@ -1076,9 +1076,9 @@ func (p *AnthropicProvider) CheckConnectivityWithChat(
 ) (time.Duration, error) {
 	body, err := json.Marshal(map[string]interface{}{
 		"model":      model,
-		"max_tokens": 1,
+		"max_tokens": probeMaxTokens,
 		"messages": []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			{"role": "user", "content": probePrompt},
 		},
 	})
 	if err != nil {

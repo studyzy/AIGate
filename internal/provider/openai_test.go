@@ -312,6 +312,13 @@ func TestOpenAICheckConnectivityWithChat_Success(t *testing.T) {
 	if !ok || len(msgs) != 1 {
 		t.Fatalf("messages should be a single-element array, got %v", gotBody["messages"])
 	}
+	first, _ := msgs[0].(map[string]any)
+	if first["content"] != "Reply with the single word: hello" {
+		t.Fatalf("probe prompt = %v, want the hello instruction", first["content"])
+	}
+	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 8 {
+		t.Fatalf("body.max_tokens = %v, want 8", gotBody["max_tokens"])
+	}
 }
 
 // TestOpenAICheckConnectivityWithChat_NewModelMaxCompletionTokens 验证 GPT-5+ / o-series

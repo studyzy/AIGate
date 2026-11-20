@@ -282,7 +282,7 @@ func TestAnthropicChatCompletionStream_ReachableUpstream(t *testing.T) {
 }
 
 // TestAnthropicCheckConnectivityWithChat_Success 验证探测打到 /v1/messages，
-// 带上 x-api-key / anthropic-version 与 max_tokens=1 的最小请求体。
+// 带上 x-api-key / anthropic-version 与 max_tokens=8 的最小请求体（要求模型只回 hello）。
 func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	allowPrivateForTest(t)
 
@@ -332,12 +332,16 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	if gotBody["model"] != "claude-3-5-haiku-20241022" {
 		t.Fatalf("body.model = %v, want claude-3-5-haiku-20241022", gotBody["model"])
 	}
-	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 1 {
-		t.Fatalf("body.max_tokens = %v, want 1", gotBody["max_tokens"])
+	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 8 {
+		t.Fatalf("body.max_tokens = %v, want 8", gotBody["max_tokens"])
 	}
 	msgs, ok := gotBody["messages"].([]any)
 	if !ok || len(msgs) != 1 {
 		t.Fatalf("messages should be a single-element array, got %v", gotBody["messages"])
+	}
+	first, _ := msgs[0].(map[string]any)
+	if first["content"] != "Reply with the single word: hello" {
+		t.Fatalf("probe prompt = %v, want the hello instruction", first["content"])
 	}
 }
 

@@ -113,15 +113,15 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 	if resp.ErrorKind != "" || resp.Message != "" {
 		t.Fatalf("success response should not carry error_kind/message: %+v", resp)
 	}
-	// 探测以最小对话请求（max_tokens=1）打上游的 /chat/completions，并带模型的 api_key。
+	// 探测以最小对话请求（要求回 hello）打上游的 /chat/completions，并带模型的 api_key。
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
 	}
 	if gotAuth != "Bearer sk-upstream-secret" {
 		t.Fatalf("upstream Authorization = %q, want Bearer sk-upstream-secret", gotAuth)
 	}
-	if got, ok := gotBody["max_tokens"].(float64); !ok || got != 1 {
-		t.Fatalf("probe request max_tokens = %v, want 1", gotBody["max_tokens"])
+	if got, ok := gotBody["max_tokens"].(float64); !ok || got != 8 {
+		t.Fatalf("probe request max_tokens = %v, want 8", gotBody["max_tokens"])
 	}
 }
 

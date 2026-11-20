@@ -427,7 +427,7 @@ Response `200 OK`:
 
 #### POST /admin/models/{id}/connectivity
 
-Probe an upstream with a minimal request (a single user message and `max_tokens=1`) to check that the address is reachable, the credential is valid, and the model answers.
+Probe an upstream with a minimal request — one user message asking the model to reply with the single word `hello`, `max_tokens=8` — to check that the address is reachable, the credential is valid, and the model actually answers.
 
 **The probe result is always returned with HTTP `200`**; success or failure lives in the body's `ok` field:
 
