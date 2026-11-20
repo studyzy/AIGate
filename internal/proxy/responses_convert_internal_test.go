@@ -747,3 +747,429 @@ func TestResponsesStreamTranslator_ErrorEvent(t *testing.T) {
 		t.Fatalf("error payload = %#v, want the upstream message", errPayload)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 流式方向：工具调用事件合成（spec §5.5.1）
+// ---------------------------------------------------------------------------
+
+// respStreamChatToolChunk 组装一个带 tool_calls 增量的 chat 分片。
+// args 为空串时不写 arguments 字段（模拟只带 id/name 的首片）。
+func respStreamChatToolChunk(index int, id, name, args string) string {
+	fn := map[string]any{"name": name, "arguments": args}
+	call := map[string]any{"index": index, "function": fn}
+	if id != "" {
+		call["id"] = id
+		call["type"] = "function"
+	}
+	chunk := map[string]any{
+		"id":      "c1",
+		"object":  "chat.completion.chunk",
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{call}}}},
+	}
+	b, err := json.Marshal(chunk)
+	if err != nil {
+		return ""
+	}
+	return respStreamSSE(string(b))
+}
+
+// respStreamChatTextChunk 组装一个只带文本增量的 chat 分片。
+func respStreamChatTextChunk(text string) string {
+	chunk := map[string]any{
+		"id":      "c1",
+		"object":  "chat.completion.chunk",
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}}},
+	}
+	b, _ := json.Marshal(chunk)
+	return respStreamSSE(string(b))
+}
+
+// respStreamChatFinishChunk 组装带 finish_reason 与 usage 的末片。
+func respStreamChatFinishChunk(finishReason string) string {
+	chunk := map[string]any{
+		"id":      "c1",
+		"object":  "chat.completion.chunk",
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finishReason}},
+		"usage":   map[string]any{"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+	}
+	b, _ := json.Marshal(chunk)
+	return respStreamSSE(string(b))
+}
+
+// respStreamEventNames 返回事件名序列。
+func respStreamEventNames(events [][2]string) []string {
+	names := make([]string, 0, len(events))
+	for _, ev := range events {
+		names = append(names, ev[0])
+	}
+	return names
+}
+
+// respStreamAllOf 返回指定类型的全部事件（按出现顺序）。
+func respStreamAllOf(events [][2]string, eventName string) [][2]string {
+	var out [][2]string
+	for _, ev := range events {
+		if ev[0] == eventName {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// respStreamCompleted 返回 response.completed 的 response 对象。
+func respStreamCompleted(t *testing.T, events [][2]string) map[string]any {
+	t.Helper()
+	payload := respStreamDataOf(t, events, "response.completed", 0)
+	resp, ok := payload["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("response.completed payload lacks a response object: %v", payload)
+	}
+	return resp
+}
+
+// respStreamOutput 返回终态 response 的 output 数组。
+func respStreamOutput(t *testing.T, resp map[string]any) []any {
+	t.Helper()
+	output, ok := resp["output"].([]any)
+	if !ok {
+		t.Fatalf("response.output = %#v, want an array", resp["output"])
+	}
+	return output
+}
+
+// respStreamItemAt 取 output[i] 并断言是对象。
+func respStreamItemAt(t *testing.T, output []any, i int) map[string]any {
+	t.Helper()
+	if i >= len(output) {
+		t.Fatalf("output has %d items, want index %d: %#v", len(output), i, output)
+	}
+	item, ok := output[i].(map[string]any)
+	if !ok {
+		t.Fatalf("output[%d] = %#v, want an object", i, output[i])
+	}
+	return item
+}
+
+// TestResponsesStreamTranslator_FunctionCallSingle 单工具流式：两个参数增量分片
+// → 事件序列含 function_call_arguments.delta ×2 与 .done，且终态 item 的 arguments 是完整合法 JSON。
+func TestResponsesStreamTranslator_FunctionCallSingle(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatToolChunk(0, "call_1", "get_weather", ""), 0)
+	respStreamFeed(t, tr, respStreamChatToolChunk(0, "", "", `{"city":`), 0)
+	respStreamFeed(t, tr, respStreamChatToolChunk(0, "", "", `"SZ"}`), 0)
+	respStreamFeed(t, tr, respStreamChatFinishChunk("tool_calls"), 0)
+	tr.Finish()
+
+	raw := rec.Body.String()
+	if strings.Contains(raw, "[DONE]") {
+		t.Fatalf("output contains [DONE]")
+	}
+	events := respStreamEvents(t, raw)
+
+	// 参数增量：恰好两条，内容与顺序与上游分片一致。
+	deltas := respStreamAllOf(events, "response.function_call_arguments.delta")
+	if len(deltas) != 2 {
+		t.Fatalf("function_call_arguments.delta count = %d, want 2: %v", len(deltas), respStreamEventNames(events))
+	}
+	for i, want := range []string{`{"city":`, `"SZ"}`} {
+		payload := respStreamDataOf(t, events, "response.function_call_arguments.delta", i)
+		if payload["delta"] != want {
+			t.Fatalf("delta #%d = %#v, want %q", i, payload["delta"], want)
+		}
+	}
+
+	// 参数收齐：done 恰好一条，带完整 arguments。
+	argDone := respStreamDataOf(t, events, "response.function_call_arguments.done", 0)
+	if argDone["arguments"] != `{"city":"SZ"}` {
+		t.Fatalf("function_call_arguments.done arguments = %#v, want the full JSON", argDone["arguments"])
+	}
+
+	// output_item.added 的 item 形状。
+	added := respStreamDataOf(t, events, "response.output_item.added", 0)
+	addedItem, ok := added["item"].(map[string]any)
+	if !ok {
+		t.Fatalf("output_item.added item = %#v, want an object", added["item"])
+	}
+	if addedItem["type"] != "function_call" || addedItem["call_id"] != "call_1" ||
+		addedItem["name"] != "get_weather" || addedItem["arguments"] != "" {
+		t.Fatalf("output_item.added item = %#v, want function_call with empty arguments", addedItem)
+	}
+
+	// 终态 output：唯一 item 是 function_call，arguments 为完整合法 JSON。
+	resp := respStreamCompleted(t, events)
+	if resp["status"] != "completed" {
+		t.Fatalf("status = %#v, want \"completed\" for finish_reason=tool_calls", resp["status"])
+	}
+	output := respStreamOutput(t, resp)
+	if len(output) != 1 {
+		t.Fatalf("output = %#v, want exactly 1 function_call item", output)
+	}
+	item := respStreamItemAt(t, output, 0)
+	if item["type"] != "function_call" || item["call_id"] != "call_1" || item["name"] != "get_weather" {
+		t.Fatalf("output[0] = %#v, want the function_call item", item)
+	}
+	args, _ := item["arguments"].(string)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("output[0].arguments = %q is not valid JSON: %v", args, err)
+	}
+	if parsed["city"] != "SZ" {
+		t.Fatalf("output[0].arguments = %q, want city=SZ", args)
+	}
+
+	// 无文本输出：不应出现 message 级事件。
+	for _, name := range []string{"response.content_part.added", "response.output_text.delta"} {
+		if len(respStreamAllOf(events, name)) != 0 {
+			t.Fatalf("unexpected %q event in a tool-only stream: %v", name, respStreamEventNames(events))
+		}
+	}
+}
+
+// TestResponsesStreamTranslator_FunctionCallParallel 多工具并行：两个工具交错增量
+// → 各自 output_index 不同、参数不互相污染、output[] 有 2 个 function_call item。
+func TestResponsesStreamTranslator_FunctionCallParallel(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	// 交错：A 首片 → B 首片 → A 参数 → B 参数 → A 参数
+	for _, chunk := range []string{
+		respStreamChatToolChunk(0, "call_a", "alpha", ""),
+		respStreamChatToolChunk(1, "call_b", "beta", ""),
+		respStreamChatToolChunk(0, "", "", `{"a":1`),
+		respStreamChatToolChunk(1, "", "", `{"b":2`),
+		respStreamChatToolChunk(0, "", "", `}`),
+		respStreamChatToolChunk(1, "", "", `}`),
+		respStreamChatFinishChunk("tool_calls"),
+	} {
+		respStreamFeed(t, tr, chunk, 0)
+	}
+	tr.Finish()
+	events := respStreamEvents(t, rec.Body.String())
+
+	// 两个 item 的 output_index 必须不同。
+	addedA := respStreamDataOf(t, events, "response.output_item.added", 0)
+	addedB := respStreamDataOf(t, events, "response.output_item.added", 1)
+	idxA, idxB := addedA["output_index"], addedB["output_index"]
+	if idxA == nil || idxB == nil || idxA == idxB {
+		t.Fatalf("output_index = %v / %v, want two distinct integers", idxA, idxB)
+	}
+
+	// 每条参数增量必须落到各自 item 的 output_index 上（不串号）。
+	deltas := respStreamAllOf(events, "response.function_call_arguments.delta")
+	if len(deltas) != 4 {
+		t.Fatalf("delta count = %d, want 4: %v", len(deltas), respStreamEventNames(events))
+	}
+	itemOf := map[any]string{idxA: "call_a", idxB: "call_b"}
+	got := map[string]string{}
+	for i := range deltas {
+		payload := respStreamDataOf(t, events, "response.function_call_arguments.delta", i)
+		callID, ok := itemOf[payload["output_index"]]
+		if !ok {
+			t.Fatalf("delta #%d carries unknown output_index %#v", i, payload["output_index"])
+		}
+		got[callID] += payload["delta"].(string)
+	}
+	if got["call_a"] != `{"a":1}` || got["call_b"] != `{"b":2}` {
+		t.Fatalf("accumulated arguments = %#v, want call_a {\"a\":1} / call_b {\"b\":2}", got)
+	}
+
+	argDone := respStreamAllOf(events, "response.function_call_arguments.done")
+	if len(argDone) != 2 {
+		t.Fatalf("function_call_arguments.done count = %d, want 2", len(argDone))
+	}
+	doneArgs := map[any]string{}
+	for i := range argDone {
+		payload := respStreamDataOf(t, events, "response.function_call_arguments.done", i)
+		doneArgs[payload["output_index"]] = payload["arguments"].(string)
+	}
+	if doneArgs[idxA] != `{"a":1}` || doneArgs[idxB] != `{"b":2}` {
+		t.Fatalf("done arguments = %#v, want per-tool complete JSON", doneArgs)
+	}
+
+	// 终态 output：2 个 function_call item，参数各自完整。
+	resp := respStreamCompleted(t, events)
+	output := respStreamOutput(t, resp)
+	if len(output) != 2 {
+		t.Fatalf("output = %#v, want 2 function_call items", output)
+	}
+	calls := map[string]string{}
+	for i := range output {
+		item := respStreamItemAt(t, output, i)
+		if item["type"] != "function_call" {
+			t.Fatalf("output[%d].type = %#v, want function_call", i, item["type"])
+		}
+		callID, _ := item["call_id"].(string)
+		args, _ := item["arguments"].(string)
+		calls[callID] = args
+	}
+	if calls["call_a"] != `{"a":1}` || calls["call_b"] != `{"b":2}` {
+		t.Fatalf("output arguments = %#v, want call_a {\"a\":1} / call_b {\"b\":2}", calls)
+	}
+}
+
+// TestResponsesStreamTranslator_TextThenTool 文本 + 工具混合：
+// output[] 同时含 message 与 function_call，顺序与出现顺序一致，output_index 不共享。
+func TestResponsesStreamTranslator_TextThenTool(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	for _, chunk := range []string{
+		respStreamChatTextChunk("let me check"),
+		respStreamChatToolChunk(0, "call_1", "get_weather", `{"city":"SZ"}`),
+		respStreamChatFinishChunk("tool_calls"),
+	} {
+		respStreamFeed(t, tr, chunk, 0)
+	}
+	tr.Finish()
+	events := respStreamEvents(t, rec.Body.String())
+
+	// 两个 item 的 added 事件必须分配不同 output_index。
+	addedMsg := respStreamDataOf(t, events, "response.output_item.added", 0)
+	addedCall := respStreamDataOf(t, events, "response.output_item.added", 1)
+	if addedMsg["output_index"] == addedCall["output_index"] {
+		t.Fatalf("message and function_call share output_index %v", addedMsg["output_index"])
+	}
+	msgItem, _ := addedMsg["item"].(map[string]any)
+	if msgItem["type"] != "message" {
+		t.Fatalf("first added item = %#v, want the message item first", msgItem)
+	}
+	callIdx, ok := addedCall["output_index"].(float64)
+	if !ok || callIdx <= addedMsg["output_index"].(float64) {
+		t.Fatalf("function_call output_index = %#v, want it to follow the message index", addedCall["output_index"])
+	}
+
+	// content_part 事件必须带 message 的 output_index（而非写死 0 之外的值）。
+	partAdded := respStreamDataOf(t, events, "response.content_part.added", 0)
+	if partAdded["output_index"] != addedMsg["output_index"] {
+		t.Fatalf("content_part.added output_index = %#v, want %#v", partAdded["output_index"], addedMsg["output_index"])
+	}
+	argDelta := respStreamDataOf(t, events, "response.function_call_arguments.delta", 0)
+	if argDelta["output_index"] != addedCall["output_index"] {
+		t.Fatalf("arguments.delta output_index = %#v, want %#v", argDelta["output_index"], addedCall["output_index"])
+	}
+
+	// 终态 output：message 在前，function_call 在后。
+	resp := respStreamCompleted(t, events)
+	output := respStreamOutput(t, resp)
+	if len(output) != 2 {
+		t.Fatalf("output = %#v, want message + function_call", output)
+	}
+	msg := respStreamItemAt(t, output, 0)
+	if msg["type"] != "message" {
+		t.Fatalf("output[0].type = %#v, want message first", msg["type"])
+	}
+	content, _ := msg["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("output[0].content = %#v, want one output_text part", msg["content"])
+	}
+	if part, _ := content[0].(map[string]any); part["text"] != "let me check" {
+		t.Fatalf("output[0].content[0].text = %#v, want \"let me check\"", content[0])
+	}
+	call := respStreamItemAt(t, output, 1)
+	if call["type"] != "function_call" || call["call_id"] != "call_1" || call["arguments"] != `{"city":"SZ"}` {
+		t.Fatalf("output[1] = %#v, want the function_call item", call)
+	}
+}
+
+// TestResponsesStreamTranslator_FunctionCallInterleavedWithText 工具与文本第二次交错：
+// 一条工具调用后再来文本增量，必须复用同一个 message item（不新开），output 仍为 2 项。
+func TestResponsesStreamTranslator_FunctionCallInterleavedWithText(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	for _, chunk := range []string{
+		respStreamChatTextChunk("first "),
+		respStreamChatToolChunk(0, "call_1", "get_weather", `{}`),
+		respStreamChatTextChunk("second"),
+		respStreamChatFinishChunk("tool_calls"),
+	} {
+		respStreamFeed(t, tr, chunk, 0)
+	}
+	tr.Finish()
+	events := respStreamEvents(t, rec.Body.String())
+
+	// message item 只 added 一次。
+	if n := len(respStreamAllOf(events, "response.output_item.added")); n != 2 {
+		t.Fatalf("output_item.added count = %d, want 2 (message + function_call): %v",
+			n, respStreamEventNames(events))
+	}
+	resp := respStreamCompleted(t, events)
+	output := respStreamOutput(t, resp)
+	if len(output) != 2 {
+		t.Fatalf("output = %#v, want message + function_call", output)
+	}
+	msg := respStreamItemAt(t, output, 0)
+	content, _ := msg["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("output[0].content = %#v, want one part", msg["content"])
+	}
+	part, _ := content[0].(map[string]any)
+	if part["text"] != "first second" {
+		t.Fatalf("message text = %#v, want both deltas in one item", part["text"])
+	}
+}
+
+// TestResponsesStreamTranslator_TextOnlyNoRegression 断言纯文本流的事件序列
+// 仍严格等于 §5.5 原序列（工具调用支持不得改变 message 路径）。
+func TestResponsesStreamTranslator_TextOnlyNoRegression(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatChunks(), 0)
+	tr.Finish()
+
+	gotNames := respStreamEventNames(respStreamEvents(t, rec.Body.String()))
+	if strings.Join(gotNames, ",") != strings.Join(respStreamWantOrder, ",") {
+		t.Fatalf("event types = %v, want exactly %v", gotNames, respStreamWantOrder)
+	}
+}
+
+// TestResponsesStreamTranslator_FunctionCallClosure 断言收尾时每个未收齐的工具
+// 都会补齐 arguments.done → output_item.done（即便上游未发 [DONE] / 末块）。
+func TestResponsesStreamTranslator_FunctionCallClosure(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	for _, chunk := range []string{
+		respStreamChatTextChunk("hi"),
+		respStreamChatToolChunk(0, "call_1", "alpha", `{"a":1}`),
+		respStreamChatToolChunk(1, "call_2", "beta", `{"b":2}`),
+	} {
+		respStreamFeed(t, tr, chunk, 0)
+	}
+	// 故意不给 [DONE] 与 finish_reason，直接 Finish。
+	tr.Finish()
+	events := respStreamEvents(t, rec.Body.String())
+
+	if n := len(respStreamAllOf(events, "response.function_call_arguments.done")); n != 2 {
+		t.Fatalf("function_call_arguments.done count = %d, want 2: %v", n, respStreamEventNames(events))
+	}
+	// output_item.done 必须覆盖全部 3 个 item。
+	doneItems := respStreamAllOf(events, "response.output_item.done")
+	if len(doneItems) != 3 {
+		t.Fatalf("output_item.done count = %d, want 3", len(doneItems))
+	}
+	// 收尾顺序：所有 item 级事件都必须在 response.completed 之前。
+	names := respStreamEventNames(events)
+	if names[len(names)-1] != "response.completed" {
+		t.Fatalf("last event = %q, want response.completed", names[len(names)-1])
+	}
+	// 每个 item 的 added 必须早于其 done（按 output_index 配对）。
+	type span struct{ added, done int }
+	spans := map[int]*span{}
+	for j := range events {
+		name := events[j][0]
+		if name != "response.output_item.added" && name != "response.output_item.done" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(events[j][1]), &payload); err != nil {
+			t.Fatalf("unmarshal %s payload: %v", name, err)
+		}
+		idx := int(payload["output_index"].(float64))
+		if spans[idx] == nil {
+			spans[idx] = &span{added: -1, done: -1}
+		}
+		if name == "response.output_item.added" {
+			spans[idx].added = j
+		} else {
+			spans[idx].done = j
+		}
+	}
+	for idx := 0; idx < 3; idx++ {
+		sp := spans[idx]
+		if sp == nil || sp.added < 0 || sp.done < 0 || sp.added > sp.done {
+			t.Fatalf("item %d: span = %#v, want added before done", idx, sp)
+		}
+	}
+}

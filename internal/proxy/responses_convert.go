@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -421,14 +422,22 @@ func responsesInt(obj map[string]any, key string) int {
 
 // responsesStreamTranslator 把 chat 形状的 SSE 增量合成为 Responses 事件序列并写入目标 writer。
 //
-// 输出事件序列（spec §5.5）：
+// 纯文本输出的事件序列（spec §5.5）：
 //
 //	response.created → response.in_progress → response.output_item.added
 //	→ response.content_part.added → response.output_text.delta* → response.output_text.done
 //	→ response.content_part.done → response.output_item.done → response.completed
 //
+// 工具调用（delta.tool_calls[]，spec §5.5.1）为每个工具额外合成：
+//
+//	response.output_item.added（function_call）→ response.function_call_arguments.delta*
+//	→ response.function_call_arguments.done → response.output_item.done
+//
+// 一个响应可同时包含一个 message item 与多个 function_call item；output_index 按 item
+// 首次出现的顺序递增，message 与各 function_call 互不共享。每个 item 独立累积自己的内容。
+//
 // 与 chat 流不同，Responses 流以 response.completed 为界，绝不写 "[DONE]"。
-// 收尾事件由上游 [DONE]、带 finish_reason 的末块或调用方 Finish() 触发。
+// 收尾事件由上游 [DONE]、调用方 Finish() 触发。
 type responsesStreamTranslator struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
@@ -441,20 +450,49 @@ type responsesStreamTranslator struct {
 	// wrote 标记是否已向客户端写出过任何字节（供调用方判断「未写出即失败 → 502」）。
 	wrote bool
 
-	// opened 标记 created/in_progress/output_item.added 是否已发出；
+	// opened 标记 created/in_progress 是否已发出；
 	// closed 标记收尾是否已完成；failed 标记是否已输出错误事件。
 	opened bool
 	closed bool
 	failed bool
 
-	// text 累积的全文；partOpen 标记 content_part 是否已开始。
-	text     strings.Builder
-	partOpen bool
+	// items 是按 output_index 排列的已开启 item（按首次出现顺序追加）。
+	items []*responsesStreamItem
+
+	// textItem 是 message item（首次出现文本增量时创建，之后复用）。
+	textItem *responsesStreamItem
+	// callItems 把 chat tool_calls[].index 映射到对应的 function_call item。
+	// index 缺失时使用 responsesMissingToolIndex 合成键，避免多个工具串号。
+	callItems map[int]*responsesStreamItem
+	// openCalls 保存尚未收尾（未发 output_item.done）的 function_call item，按开启顺序。
+	openCalls []*responsesStreamItem
 
 	// 收尾用的结束原因与用量。
 	finishReason string
 	usage        map[string]any
 }
+
+// responsesStreamItem 是一个流式 output item 的累积状态。
+type responsesStreamItem struct {
+	index int
+	// kind 为 "message" 或 "function_call"。
+	kind string
+	id   string
+
+	// message 专有：累积的文本与 content_part 是否已开启。
+	text     strings.Builder
+	partOpen bool
+
+	// function_call 专有：call_id / name / 累积参数。
+	callID    string
+	name      string
+	arguments strings.Builder
+	// closed 标记 output_item.done 是否已发出。
+	closed bool
+}
+
+// responsesMissingToolIndex 是「chat tool_calls[] 未带 index」时使用的合成键（真实 index 恒 >= 0）。
+const responsesMissingToolIndex = -1
 
 // newResponsesStreamTranslator 创建流式翻译器；model 为客户端请求的模型名，respID 为网关生成的响应 ID。
 func newResponsesStreamTranslator(
@@ -463,10 +501,11 @@ func newResponsesStreamTranslator(
 	model, respID string,
 ) *responsesStreamTranslator {
 	return &responsesStreamTranslator{
-		w:       w,
-		flusher: flusher,
-		model:   model,
-		respID:  respID,
+		w:         w,
+		flusher:   flusher,
+		model:     model,
+		respID:    respID,
+		callItems: map[int]*responsesStreamItem{},
 	}
 }
 
@@ -525,7 +564,7 @@ func (t *responsesStreamTranslator) processEvent(block string) {
 	t.handleChunk(chunk)
 }
 
-// handleChunk 处理单个 chat 流式分片：提取文本增量、用量与 finish_reason。
+// handleChunk 处理单个 chat 流式分片：提取文本增量、工具调用增量、用量与 finish_reason。
 func (t *responsesStreamTranslator) handleChunk(chunk map[string]any) {
 	// 用量可能出现在任意分片（stream_options.include_usage 的末片）。
 	if usage, ok := chunk["usage"].(map[string]any); ok {
@@ -544,16 +583,15 @@ func (t *responsesStreamTranslator) handleChunk(chunk map[string]any) {
 	// 只有真正出现内容增量时才开 sequence（避免空 delta 触发提前发头）。
 	if delta, ok := choice["delta"].(map[string]any); ok {
 		if text, ok := delta["content"].(string); ok && text != "" {
-			t.ensureOpened()
-			t.ensurePart()
-			t.text.WriteString(text)
-			if t.partOpen {
-				t.emit("response.output_text.delta", map[string]any{
-					"item_id":       t.respID + "_msg",
-					"output_index":  0,
-					"content_index": 0,
-					"delta":         text,
-				})
+			t.handleTextDelta(text)
+		}
+		if calls, ok := delta["tool_calls"].([]any); ok {
+			for _, raw := range calls {
+				call, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				t.handleToolCallDelta(call)
 			}
 		}
 	}
@@ -568,6 +606,86 @@ func (t *responsesStreamTranslator) handleChunk(chunk map[string]any) {
 	}
 }
 
+// handleTextDelta 把一条文本增量并入 message item（按需开启 item 与 content_part）。
+func (t *responsesStreamTranslator) handleTextDelta(text string) {
+	t.ensureOpened()
+	item := t.ensureTextItem()
+	if !item.partOpen {
+		item.partOpen = true
+		t.emit("response.content_part.added", map[string]any{
+			"item_id":       item.id,
+			"output_index":  item.index,
+			"content_index": 0,
+			"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		})
+	}
+	item.text.WriteString(text)
+	t.emit("response.output_text.delta", map[string]any{
+		"item_id":       item.id,
+		"output_index":  item.index,
+		"content_index": 0,
+		"delta":         text,
+	})
+}
+
+// handleToolCallDelta 处理一条 chat tool_calls[] 增量：首片开启 function_call item，
+// 同一工具后续分片按 index 归并到同一 item 上（不同工具互不串号）。
+func (t *responsesStreamTranslator) handleToolCallDelta(call map[string]any) {
+	t.ensureOpened()
+	index := responsesMissingToolIndex
+	if n, ok := anthJSONInt(call["index"]); ok {
+		index = n
+	}
+	id, _ := call["id"].(string)
+	name, args := "", ""
+	if fn, ok := call["function"].(map[string]any); ok {
+		name, _ = fn["name"].(string)
+		args, _ = fn["arguments"].(string)
+	}
+
+	item, exists := t.callItems[index]
+	if !exists {
+		if id == "" {
+			id = t.respID + "_call_" + strconv.Itoa(len(t.items))
+		}
+		item = t.newItem("function_call", id)
+		item.callID = id
+		item.name = name
+		t.callItems[index] = item
+		t.openCalls = append(t.openCalls, item)
+		t.emit("response.output_item.added", map[string]any{
+			"output_index": item.index,
+			"item": map[string]any{
+				"id":        item.id,
+				"type":      "function_call",
+				"call_id":   item.callID,
+				"name":      item.name,
+				"arguments": "",
+				"status":    "in_progress",
+			},
+		})
+	} else if item.name == "" && name != "" {
+		// 迟到的 name（首片只带 id 的少见形态）：补记，供终态 item 使用。
+		item.name = name
+	}
+	if item.closed || args == "" {
+		return
+	}
+	item.arguments.WriteString(args)
+	t.emit("response.function_call_arguments.delta", map[string]any{
+		"item_id":      item.id,
+		"output_index": item.index,
+		"delta":        args,
+	})
+}
+
+// newItem 新建并登记一个 item（output_index 按登记顺序分配）。
+func (t *responsesStreamTranslator) newItem(kind, id string) *responsesStreamItem {
+	item := &responsesStreamItem{index: len(t.items), kind: kind, id: id}
+	t.items = append(t.items, item)
+	return item
+}
+
 // ensureOpened 首次有增量输出时发出 created / in_progress。
 func (t *responsesStreamTranslator) ensureOpened() {
 	if t.opened {
@@ -578,25 +696,21 @@ func (t *responsesStreamTranslator) ensureOpened() {
 	t.emit("response.in_progress", map[string]any{"response": t.responseBody(respStatusInProgress, []any{})})
 }
 
-// ensurePart 确保 output_item.added / content_part.added 已发出。
-func (t *responsesStreamTranslator) ensurePart() {
-	if t.partOpen {
-		return
+// ensureTextItem 返回 message item，不存在时创建并发 output_item.added。
+func (t *responsesStreamTranslator) ensureTextItem() *responsesStreamItem {
+	if t.textItem != nil {
+		return t.textItem
 	}
-	t.partOpen = true
+	item := t.newItem("message", t.respID+"_msg")
+	t.textItem = item
 	t.emit("response.output_item.added", map[string]any{
-		"output_index": 0,
-		"item":         map[string]any{"id": t.respID + "_msg", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
+		"output_index": item.index,
+		"item":         map[string]any{"id": item.id, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
 	})
-	t.emit("response.content_part.added", map[string]any{
-		"item_id":       t.respID + "_msg",
-		"output_index":  0,
-		"content_index": 0,
-		"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
-	})
+	return item
 }
 
-// finalize 收尾：补齐 done 级事件并以 response.completed 结束。幂等。
+// finalize 收尾：按开启顺序补齐每个未收尾 item 的 done 级事件，再以 response.completed 结束。幂等。
 // 上游 200 但从未产生增量输出（空流）时也补发最小合法事件序列，
 // 避免客户端拿到「200 + 空 body」的非法 SSE 流。
 func (t *responsesStreamTranslator) finalize() {
@@ -605,29 +719,52 @@ func (t *responsesStreamTranslator) finalize() {
 	}
 	t.closed = true
 	t.ensureOpened()
-	if t.partOpen {
-		full := t.text.String()
+	for _, item := range t.openCalls {
+		t.closeCallItem(item)
+	}
+	if item := t.textItem; item != nil && !item.closed {
+		full := item.text.String()
 		t.emit("response.output_text.done", map[string]any{
-			"item_id":       t.respID + "_msg",
-			"output_index":  0,
+			"item_id":       item.id,
+			"output_index":  item.index,
 			"content_index": 0,
 			"text":          full,
 		})
 		t.emit("response.content_part.done", map[string]any{
-			"item_id":       t.respID + "_msg",
-			"output_index":  0,
+			"item_id":       item.id,
+			"output_index":  item.index,
 			"content_index": 0,
 			"part":          map[string]any{"type": "output_text", "text": full, "annotations": []any{}},
 		})
 		t.emit("response.output_item.done", map[string]any{
-			"output_index": 0,
-			"item":         map[string]any{"id": t.respID + "_msg", "type": "message", "role": "assistant", "status": respStatusCompleted, "content": responsesMessageItemContent(full)},
+			"output_index": item.index,
+			"item":         responsesMessageItemFull(item.id, full, t.finalStatus()),
 		})
+		item.closed = true
 	}
 	t.emit("response.completed", map[string]any{"response": t.responseBody(t.finalStatus(), t.finalOutput())})
 }
 
-// finalStatus 返回终态：finish_reason="length" → incomplete，其余 → completed。
+// closeCallItem 收尾一个 function_call item：parameters.done → output_item.done。幂等。
+func (t *responsesStreamTranslator) closeCallItem(item *responsesStreamItem) {
+	if item.closed {
+		return
+	}
+	item.closed = true
+	args := item.arguments.String()
+	t.emit("response.function_call_arguments.done", map[string]any{
+		"item_id":      item.id,
+		"output_index": item.index,
+		"name":         item.name,
+		"arguments":    args,
+	})
+	t.emit("response.output_item.done", map[string]any{
+		"output_index": item.index,
+		"item":         responsesFunctionCallItemFull(item.id, item.callID, item.name, args),
+	})
+}
+
+// finalStatus 返回终态：finish_reason="length" → incomplete，其余（含 tool_calls）→ completed。
 func (t *responsesStreamTranslator) finalStatus() string {
 	if t.finishReason == "length" {
 		return respStatusIncomplete
@@ -635,18 +772,41 @@ func (t *responsesStreamTranslator) finalStatus() string {
 	return respStatusCompleted
 }
 
-// finalOutput 返回终态的 output 数组（无文本时为空数组）。
+// finalOutput 按 output_index 顺序返回终态 output 数组（无 item 时为空数组）。
 func (t *responsesStreamTranslator) finalOutput() []any {
-	if !t.partOpen {
-		return []any{}
+	output := make([]any, 0, len(t.items))
+	for _, item := range t.items {
+		switch item.kind {
+		case "message":
+			output = append(output, responsesMessageItemFull(item.id, item.text.String(), t.finalStatus()))
+		case "function_call":
+			output = append(output, responsesFunctionCallItemFull(item.id, item.callID, item.name, item.arguments.String()))
+		}
 	}
-	return []any{map[string]any{
-		"id":      t.respID + "_msg",
+	return output
+}
+
+// responsesMessageItemFull 构造终态 message item（带 status）。
+func responsesMessageItemFull(id, text, status string) map[string]any {
+	return map[string]any{
+		"id":      id,
 		"type":    "message",
 		"role":    "assistant",
-		"status":  t.finalStatus(),
-		"content": responsesMessageItemContent(t.text.String()),
-	}}
+		"status":  status,
+		"content": responsesMessageItemContent(text),
+	}
+}
+
+// responsesFunctionCallItemFull 构造终态 function_call item。
+func responsesFunctionCallItemFull(id, callID, name, args string) map[string]any {
+	return map[string]any{
+		"id":        id,
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      name,
+		"arguments": args,
+		"status":    respStatusCompleted,
+	}
 }
 
 // responseBody 构造事件载荷里的 response 对象。
