@@ -1111,7 +1111,7 @@ func anthropicProbeReply(body []byte) (string, error) {
 	}
 	var parts []string
 	for _, block := range parsed.Content {
-		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+		if strings.TrimSpace(block.Text) != "" {
 			parts = append(parts, block.Text)
 		}
 	}
@@ -1119,5 +1119,5 @@ func anthropicProbeReply(body []byte) (string, error) {
 	if reply == "" {
 		return "", errors.New("response has no text content")
 	}
-	return reply, nil
+	return truncateReply(reply), nil
 }

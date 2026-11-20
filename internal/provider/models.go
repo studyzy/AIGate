@@ -93,6 +93,18 @@ func ListModels(ctx context.Context, modelType, apiKey, apiBase string) ([]strin
 	return ids, nil
 }
 
+// probeReplyLimit 是回传给管理面的探测回复长度上限（推理模型可能返回长文本）。
+const probeReplyLimit = 80
+
+// truncateReply 截断探测回复，保证响应体紧凑。
+func truncateReply(s string) string {
+	r := []rune(s)
+	if len(r) <= probeReplyLimit {
+		return string(r)
+	}
+	return string(r[:probeReplyLimit]) + "…"
+}
+
 // snippetOf 截断上游响应片段，避免把整段 body 塞进错误信息。
 func snippetOf(body string) string {
 	r := []rune(strings.TrimSpace(body))

@@ -303,19 +303,28 @@ func openAIProbeReply(body []byte) (string, error) {
 	var parsed struct {
 		Choices []struct {
 			Message struct {
-				Content *string `json:"content"`
+				Content          *string `json:"content"`
+				ReasoningContent *string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", errors.New("response is not a chat completion")
 	}
-	if len(parsed.Choices) == 0 || parsed.Choices[0].Message.Content == nil {
-		return "", errors.New("response has no assistant message")
+	if len(parsed.Choices) == 0 {
+		return "", errors.New("response has no choices")
 	}
-	reply := strings.TrimSpace(*parsed.Choices[0].Message.Content)
+	msg := parsed.Choices[0].Message
+	reply := ""
+	if msg.Content != nil {
+		reply = strings.TrimSpace(*msg.Content)
+	}
+	// 推理模型可能把 8 个 token 全花在 reasoning 上、content 为空：仍说明模型真的跑了。
+	if reply == "" && msg.ReasoningContent != nil {
+		reply = strings.TrimSpace(*msg.ReasoningContent)
+	}
 	if reply == "" {
 		return "", errors.New("response has empty assistant message")
 	}
-	return reply, nil
+	return truncateReply(reply), nil
 }
