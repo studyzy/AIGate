@@ -737,18 +737,23 @@ func firstTerminalResponse(t *testing.T, stream string) map[string]any {
 }
 
 // TestResponseState_StreamingInterruptedDoesNotPersist（I-2）：
-// 上游只发部分 chunk 就断开（没有终态事件）时，**不落库**——半截对话不应成为下一轮的父行。
-// 这条覆盖转换路径：终态事件由翻译器在流结束时合成，一旦翻译器的收尾逻辑变化就会静默回归。
+// 上游只发部分 chunk 就断开（没有终态事件）时，**不落库**——半截对话不应成为下一轮的父行；
+// 同时客户端必须收到 response.failed（I-2），不能拿到一个看起来正常的 completed。
+//
+// 如何稳定制造「真断连」：provider 的 scanner 读到 EOF 属于正常结束（仍是「自行为结束」），
+// 所以要让它出错，需要先写一个正常增量，再写一行超过 Scanner 单行上限（1 MiB）的 data:
+// → ChatCompletionStream 返回 error。这也正是 I-2 的根因场景：上游中途断开时网关会走
+// 「自行收尾」（Finish）路径而不是错误分支。
 func TestResponseState_StreamingInterruptedDoesNotPersist(t *testing.T) {
 	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		// 一个内容分片 + 一个只带 finish_reason 的分片：都没有 [DONE]，也没有 usage 分片。
 		_, _ = w.Write([]byte(
-			`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"role":"assistant","content":"par"},"finish_reason":null}]}` + "\n\n" +
-				`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"role":"assistant","content":"par"},"finish_reason":null}]}` + "\n\n"))
 		w.(http.Flusher).Flush()
-		// 直接返回：连接结束，网关读到的 body 到此为止。
+		// 超长行：超过 bufio.Scanner 的 1 MiB 上限 → "token too long"，连接中途断掉。
+		_, _ = w.Write([]byte("data: " + strings.Repeat("x", 2*1024*1024) + "\n\n"))
+		w.(http.Flusher).Flush()
 	})
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
 	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
@@ -757,10 +762,13 @@ func TestResponseState_StreamingInterruptedDoesNotPersist(t *testing.T) {
 	assertStatus(t, resp, http.StatusOK)
 	stream := readBody(t, resp)
 
-	// 前提：网关确实**补发**了 response.completed（这是 Finish 的既定行为），
-	// 所以「不落库」不能由「没有终态事件」来解释，必须是明确的策略。
-	if !strings.Contains(stream, "event: response.completed") {
-		t.Fatalf("Finish must still emit a terminal event to the client, got:\n%s", stream)
+	// 前提：客户端确实先收到了一部分内容（否则测的是「零增量」那条路径）。
+	if !strings.Contains(stream, "response.output_text.delta") {
+		t.Fatalf("expected deltas before the interruption, got:\n%s", stream)
+	}
+	// I-2：中断绝不能以 response.completed 收尾。
+	if strings.Contains(stream, "event: response.completed") {
+		t.Fatalf("an interrupted stream must not report response.completed, got:\n%s", stream)
 	}
 
 	// 给落库一个明确的观察窗（它发生在响应写出之后）。
