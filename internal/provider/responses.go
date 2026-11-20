@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -533,45 +534,51 @@ func extractResponsesUsage(data string, prev *Usage) *Usage {
 	return prev
 }
 
-// chatUsageFromResponses 构造 chat 形状的 usage 对象（Responses → chat，§5.3.3）。
-func chatUsageFromResponses(data string) map[string]interface{} {
-	u := extractResponsesUsage(data, nil)
-	if u == nil {
-		return map[string]interface{}{}
-	}
-	return map[string]interface{}{
-		"prompt_tokens":     u.PromptTokens,
-		"completion_tokens": u.CompletionTokens,
-		"total_tokens":      u.TotalTokens,
-		"prompt_tokens_details": map[string]interface{}{
-			"cached_tokens":      u.PromptCacheReadTokens,
-			"cache_write_tokens": u.PromptCacheWriteTokens,
-		},
-	}
-}
-
 // responsesStreamToChat 逐行读取 Responses SSE，译为 chat chunk 写往 w，
 // 结束时补 data: [DONE]（这条路径的客户端是 chat 协议）。返回累计用量。
 func responsesStreamToChat(w http.ResponseWriter, flusher http.Flusher, r io.Reader) (*Usage, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), responsesSSEMaxLineBytes)
 
-	state := &responsesStreamState{w: w, flusher: flusher, toolIndex: map[int]int{}}
+	state := newResponsesStreamState(w, flusher)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := sseDataPayload(scanner.Text())
+		if !ok {
 			continue
 		}
-		state.handleData(strings.TrimPrefix(line, "data: "))
+		state.handleData(data)
 	}
 	// 读取中断（连接重置、单行超限等）必须显式报错：否则调用方会把截断当作正常结束。
 	if err := scanner.Err(); err != nil {
 		return nil, richErrorf(err, "failed to read upstream stream")
 	}
 
+	// 上游流没有终止事件时必须告警：否则调用方会把「截断/失败」当作成功，
+	// 用量静默记 0（这正是 extractResponsesUsage 要防的情形）。
+	if !state.terminalSeen {
+		slog.Warn("responses upstream stream ended without terminal event",
+			slog.String("message_id", state.messageID),
+			slog.Bool("usage_seen", state.usageSeen),
+		)
+	}
+
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	return state.usage, nil
+}
+
+// sseDataPayload 提取 SSE 行 `data:` 后的负载，兼容 `data: {...}` 与 `data:{...}`。
+// 非 data 行（空行、`event:` 行、注释）返回 false。
+func sseDataPayload(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, "data:")
+	if !ok {
+		return "", false
+	}
+	payload := strings.TrimSpace(rest)
+	if payload == "" {
+		return "", false
+	}
+	return payload, true
 }
 
 // responsesStreamState 是 Responses SSE → chat chunk 的翻译状态。
@@ -581,8 +588,31 @@ type responsesStreamState struct {
 	messageID string
 	usage     *Usage
 	usageSeen bool
-	// toolIndex 记录 output_index → chat tool_calls[].index，保证序号连续。
+	// terminalSeen 记录是否收到 response.completed / incomplete / failed。
+	terminalSeen bool
+	// toolIndex 记录 output_index → chat tool_calls[].index，保证同一工具始终落在同一序号上。
 	toolIndex map[int]int
+	// argsEmitted 记录已在 output_item.added 里下发过完整参数的 output_index，
+	// 后续 arguments.delta 必须跳过，否则参数会被重复拼接成非法 JSON。
+	argsEmitted map[int]bool
+	// nextToolIndex 是「下一个待分配的 tool_calls index」的独立计数器。
+	// 不能用 len(toolIndex)：output_index 缺失/乱序时会让两个工具复用同一序号。
+	nextToolIndex int
+	// missingIndexSeq 是「上游未给 output_index」时合成键的递减计数器，
+	// 从 -2 起向下取值，既与真实 output_index(>=0) 不撞车、也不与无主键 -1 重叠。
+	missingIndexSeq int
+	// openMissingIndex 是最近一次 output_item.added 开启的合成键（0 表示当前没有）。
+	openMissingIndex int
+}
+
+// newResponsesStreamState 创建流式翻译状态。
+func newResponsesStreamState(w http.ResponseWriter, flusher http.Flusher) *responsesStreamState {
+	return &responsesStreamState{
+		w:           w,
+		flusher:     flusher,
+		toolIndex:   map[int]int{},
+		argsEmitted: map[int]bool{},
+	}
 }
 
 // handleData 解析单条 SSE data 并按事件类型产出 chat chunk。
@@ -593,7 +623,11 @@ func (s *responsesStreamState) handleData(data string) {
 		return
 	}
 	eventType, _ := event["type"].(string)
-	if s.usage = extractResponsesUsage(data, s.usage); s.usage != nil {
+
+	// usage 可能出现在终止事件里（response.completed 的 response.usage），
+	// 也可能作为独立的 response.usage 事件下发（--enable-usage 时）。
+	if u := extractResponsesUsage(data, nil); u != nil {
+		s.usage = u
 		s.usageSeen = true
 	}
 
@@ -609,11 +643,12 @@ func (s *responsesStreamState) handleData(data string) {
 	case "response.function_call_arguments.delta":
 		s.handleArgumentsDelta(event)
 	case "response.completed", "response.incomplete", "response.failed":
+		s.terminalSeen = true
 		s.handleTerminal(eventType, event)
 	}
 }
 
-// captureID 记录上游响应 ID，作为 chat chunk 的 id。
+// captureID 记录上游响应 ID；部分事件把 response 嵌在 response 字段里，另一些是扁平结构。
 func (s *responsesStreamState) captureID(event map[string]interface{}) {
 	resp, ok := event["response"].(map[string]interface{})
 	if !ok {
@@ -624,15 +659,29 @@ func (s *responsesStreamState) captureID(event map[string]interface{}) {
 	}
 }
 
+// toolIndexFor 返回 output_index 对应的 chat tool_calls index，不存在时分配新序号。
+func (s *responsesStreamState) toolIndexFor(outputIndex int) int {
+	if idx, ok := s.toolIndex[outputIndex]; ok {
+		return idx
+	}
+	idx := s.nextToolIndex
+	s.nextToolIndex++
+	s.toolIndex[outputIndex] = idx
+	return idx
+}
+
 // handleOutputItemAdded 在 function_call 项出现时产出带 name 的首个 tool_call 分片。
+//
+// 参数处理：added 里的 arguments 通常为空串（真实上游随后用 arguments.delta 逐块下发）。
+// 若上游在 added 里直接给了完整参数，这里一次性下发并登记 argsEmitted，
+// 保证随后的 arguments.delta（若仍有）不会把参数重复拼一遍。
 func (s *responsesStreamState) handleOutputItemAdded(event map[string]interface{}) {
 	item, ok := event["item"].(map[string]interface{})
 	if !ok || item["type"] != "function_call" {
 		return
 	}
-	outputIndex := intField(event, "output_index")
-	idx := len(s.toolIndex)
-	s.toolIndex[outputIndex] = idx
+	outputIndex := s.outputIndexOf(event, true)
+	idx := s.toolIndexFor(outputIndex)
 
 	callID, _ := item["call_id"].(string)
 	name, _ := item["name"].(string)
@@ -647,23 +696,44 @@ func (s *responsesStreamState) handleOutputItemAdded(event map[string]interface{
 		},
 	}, nil))
 
-	// 部分上游在 added 事件里直接带完整 arguments。
 	if args, _ := item["arguments"].(string); args != "" {
+		s.argsEmitted[outputIndex] = true
 		s.writeArgumentsDelta(idx, args)
 	}
 }
 
 // handleArgumentsDelta 把工具参数增量译为 chat 的 tool_calls arguments 分片。
+// 已在 output_item.added 里下发过完整参数的 output_index 直接跳过（防重复拼接）。
 func (s *responsesStreamState) handleArgumentsDelta(event map[string]interface{}) {
+	outputIndex := s.outputIndexOf(event, false)
+	if s.argsEmitted[outputIndex] {
+		return
+	}
 	delta, _ := event["delta"].(string)
 	if delta == "" {
 		return
 	}
-	idx, ok := s.toolIndex[intField(event, "output_index")]
-	if !ok {
-		idx = len(s.toolIndex)
+	s.writeArgumentsDelta(s.toolIndexFor(outputIndex), delta)
+}
+
+// outputIndexOf 读取事件的 output_index。
+// 字段缺失时退化为合成键（负号段，与真实 output_index 不撞车）：
+// arguments.delta 归属到最近一次 output_item.added 开启的那个工具；
+// 没有 opened 的工具（纯 delta 事件）则共用同一个「无主」合成键 -1。
+func (s *responsesStreamState) outputIndexOf(event map[string]interface{}, isAdded bool) int {
+	if v, ok := intField(event, "output_index"); ok {
+		return v
 	}
-	s.writeArgumentsDelta(idx, delta)
+	if isAdded {
+		s.missingIndexSeq--
+		s.openMissingIndex = s.missingIndexSeq
+		return s.openMissingIndex
+	}
+	if s.openMissingIndex != 0 {
+		return s.openMissingIndex
+	}
+	return -1 // 无主 delta：没有 opened 的工具，统一归到一个合成键
+
 }
 
 // writeArgumentsDelta 写出一条只含 tool_calls arguments 的 chat 分片。
@@ -675,39 +745,61 @@ func (s *responsesStreamState) writeArgumentsDelta(idx int, args string) {
 	}, nil))
 }
 
-// handleTerminal 处理终止事件：补发带 finish_reason 与 usage 的收尾分片。
+// handleTerminal 处理终止事件：补发带 finish_reason 与 usage 的收尾分片；
+// response.failed 改为透出 chat 兼容的 error 分片，客户端才能区分「无输出」与「上游失败」。
 func (s *responsesStreamState) handleTerminal(eventType string, event map[string]interface{}) {
-	finishReason := ""
-	hasToolCall := len(s.toolIndex) > 0
 	switch eventType {
-	case "response.completed":
-		finishReason = "stop"
-		if hasToolCall {
+	case "response.completed", "response.incomplete":
+		finishReason := "stop"
+		if len(s.toolIndex) > 0 {
 			finishReason = "tool_calls"
 		}
-	case "response.incomplete":
-		reason := ""
+		if eventType == "response.incomplete" {
+			reason := ""
+			if resp, ok := event["response"].(map[string]interface{}); ok {
+				if details, ok := resp["incomplete_details"].(map[string]interface{}); ok {
+					reason, _ = details["reason"].(string)
+				}
+			}
+			finishReason = responsesFinishReason("incomplete", reason, len(s.toolIndex) > 0)
+		}
+		chunk := newOpenAIChunk(s.messageID, map[string]interface{}{}, finishReason)
+		if s.usage != nil {
+			chunk["usage"] = chatUsageFromResponsesUsage(s.usage)
+		}
+		s.writeChunk(chunk)
+	default: // response.failed
+		errObj := map[string]interface{}{
+			"message": "upstream response failed",
+			"type":    "upstream_error",
+		}
 		if resp, ok := event["response"].(map[string]interface{}); ok {
-			if details, ok := resp["incomplete_details"].(map[string]interface{}); ok {
-				reason, _ = details["reason"].(string)
+			if upstreamErr, ok := resp["error"].(map[string]interface{}); ok {
+				if msg, _ := upstreamErr["message"].(string); msg != "" {
+					errObj["message"] = msg
+				}
+				if code, _ := upstreamErr["code"].(string); code != "" {
+					errObj["code"] = code
+				}
 			}
 		}
-		finishReason = responsesFinishReason("incomplete", reason, hasToolCall)
-	default: // response.failed
-		s.writeChunk(newOpenAIChunk(s.messageID, map[string]interface{}{}, nil))
-		return
+		s.writeChunk(map[string]interface{}{"error": errObj})
 	}
-
-	chunk := newOpenAIChunk(s.messageID, map[string]interface{}{}, finishReason)
-	if s.usage != nil {
-		chunk["usage"] = chatUsageFromResponsesUsage(s.usage)
-	}
-	s.writeChunk(chunk)
 }
 
 // writeChunk 写出一个 chat 分片并立即 flush。
 func (s *responsesStreamState) writeChunk(chunk map[string]interface{}) {
 	writeSSEChunk(s.w, s.flusher, chunk)
+}
+
+// chatUsageFromResponses 从响应体 / SSE data 中提取并渲染 chat 形状的 usage 对象。
+// 统一走 chatUsageFromResponsesUsage，避免两处口径漂移。
+func chatUsageFromResponses(data string) map[string]interface{} {
+	u := extractResponsesUsage(data, nil)
+	if u == nil {
+		return map[string]any{}
+	}
+	return chatUsageFromResponsesUsage(u)
 }
 
 // chatUsageFromResponsesUsage 把内部 Usage 渲染为 chat 形状的 usage 对象。
@@ -723,10 +815,13 @@ func chatUsageFromResponsesUsage(u *Usage) map[string]interface{} {
 	}
 }
 
-// intField 读取 JSON 数字字段（float64 → int），缺失时返回 0。
-func intField(m map[string]interface{}, key string) int {
-	if v, ok := m[key].(float64); ok {
-		return int(v)
+// intField 读取 JSON 数字字段（float64 → int）。
+// 返回 (value, present)：必须用 present 区分「值为 0」与「字段缺失」，
+// 否则缺失的 output_index 会被当成合法的 0，让并行工具共享同一序号。
+func intField(m map[string]interface{}, key string) (int, bool) {
+	v, ok := m[key].(float64)
+	if !ok {
+		return 0, false
 	}
-	return 0
+	return int(v), true
 }
