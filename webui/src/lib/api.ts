@@ -34,3 +34,23 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   return body as T;
 }
+
+/** downloadFile 带鉴权拉流并触发浏览器下载（导出接口不能走裸 <a href>，需要 Authorization 头）。 */
+export async function downloadFile(path: string, filename: string) {
+  const token = getToken();
+  const res = await fetch(path, {
+    headers: token ? { Authorization: "Bearer " + token } : {},
+  });
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new ApiError(res.statusText || "download failed", res.status);
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
