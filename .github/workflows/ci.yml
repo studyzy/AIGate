@@ -54,6 +54,13 @@ jobs:
           cache: pnpm
           cache-dependency-path: webui/pnpm-lock.yaml
 
+      # e2e 会现编 Go 二进制，运行器自带的 Go 可能低于 go.mod 要求。
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Install
         run: pnpm install --frozen-lockfile
 

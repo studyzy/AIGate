@@ -20,7 +20,7 @@ const server = http.createServer((req, res) => {
           object: "chat.completion",
           created: Math.floor(Date.now() / 1000),
           model: "mock-model",
-          choices: [{ index: 0, message: { role: "assistant", content: "pong" }, finish_reason: "stop" }],
+          choices: [{ index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
           usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
         }),
       );

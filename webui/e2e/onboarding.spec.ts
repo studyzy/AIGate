@@ -22,7 +22,8 @@ test("guides an empty install to a working key", async ({ page }) => {
   await providerRow.click();
   await expect(page.getByText("mock-model-e2e").first()).toBeVisible();
   await page.getByRole("button", { name: "Test connectivity" }).first().click();
-  await expect(page.getByText(/ms|error/i).first()).toBeVisible();
+  // 探测是真实对话请求：toast 里必须出现上游回复内容，而不是只报「连通」。
+  await expect(page.getByText(/upstream replied: hello/i).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Users" }).click();
   await page.getByRole("button", { name: "New user" }).click();
