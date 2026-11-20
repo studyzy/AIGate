@@ -43,8 +43,9 @@ const (
 // defaultTimeout 是未指定 --timeout 时的请求超时。
 const defaultTimeout = 30 * time.Second
 
-// versionText 是本地命令 version 的输出。
-const versionText = "aigatectl development build"
+// Version 是 CLI 版本号，与 cmd/aigate 的 Version 保持一致；
+// 供 cmd/aigatectl 复用，避免两处硬编码。
+const Version = "0.1.0"
 
 // Context 携带一次命令执行所需的客户端、IO 与已解析的全局参数。
 type Context struct {
@@ -158,7 +159,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 	}
 
 	if len(argv) > 0 && argv[0] == "version" {
-		fmt.Fprintln(stdout, versionText)
+		fmt.Fprintf(stdout, "aigatectl %s\n", Version)
 		return 0
 	}
 

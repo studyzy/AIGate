@@ -323,6 +323,12 @@ func TestRunHelpAndVersion(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("version 退出码 = %d, 期望 0 (stderr=%q)", got.code, got.stderr)
 	}
+	if cli.Version != "0.1.0" {
+		t.Fatalf("cli.Version = %q, 期望 0.1.0", cli.Version)
+	}
+	if !strings.Contains(got.stdout, "0.1.0") {
+		t.Fatalf("version stdout = %q, 期望含版本字符串 0.1.0", got.stdout)
+	}
 }
 
 // TestRunAgainstRealAdminHandlers 用临时 SQLite 装配真实 admin.Register +
