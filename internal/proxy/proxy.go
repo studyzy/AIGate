@@ -47,6 +47,12 @@ type Handler struct {
 	// StopResponseRetention 取消；未启动时 pruneCancel 为 nil）。
 	pruneStartOnce sync.Once
 	pruneCancel    context.CancelFunc
+
+	// responseBackgroundTimeout 是 background:true 后台执行的总时长上限
+	// （-response-background-timeout，默认 responseBackgroundDefaultTimeout）。
+	// 与 allowResponseStorage 同口径：装配阶段由 SetResponseBackgroundTimeout 设置，
+	// 运行期只读（后台 goroutine 每个任务读一次），因此不需要加锁。
+	responseBackgroundTimeout time.Duration
 }
 
 // NewHandler 创建数据面处理器。quotaExceededStatus 非 429/403 时回退 429。
@@ -58,18 +64,25 @@ func NewHandler(store *model.Store, usage *UsageWriter, quotaExceededStatus int)
 		quotaExceededStatus = http.StatusTooManyRequests
 	}
 	return &Handler{
-		store:                store,
-		usage:                usage,
-		quotaExceededStatus:  quotaExceededStatus,
-		allowResponseStorage: true,
+		store:                     store,
+		usage:                     usage,
+		quotaExceededStatus:       quotaExceededStatus,
+		allowResponseStorage:      true,
+		responseBackgroundTimeout: responseBackgroundDefaultTimeout,
 	}
 }
 
 // Register 注册数据面路由。
+//
+// Responses 的四条路由：创建 + 三个生命周期端点（design §5.6）。生命周期端点必须带 {id}，
+// 与 POST /v1/responses 是不同模式，互不影响（Ruling 3：后加的路由只追加，不重写本函数）。
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", h.handleAnthropicMessages)
 	mux.HandleFunc("POST /v1/responses", h.handleResponses)
+	mux.HandleFunc("GET /v1/responses/{id}", h.handleGetResponse)
+	mux.HandleFunc("DELETE /v1/responses/{id}", h.handleDeleteResponse)
+	mux.HandleFunc("POST /v1/responses/{id}/cancel", h.handleCancelResponse)
 	mux.HandleFunc("GET /v1/models", h.handleModels)
 }
 

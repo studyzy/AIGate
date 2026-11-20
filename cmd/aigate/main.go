@@ -142,6 +142,9 @@ func run() error {
 	if err := proxyHandler.SetResponseStorage(cfg.AllowResponseStorage); err != nil {
 		return fmt.Errorf("configure response storage: %w", err)
 	}
+	if err := proxyHandler.SetResponseBackgroundTimeout(cfg.ResponseBackgroundTimeout); err != nil {
+		return fmt.Errorf("configure response background timeout: %w", err)
+	}
 	proxyHandler.StartResponseRetention(time.Duration(cfg.ResponseRetentionDays) * 24 * time.Hour)
 	defer proxyHandler.StopResponseRetention()
 	proxyHandler.Register(mux)
@@ -183,6 +186,8 @@ func run() error {
 			cfg.AllowResponseStorage,
 			"response_retention_days",
 			cfg.ResponseRetentionDays,
+			"response_background_timeout",
+			cfg.ResponseBackgroundTimeout.String(),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

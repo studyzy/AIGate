@@ -63,8 +63,13 @@ const (
 const (
 	msgResponsesInvalidInput    = "invalid input"
 	msgResponsesInvalidTools    = "invalid tools"
-	msgResponsesBackground      = "background is not supported yet"
 	msgResponsesInvalidUpstream = "invalid upstream response"
+	// msgResponsesInvalidBackground：background 必须是布尔值。
+	msgResponsesInvalidBackground = "invalid background"
+	// msgResponsesBackgroundRequiresStore：background:true 必须落库，显式 store:false 与它互斥。
+	msgResponsesBackgroundRequiresStore = "background requires store to be true"
+	// msgResponsesBackgroundDisabled：站点关闭存储时 background 不可用（结果无处存放）。
+	msgResponsesBackgroundDisabled = "response storage is disabled on this gateway, background is unavailable"
 
 	// msgResponsesNotFound 同时用于「行不存在」与「行不属于本用户」：
 	// 两种情形的状态码与响应体必须逐字一致，否则可被用来枚举他人的响应 ID（§5.6 安全）。
@@ -131,12 +136,62 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 7. background:true：落 queued 行 → 立即返回 → goroutine 后台执行（design §5.6）。
+	//    必须排在 §5.4.1 第 4/5 步**之后**：模型解析与配额拒绝属于「请求未被受理」，
+	//    先建行会让被拒请求在表里留下永远 queued 的孤儿行。
+	//    （第 6 步「按协议分派」被后台任务接管：它按 resolved.ModelType 自行选择同样的两条路径。）
+	if state.background {
+		h.startResponsesBackground(w, r, key, resolved, state, reqBody, requestedModel)
+		return
+	}
+
 	// 6. 按上游协议二选一。
 	if resolved.ModelType == model.ModelTypeResponses {
 		h.forwardResponsesPassthrough(w, r, key, resolved, reqBody, requestedModel, isStream, start, state)
 		return
 	}
 	h.forwardViaChatConversion(w, r, key, resolved, reqBody, requestedModel, isStream, start, state)
+}
+
+// startResponsesBackground 处理 background:true：建 queued 行、立即回包、启动后台 goroutine。
+//
+// 回包与 GET 读的是**同一行**的 response_body（buildQueuedResponseBody），因此客户端不需要
+// 把 POST 的回包与后续 GET 拼在一起看——两者在后台写回之前逐字相同。
+func (h *Handler) startResponsesBackground(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	resolved *model.Resolved,
+	state *responsesStatefulInput,
+	reqBody map[string]any,
+	requestedModel string,
+) {
+	respID := newResponsesID()
+	if respID == "" {
+		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+		return
+	}
+	bg := &responsesBackgroundRequest{
+		key:            key,
+		resolved:       resolved,
+		state:          state,
+		respID:         respID,
+		requestedModel: requestedModel,
+		reqBody:        reqBody,
+		passthrough:    resolved.ModelType == model.ModelTypeResponses,
+		customHeaders:  extractCustomHeaders(r, resolved.CustomHTTPHeaders),
+	}
+	if err := h.startResponseBackground(bg); err != nil {
+		slog.Error("create background response state failed", "error", err, "model", resolved.ModelID)
+		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+		return
+	}
+	if requestedModel == "" {
+		requestedModel = resolved.ModelID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(marshalJSONOrEmpty(buildQueuedResponseBody(respID, requestedModel)))
 }
 
 // prepareResponsesTokens 对 Responses 形态的 body 施加密钥 max_output_tokens 上限。

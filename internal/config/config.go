@@ -43,20 +43,21 @@ const (
 
 // Config 网关运行配置。
 type Config struct {
-	Addr                         string // 监听地址，如 127.0.0.1:8080
-	DBType                       string // sqlite | mysql
-	DBDSN                        string // SQLite 文件路径；MySQL DSN
-	Timezone                     string // IANA 时区名（配额窗口与日聚合的业务口径）
-	UsageBuffer                  int    // 用量异步写入队列容量
-	WebhookBuffer                int    // webhook 事件投递队列容量
-	WebhookDeliveryRetentionDays int    // webhook 投递记录保留天数（0 = 不清理）
-	AllowResponseStorage         bool   // Responses 站点级存储开关（默认 true；false 时有状态能力整体不可用）
-	ResponseRetentionDays        int    // Responses 会话状态保留天数（0 = 不清理）
-	QuotaExceededStatus          int    // 配额超限状态码（M2 使用；默认 429）
-	InitAdminToken               string // 初始管理员 token（为空时首次启动自动生成并打印一次）
-	AllowPrivateUpstreams        bool   // 是否放行私网/回环上游地址（SSRF 严格模式开关，默认 false）
-	MasterKey                    string // 主密钥（64 位 hex 或 base64，解码后 32 字节）；空 = 禁用加密
-	MigrateEncrypt               bool   // 启动开关：把存量明文密钥类字段加密后退出（需主密钥）
+	Addr                         string        // 监听地址，如 127.0.0.1:8080
+	DBType                       string        // sqlite | mysql
+	DBDSN                        string        // SQLite 文件路径；MySQL DSN
+	Timezone                     string        // IANA 时区名（配额窗口与日聚合的业务口径）
+	UsageBuffer                  int           // 用量异步写入队列容量
+	WebhookBuffer                int           // webhook 事件投递队列容量
+	WebhookDeliveryRetentionDays int           // webhook 投递记录保留天数（0 = 不清理）
+	AllowResponseStorage         bool          // Responses 站点级存储开关（默认 true；false 时有状态能力整体不可用）
+	ResponseRetentionDays        int           // Responses 会话状态保留天数（0 = 不清理）
+	ResponseBackgroundTimeout    time.Duration // Responses background:true 的后台执行超时（默认 30 分钟）
+	QuotaExceededStatus          int           // 配额超限状态码（M2 使用；默认 429）
+	InitAdminToken               string        // 初始管理员 token（为空时首次启动自动生成并打印一次）
+	AllowPrivateUpstreams        bool          // 是否放行私网/回环上游地址（SSRF 严格模式开关，默认 false）
+	MasterKey                    string        // 主密钥（64 位 hex 或 base64，解码后 32 字节）；空 = 禁用加密
+	MigrateEncrypt               bool          // 启动开关：把存量明文密钥类字段加密后退出（需主密钥）
 }
 
 // Load 解析配置。args 为命令行参数（不含程序名）。
@@ -86,6 +87,10 @@ func Load(args []string) (*Config, error) {
 		return nil, err
 	}
 	responseRetentionDefault, err := envInt("AIGATE_RESPONSE_RETENTION_DAYS", 7)
+	if err != nil {
+		return nil, err
+	}
+	responseBackgroundTimeoutDefault, err := envDuration("AIGATE_RESPONSE_BACKGROUND_TIMEOUT", 30*time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +126,12 @@ func Load(args []string) (*Config, error) {
 		"response-retention-days",
 		responseRetentionDefault,
 		"days to retain stored responses (0 = keep forever)",
+	)
+	fs.DurationVar(
+		&cfg.ResponseBackgroundTimeout,
+		"response-background-timeout",
+		responseBackgroundTimeoutDefault,
+		"max run time of a background:true Responses job (e.g. 30m, 90s)",
 	)
 	fs.IntVar(
 		&cfg.QuotaExceededStatus,
@@ -210,6 +221,11 @@ func (c *Config) validate() error {
 	if c.ResponseRetentionDays > maxRetentionDays {
 		return fmt.Errorf("response-retention-days must be <= %d", maxRetentionDays)
 	}
+	// 后台超时必须为正：0 会让每个 background 任务一启动即超时，
+	// 这类配置错误应当在启动期暴露，而不是变成一片 failed 行。
+	if c.ResponseBackgroundTimeout <= 0 {
+		return fmt.Errorf("response-background-timeout must be positive")
+	}
 	if c.QuotaExceededStatus != 429 && c.QuotaExceededStatus != 403 {
 		return fmt.Errorf("quota-exceeded-status must be 429 or 403")
 	}
@@ -233,6 +249,19 @@ func envInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid integer in environment variable %s: %q", key, v)
 	}
 	return n, nil
+}
+
+// envDuration 解析时长类环境变量（time.ParseDuration 语法，如 "30m"、"90s"）。
+func envDuration(key string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration in environment variable %s: %q", key, v)
+	}
+	return d, nil
 }
 
 func envBool(key string, def bool) (bool, error) {

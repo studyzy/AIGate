@@ -56,6 +56,8 @@ type responsesStatefulInput struct {
 	previousID string
 	// history 是父行 / 会话最新行的累积 items（nil = 无历史）。
 	history []any
+	// background 表示本轮是 background:true 的异步执行：store 恒为 true（见 prepareResponsesState）。
+	background bool
 }
 
 // prepareResponsesState 是 §5.4.1 第 3 步：解析并应用有状态字段。
@@ -68,10 +70,25 @@ func (h *Handler) prepareResponsesState(
 	key *model.APIKey,
 	reqBody map[string]any,
 ) (*responsesStatefulInput, bool) {
-	// background 属于 Task 9；本轮出现即 400（与站点开关无关：它根本还没被实现）。
+	// background（design §5.6）：非布尔 → 400；显式 false / null 与缺省同义（同步执行）。
+	background := false
 	if v, exists := reqBody["background"]; exists && v != nil {
-		httpx.WriteError(w, http.StatusBadRequest, msgResponsesBackground)
-		return nil, false
+		b, ok := v.(bool)
+		if !ok {
+			httpx.WriteError(w, http.StatusBadRequest, msgResponsesInvalidBackground)
+			return nil, false
+		}
+		background = b
+	}
+	// background:true 必须落库（结果要有地方存放），因此与显式 store:false 互斥。
+	// 判定放在站点开关之前：这是**参数自身**的矛盾，与站点策略无关，先报参数错误更准确。
+	if background {
+		if raw, exists := reqBody["store"]; exists && raw != nil {
+			if b, ok := raw.(bool); ok && !b {
+				httpx.WriteError(w, http.StatusBadRequest, msgResponsesBackgroundRequiresStore)
+				return nil, false
+			}
+		}
 	}
 	// store 的缺省值是 true（OpenAI 语义），因此这里用「是否显式给了字段」而不是「取值是否为真」
 	// 判定，否则站点关闭存储时，任何不带 store 的请求都会被当成显式 store:true 而 400。
@@ -95,6 +112,11 @@ func (h *Handler) prepareResponsesState(
 	// store 的**类型**合法性已在上面判过，因此站点关闭时 "store":"yes" 报的仍是
 	// invalid store 而不是「站点已关闭存储」——参数非法与站点策略是两件事，不能互相掩盖。
 	if !h.allowResponseStorage {
+		if background {
+			// 无存储则结果无处存放，异步流程根本不成立（规格 §5.6 隐私兜底）。
+			httpx.WriteError(w, http.StatusBadRequest, msgResponsesBackgroundDisabled)
+			return nil, false
+		}
 		if stateful {
 			httpx.WriteError(w, http.StatusBadRequest, msgResponsesStatefulDisabled)
 			return nil, false
@@ -113,7 +135,12 @@ func (h *Handler) prepareResponsesState(
 		return nil, false
 	}
 
-	state := &responsesStatefulInput{store: store, conversationID: conversationID, previousID: previousID}
+	state := &responsesStatefulInput{
+		store:          store,
+		conversationID: conversationID,
+		previousID:     previousID,
+		background:     background,
+	}
 	if stateful {
 		parent, ok := h.loadResponsesParent(w, r, key, state)
 		if !ok {

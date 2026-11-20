@@ -18,6 +18,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 
 	"aigate/internal/config"
 )
@@ -66,6 +67,16 @@ func TestLoad_InvalidValues(t *testing.T) {
 			[]string{"-response-retention-days", "36501"},
 			"response-retention-days must be <=",
 		},
+		{
+			"non-positive background timeout",
+			[]string{"-response-background-timeout", "0s"},
+			"response-background-timeout must be positive",
+		},
+		{
+			"malformed background timeout",
+			[]string{"-response-background-timeout", "30"},
+			"invalid value \"30\" for flag -response-background-timeout",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,6 +108,10 @@ func TestLoad_DefaultsAndHelp(t *testing.T) {
 	if !cfg.AllowResponseStorage || cfg.ResponseRetentionDays != 7 {
 		t.Fatalf("unexpected responses defaults: allow=%v retention=%d", cfg.AllowResponseStorage, cfg.ResponseRetentionDays)
 	}
+	// background 后台执行超时默认 30 分钟（design §5.6）。
+	if cfg.ResponseBackgroundTimeout != 30*time.Minute {
+		t.Fatalf("response background timeout default = %v, want 30m", cfg.ResponseBackgroundTimeout)
+	}
 
 	if _, err := config.Load([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("Load(-h) err = %v, want flag.ErrHelp", err)
@@ -109,6 +124,32 @@ func TestLoad_InvalidEnv(t *testing.T) {
 	_, err := config.Load(nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid integer in environment variable AIGATE_USAGE_BUFFER") {
 		t.Fatalf("Load() err = %v, want invalid integer error", err)
+	}
+}
+
+// TestLoad_ResponseBackgroundTimeout：flag 与环境变量都能设置后台执行超时，flag 优先。
+func TestLoad_ResponseBackgroundTimeout(t *testing.T) {
+	t.Setenv("AIGATE_RESPONSE_BACKGROUND_TIMEOUT", "45m")
+	cfg, err := config.Load(nil)
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.ResponseBackgroundTimeout != 45*time.Minute {
+		t.Fatalf("env value not applied: %v", cfg.ResponseBackgroundTimeout)
+	}
+
+	cfg, err = config.Load([]string{"-response-background-timeout", "90s"})
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.ResponseBackgroundTimeout != 90*time.Second {
+		t.Fatalf("flag value not applied (flag must win): %v", cfg.ResponseBackgroundTimeout)
+	}
+
+	t.Setenv("AIGATE_RESPONSE_BACKGROUND_TIMEOUT", "not-a-duration")
+	if _, err := config.Load(nil); err == nil ||
+		!strings.Contains(err.Error(), "AIGATE_RESPONSE_BACKGROUND_TIMEOUT") {
+		t.Fatalf("Load() err = %v, want invalid duration error", err)
 	}
 }
 

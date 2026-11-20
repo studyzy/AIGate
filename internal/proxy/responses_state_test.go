@@ -486,16 +486,39 @@ func TestResponseState_RetentionLoopPrunes(t *testing.T) {
 	})
 
 	t.Run("zero retention keeps rows", func(t *testing.T) {
-		if _, err := store.PruneResponseStates(ctx(), time.Now().UTC().Add(time.Hour)); err != nil {
-			t.Fatalf("clean leftovers: %v", err)
+		// 独立 store：零保留期的语义要在干净库上验证，不与前一个子用例的行/循环相互影响。
+		zeroStore, _ := newTestStore(t)
+		zeroUsage := proxy.NewUsageWriter(zeroStore, 0)
+		zeroUsage.Start()
+		t.Cleanup(func() { zeroUsage.Stop(context.Background()) })
+		old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+		if err := zeroStore.CreateResponseState(ctx(), &model.ResponseState{
+			ID:           "resp_old_keep",
+			Status:       model.ResponseStateStatusCompleted,
+			CreatedAt:    old,
+			UpdatedAt:    old,
+			Items:        []byte("[]"),
+			ResponseBody: []byte("{}"),
+		}); err != nil {
+			t.Fatalf("seed response state: %v", err)
 		}
-		seed("resp_old_keep")
-		h := proxy.NewHandler(store, usage, 429)
+		h := proxy.NewHandler(zeroStore, zeroUsage, 429)
 		h.StartResponseRetention(0)
 		t.Cleanup(h.StopResponseRetention)
-		time.Sleep(50 * time.Millisecond)
-		if _, err := store.GetResponseState(ctx(), "resp_old_keep"); err != nil {
+
+		// 保留期为 0 时**保留期清理**不启动；「重启遗留行」检查照常运行，
+		// 但它只处理老过后台超时的 queued/in_progress 行——本行是 30 天前的 completed，
+		// 两种状态都不满足。窗口取「超过残留检查启动延迟」，证明两个循环都没动它。
+		if _, err := zeroStore.GetResponseState(ctx(), "resp_old_keep"); err != nil {
 			t.Fatalf("row must survive when retention is 0: %v", err)
+		}
+		time.Sleep(responseSweepDelayForTest + 100*time.Millisecond)
+		row, err := zeroStore.GetResponseState(ctx(), "resp_old_keep")
+		if err != nil {
+			t.Fatalf("row must survive when retention is 0: %v", err)
+		}
+		if row.Status != model.ResponseStateStatusCompleted {
+			t.Fatalf("row status = %q, want completed (the sweep must not touch terminated rows)", row.Status)
 		}
 	})
 }

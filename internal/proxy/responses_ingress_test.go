@@ -510,30 +510,32 @@ func TestResponsesIngress_PassthroughCapsMaxOutputTokens(t *testing.T) {
 // 5. 有状态字段本轮一律 400（Task 8/9 放开）
 // ---------------------------------------------------------------------------
 
-// TestResponsesIngress_BackgroundRejected：background 仍属 Task 9，本轮一律 400。
+// TestResponsesIngress_BackgroundAbsentIsSynchronous：background 缺省 / false / null 与不传等价，
+// 走同步路径并直接返回 completed。
 //
-// Task 8 之前本用例还覆盖 previous_response_id / conversation 的 400——那一对已由
-// 有状态路径实现并放开，验收见 responses_state_test.go（含跨用户隔离与 404 不泄露存在性）。
-func TestResponsesIngress_BackgroundRejected(t *testing.T) {
+// 本用例原名 TestResponsesIngress_BackgroundRejected（Task 9 之前 background 一律 400）。
+// 那两条 400 断言描述的是「尚未实现」的临时状态，本任务有意推翻（Ruling 14 的同一条理由），
+// 因此改写而不是保留；background:true 的完整验收见 responses_background_test.go。
+func TestResponsesIngress_BackgroundAbsentIsSynchronous(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
 	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
 
-	for field, body := range map[string]string{
-		"true":  `{"model":"mock-a","input":"hi","background":true}`,
+	for name, body := range map[string]string{
 		"false": `{"model":"mock-a","input":"hi","background":false}`,
+		"null":  `{"model":"mock-a","input":"hi","background":null}`,
 	} {
-		t.Run(field, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			resp := e.postResponses(t, token, body)
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400 (body=%s)", resp.StatusCode, readBody(t, resp))
+			assertStatus(t, resp, http.StatusOK)
+			out := decodeResponsesBody(t, readBody(t, resp))
+			if got, _ := out["status"].(string); got != "completed" {
+				t.Fatalf("status = %q, want completed (synchronous path)", got)
 			}
-			_ = readBody(t, resp)
 		})
 	}
-
-	if e.rec.Calls() != 0 {
-		t.Fatalf("upstream calls = %d, want 0 (rejected requests must not be forwarded)", e.rec.Calls())
+	if e.rec.Calls() != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (both requests run synchronously)", e.rec.Calls())
 	}
 }
 

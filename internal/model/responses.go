@@ -174,6 +174,40 @@ func (s *Store) LatestResponseStateInConversation(ctx context.Context, conversat
 	)
 }
 
+// ListResponseStatesUpdatedBefore 返回指定状态下、updated_at 早于 before 的行 ID（按 updated_at 升序）。
+//
+// 供 data 面判定「重启遗留的在途行」（design §5.6 并发与失败：超过后台超时的 queued/in_progress
+// 标记为 failed）。只返回 ID：调用方不需要载荷，避免把 LONGTEXT 列读进内存。
+// 用 updated_at 而不是 created_at：后台任务每次状态跃迁都会刷新它，因此「健康任务」的
+// updated_at 一定新鲜，只有没人收尾的行才会老过超时。
+func (s *Store) ListResponseStatesUpdatedBefore(ctx context.Context, status string, before time.Time) ([]string, error) {
+	var ids []string
+	err := s.db.WithContext(ctx).Model(&ResponseState{}).
+		Where("status = ? AND updated_at < ?", status, before.UTC()).
+		Order("updated_at ASC").
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("list response states: %w", err)
+	}
+	return ids, nil
+}
+
+// DeleteResponseState 删除一行会话状态；行不存在返回 ErrResponseStateNotFound。
+//
+// 条件删除（WHERE id = ?）由调用方保证：归属与终态校验在读到的行上完成后才会调用本方法。
+// 返回哨兵而不是静默 nil：删除一个不存在的行为调用方要回 404（GET/DELETE 的区分语义），
+// 与 UpdateResponseStateStatus 的静默 nil 口径不同——后者是后台收尾，无可回退的响应可发。
+func (s *Store) DeleteResponseState(ctx context.Context, id string) error {
+	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&ResponseState{})
+	if res.Error != nil {
+		return fmt.Errorf("delete response state: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrResponseStateNotFound
+	}
+	return nil
+}
+
 // getResponseState 执行查询并把「无行」统一映射为 ErrResponseStateNotFound。
 // 映射走哨兵错误而非 IsNotFound(gorm.ErrRecordNotFound)：需要同时包住 id 与状态条件两类落到「无行」的场景，
 // 且让调用方在任何一层 errors.Is 都能判定。
