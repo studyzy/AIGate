@@ -125,7 +125,9 @@ func (c *Client) Do(ctx context.Context, r Request) (*Result, error) {
 	return &Result{StatusCode: resp.StatusCode, Body: data}, nil
 }
 
-// tokenFor 按 Plane 取令牌；所需令牌为空时返回 ErrMissingToken。
+// tokenFor 按 Plane 取令牌：admin 面用 adminToken，user 面优先 userToken、
+// 缺失时回退 adminToken（auth.RequireUser 允许 admin 角色），两枚都缺才返回
+// ErrMissingToken；PlaneNone 及未知取值不携带令牌。
 func (c *Client) tokenFor(p Plane) (string, error) {
 	switch p {
 	case PlaneAdmin:
@@ -134,10 +136,13 @@ func (c *Client) tokenFor(p Plane) (string, error) {
 		}
 		return c.adminToken, nil
 	case PlaneUser:
-		if c.userToken == "" {
-			return "", ErrMissingToken
+		if c.userToken != "" {
+			return c.userToken, nil
 		}
-		return c.userToken, nil
+		if c.adminToken != "" {
+			return c.adminToken, nil
+		}
+		return "", ErrMissingToken
 	default:
 		// PlaneNone 及未知取值都不携带令牌。
 		return "", nil

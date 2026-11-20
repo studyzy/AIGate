@@ -148,8 +148,8 @@ func Exec(ctx *Context, req client.Request) int {
 // Run 是 CLI 入口：抽取全局 flag、装配客户端与 Context、dispatch 到注册表，
 // 并把本地错误统一映射为退出码 2。
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
-	if hasHelp(args) {
-		printHelp(stdout)
+	if ok, path := helpTokens(args); ok {
+		printHelpForPath(stdout, path)
 		return 0
 	}
 
@@ -284,14 +284,67 @@ func splitFlag(a string) (name, val string, inline bool) {
 	return a, "", false
 }
 
-// hasHelp 判断 args 中是否出现 --help / -h。
-func hasHelp(args []string) bool {
-	for _, a := range args {
+// helpTokens 判断 args 中是否含 --help / -h，并返回其之前的「位置 token 路径」：
+// 四个全局 flag 及其取值被跳过，其余以 "-" 开头的 flag 也不计入路径，遇到
+// help 标记立即停止。路径按层级解析帮助：0 个→顶层资源，1 个→该资源命令名，
+// 2 个及以上→取前两级定位到具体命令并输出其 Usage。
+func helpTokens(args []string) (bool, []string) {
+	var path []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--help" || a == "-h" {
-			return true
+			return true, path
+		}
+		name, _, inline := splitFlag(a)
+		switch name {
+		case "--url", "--timeout", "--data", "--id":
+			if !inline {
+				i++ // 跳过该全局 flag 的取值
+			}
+		default:
+			if !strings.HasPrefix(a, "-") {
+				path = append(path, a)
+			}
 		}
 	}
-	return false
+	return false, path
+}
+
+// printHelpForPath 按位置 token 路径分层输出帮助；层级 0 复用原 printHelp，
+// 保证顶层资源列表与全局 flag 说明保持不变。
+func printHelpForPath(w io.Writer, path []string) {
+	switch {
+	case len(path) == 0:
+		printHelp(w)
+	case len(path) == 1:
+		printResourceHelp(w, path[0])
+	default:
+		printCommandHelp(w, path[0], path[1])
+	}
+}
+
+// printResourceHelp 列出某资源已注册的命令名（排序）；未知资源给出英文提示。
+func printResourceHelp(w io.Writer, resource string) {
+	cmds, ok := registry[resource]
+	if !ok {
+		fmt.Fprintf(w, "aigatectl: unknown resource %q (see --help)\n", resource)
+		return
+	}
+	fmt.Fprintf(w, "aigatectl %s <command> [command flags]\n\n", resource)
+	fmt.Fprintln(w, "Commands:")
+	for _, name := range commandNames(cmds) {
+		fmt.Fprintln(w, "  "+name)
+	}
+}
+
+// printCommandHelp 输出某条命令的 Usage；self 子组命令的 Usage 逐行列出子动作。
+func printCommandHelp(w io.Writer, resource, name string) {
+	cmd, ok := registry[resource][name]
+	if !ok {
+		fmt.Fprintf(w, "aigatectl: unknown command %q %q (see --help)\n", resource, name)
+		return
+	}
+	fmt.Fprintln(w, cmd.Usage)
 }
 
 // localError 把本地错误写 stderr（英文诊断）并返回退出码 2。
@@ -328,6 +381,16 @@ func resourceNames() []string {
 	names := make([]string, 0, len(registry))
 	for r := range registry {
 		names = append(names, r)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// commandNames 返回某资源下排序后的命令名，保证层级 1 help 输出稳定。
+func commandNames(cmds map[string]Command) []string {
+	names := make([]string, 0, len(cmds))
+	for name := range cmds {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names

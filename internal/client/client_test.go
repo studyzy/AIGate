@@ -177,7 +177,8 @@ func TestErrorMessage(t *testing.T) {
 	}
 }
 
-// TestDoPlaneToken 覆盖三种面的令牌选择，以及缺令牌时返回 ErrMissingToken 且不发请求。
+// TestDoPlaneToken 覆盖三种面的令牌选择：user 面优先 user token，缺失时回退
+// admin token，两枚都缺才返回 ErrMissingToken 且不发请求；admin/none 面行为不变。
 func TestDoPlaneToken(t *testing.T) {
 	respBody := []byte(`{"ok":true}`)
 	cases := []struct {
@@ -192,7 +193,8 @@ func TestDoPlaneToken(t *testing.T) {
 		{name: "user 面", plane: client.PlaneUser, adminToken: "adm-tok", userToken: "usr-tok", wantAuth: "Bearer usr-tok"},
 		{name: "none 面", plane: client.PlaneNone, adminToken: "adm-tok", userToken: "usr-tok", wantAuth: ""},
 		{name: "admin 缺 token", plane: client.PlaneAdmin, userToken: "usr-tok", wantErr: client.ErrMissingToken},
-		{name: "user 缺 token", plane: client.PlaneUser, adminToken: "adm-tok", wantErr: client.ErrMissingToken},
+		{name: "user 与 admin 均缺 token", plane: client.PlaneUser, wantErr: client.ErrMissingToken},
+		{name: "user 缺 token 回退 admin", plane: client.PlaneUser, adminToken: "adm-tok", wantAuth: "Bearer adm-tok"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
