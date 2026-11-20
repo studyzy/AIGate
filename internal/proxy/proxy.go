@@ -374,15 +374,22 @@ func extractRequestedModel(reqBody map[string]any) string {
 	return ""
 }
 
-// enforceMaxTokens 对请求体的 max_tokens / max_completion_tokens 施加密钥上限。
+// maxTokensChatFields 是 chat 协议的输出长度字段（缺少时以 max_tokens 注入上限）。
+var maxTokensChatFields = []string{"max_tokens", "max_completion_tokens"}
+
+// maxTokensCappedFields 是全部受密钥上限压制的输出长度字段：
+// chat 协议的 max_tokens / max_completion_tokens，以及 Responses 协议的 max_output_tokens。
+var maxTokensCappedFields = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+// enforceMaxTokens 对请求体的输出长度字段施加密钥上限（三个数据面入口共用）。
 // 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限；
-// 两个字段都没有有效数值时注入 max_tokens=上限。
+// 没有任何 chat 字段带有效数值时注入 max_tokens=上限——但请求里出现 max_output_tokens
+// 就不注入，避免 Responses 请求被塞入 chat 专有字段。同一请求体的各字段只会属于一种协议。
 func enforceMaxTokens(reqBody map[string]any, limit int) {
 	if limit <= 0 {
 		return
 	}
-	hasNumeric := false
-	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+	for _, key := range maxTokensCappedFields {
 		v, ok := reqBody[key]
 		if !ok {
 			continue
@@ -391,15 +398,20 @@ func enforceMaxTokens(reqBody map[string]any, limit int) {
 		if !ok {
 			continue
 		}
-		hasNumeric = true
 		// 用浮点比较而非 int(f)：避免超大值在 float→int 转换上的实现定义行为（可绕过上限）。
 		if f <= 0 || f > float64(limit) {
 			reqBody[key] = float64(limit)
 		}
 	}
-	if !hasNumeric {
-		reqBody["max_tokens"] = float64(limit)
+	if _, ok := reqBody["max_output_tokens"]; ok {
+		return
 	}
+	for _, key := range maxTokensChatFields {
+		if _, ok := reqBody[key].(float64); ok {
+			return
+		}
+	}
+	reqBody["max_tokens"] = float64(limit)
 }
 
 // extractCustomHeaders 从入站请求提取需透传给上游的自定义头。

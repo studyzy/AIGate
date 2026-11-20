@@ -191,6 +191,73 @@ func TestChatCompletions_EnforceMaxTokens(t *testing.T) {
 	})
 }
 
+// TestEnforceMaxTokens_MaxOutputTokens 覆盖 Responses 协议的 max_output_tokens 字段：
+// 与 chat 字段同样受密钥上限压制；且出现该字段时不得注入 chat 专有的 max_tokens。
+// 黑盒方式：经 /v1/chat/completions 入站、断言上游实际收到的请求体。
+func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, okChatBody))
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, cappedToken := mustCreateKey(t, e.store, e.user.ID, 100, primary(m.ID, 0))
+
+	tests := []struct {
+		name string
+		body string
+		// want 断言受压制字段的取值；未列出的受压制字段断言为「不存在」。
+		want    map[string]float64
+		absent  []string
+		context string
+	}{
+		{
+			name:    "over limit is capped and no max_tokens injected",
+			body:    `{"model":"mock-a","max_output_tokens":9999,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 100},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "超限收敛为上限；出现 max_output_tokens 时不得注入 chat 专有的 max_tokens",
+		},
+		{
+			name:    "negative is capped",
+			body:    `{"model":"mock-a","max_output_tokens":-1,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 100},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "非正数视作「不限」，收敛为上限",
+		},
+		{
+			name:    "under limit is untouched",
+			body:    `{"model":"mock-a","max_output_tokens":50,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 50},
+			absent:  []string{"max_tokens", "max_completion_tokens"},
+			context: "未超限不动",
+		},
+		{
+			name:    "output and chat fields are independent",
+			body:    `{"model":"mock-a","max_output_tokens":50,"max_tokens":9999,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    map[string]float64{"max_output_tokens": 50, "max_tokens": 100},
+			absent:  []string{"max_completion_tokens"},
+			context: "两个字段各自按上限收敛、互不干扰",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := e.postChat(t, cappedToken, tc.body, nil)
+			assertStatus(t, resp, http.StatusOK)
+			_ = readBody(t, resp)
+
+			body := e.rec.Body()
+			for key, want := range tc.want {
+				if got, ok := bodyNumber(t, body, key); !ok || got != want {
+					t.Fatalf("upstream %s = %v (present=%v), want %v: %s", key, got, ok, want, tc.context)
+				}
+			}
+			for _, key := range tc.absent {
+				if v, ok := body[key]; ok {
+					t.Fatalf("upstream body must not contain %s, got %#v: %s", key, v, tc.context)
+				}
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 4. 模型名替换 / 解析
 // ---------------------------------------------------------------------------
