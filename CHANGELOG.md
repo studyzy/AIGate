@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Admin Web UI** — a React SPA embedded in the same binary and served under
+  `/ui/` (with `/` redirecting there). Covers models, credentials, keys, users,
+  groups, usage (summary, request logs, CSV export), settings, webhooks and
+  import; English and Simplified Chinese with instant switching. Built with
+  pnpm + Vite and embedded via `go:embed` from `internal/webui`, so a plain
+  `go build` still works without Node thanks to a committed `.gitkeep`
+  placeholder. `make build` now builds the frontend first, the Dockerfile gains
+  a Node stage, and CI adds a webui job with Vitest and Playwright.
+
 ## [0.1.0] - 2026-10-02
 
 First release: a single-binary, self-hostable LLM gateway with a data plane

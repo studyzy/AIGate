@@ -50,6 +50,9 @@ docker run --rm -p 8080:8080 \
 make run
 ```
 
+启动后浏览器打开 <http://localhost:8080/ui/>，用 `-init-admin-token` 的值登录即可管理模型、
+凭据、密钥与用量。
+
 完整配置、MySQL、凭据加密和容器说明见
 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.md)。
 
@@ -60,8 +63,8 @@ make run
 - **从生产里抽出来。** AIGate 是
   [ClawPro](https://cloud.tencent.com/document/product/213/129156) 的模型接入层，
   行为对应已经跑过生产的请求模式和失败模式。
-- **刻意保持简单。** 没有 Web UI、没有 sidecar、没有代理集群；一个静态二进制，
-  SQLite 或 MySQL。
+- **刻意保持简单。** 管控后台内嵌在同一个二进制里，没有独立前端服务、没有
+  sidecar、没有代理集群；一个静态二进制，SQLite 或 MySQL。
 
 ## 什么情况下不该用 AIGate
 
@@ -106,6 +109,8 @@ AIGate 由 [ClawPro](https://cloud.tencent.com/document/product/213/129156)
 
 ## 特性
 
+- **管控后台（Web UI）** —— 同一个二进制内嵌 React 单页应用，挂在 `/ui/`；覆盖模型、
+  凭据、密钥、用户、分组、用量、设置、Webhook 与导入，中英双语，单页切换语言即时生效。
 - **双协议数据面** —— `POST /v1/chat/completions`、`POST /v1/messages`
   （Anthropic Messages 入站）与 `GET /v1/models`，以 `sk-` 密钥鉴权；密钥只存哈希、
   不落明文。

@@ -53,6 +53,9 @@ Or build from source:
 make run
 ```
 
+Then open <http://localhost:8080/ui/> in a browser and sign in with the
+`-init-admin-token` value to manage models, credentials, keys and usage.
+
 Full configuration, MySQL, credential encryption and container details:
 [docs/deploy.md](docs/deploy.md).
 
@@ -64,8 +67,9 @@ Full configuration, MySQL, credential encryption and container details:
   [ClawPro](https://cloud.tencent.com/document/product/213/129156), so its
   behavior reflects request patterns and failure modes that have already run in
   production.
-- **Boring on purpose.** No web UI, no sidecars, no proxy fleet; a single static
-  binary with SQLite or MySQL.
+- **Boring on purpose.** The admin console is embedded in the same binary — no
+  separate frontend service, no sidecars, no proxy fleet; a single static binary
+  with SQLite or MySQL.
 
 ## When not to use AIGate
 
@@ -113,6 +117,9 @@ access are defaults, not add-ons. The full story is in
 
 ## Features
 
+- **Admin console (Web UI)** — a React SPA embedded in the same binary under
+  `/ui/`, covering models, credentials, keys, users, groups, usage, settings,
+  webhooks and import; English and Simplified Chinese with instant switching.
 - **Dual-format data plane** — `POST /v1/chat/completions`, `POST /v1/messages`
   (Anthropic Messages ingress), and `GET /v1/models`, authenticated with `sk-`
   keys that are stored only as SHA-256 hashes and never in plaintext.

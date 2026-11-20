@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  go:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,3 +32,39 @@ jobs:
 
       - name: Test
         run: go test -race ./... -count=1
+
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm build
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser e2e
+        run: bash e2e/run.sh

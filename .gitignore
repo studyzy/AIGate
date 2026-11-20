@@ -33,3 +33,7 @@ coverage.out
 
 # TS 增量编译缓存
 *.tsbuildinfo
+
+# WebUI 浏览器 e2e 产物
+/webui/test-results/
+/webui/playwright-report/

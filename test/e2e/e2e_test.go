@@ -2641,3 +2641,47 @@ func TestE2E_M4_Webhooks(t *testing.T) {
 		}
 	})
 }
+
+// TestE2E_WebUI_ServesSPA 校验 /ui/ 静态托管：首页 200、根路径 302、前端路由回退、缺失资源 404。
+func TestE2E_WebUI_ServesSPA(t *testing.T) {
+	bin := requireEnv(t, envBinKey)
+	dsn := requireEnv(t, envDSNKey)
+
+	gw := startGateway(t, bin, dsn)
+
+	status, body, err := tryGet(gw.baseURL + "/ui/")
+	if err != nil {
+		t.Fatalf("GET /ui/: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GET /ui/ status = %d, want 200", status)
+	}
+	if !strings.Contains(body, `<div id="root">`) {
+		t.Fatalf("GET /ui/ body is not the SPA shell: %s", body)
+	}
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := noRedirect.Get(gw.baseURL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("GET / status = %d, want 302", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/ui/" {
+		t.Fatalf("GET / Location = %q, want /ui/", loc)
+	}
+
+	status, _, err = tryGet(gw.baseURL + "/ui/keys")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("GET /ui/keys status = %d, err = %v, want 200 fallback", status, err)
+	}
+
+	status, _, err = tryGet(gw.baseURL + "/ui/assets/missing-abc123.js")
+	if err != nil || status != http.StatusNotFound {
+		t.Fatalf("GET /ui/assets/missing-abc123.js status = %d, err = %v, want 404", status, err)
+	}
+}
