@@ -311,6 +311,26 @@ func (h *Handler) forwardViaChatConversion(
 
 // persistResponsesStream 是转换路径流式收尾时的落库：累积 items 取自翻译器已合成的
 // 终态 output（message + 各 function_call），响应体取自翻译器写出的终态事件。
+//
+// 【为什么上游中断时**故意不落库**——这不是遗漏，请不要「修」回去】
+//
+// 上游流中途断开时，Finish() 会补发一个 response.completed 给客户端；但那一刻上游并没有
+// 给出结果，这个终态是网关凭空合成的。本函数据此**不落库**，于是出现一个有意的不对称：
+//
+//	客户端收到了终止信号（合成的 completed），该轮却不会成为下一轮的父行。
+//
+// 三条理由：
+//  1. 「落库内容 = 客户端所见」这条不变式的方向是**单向**的：它禁止落「客户端没见到的内容」，
+//     并不要求「客户端见了什么就必须落什么」。合成的 completed 恰恰是客户端见到、但上游
+//     从未产出的内容——把它落库，等于让网关自己伪造一轮对话的作者。
+//  2. 半截对话一旦落库就会成为 previous_response_id / conversation 的父行：下一轮会拿它
+//     的 items 拼历史，于是**续接重放一份客户端从未真正收到的结果**（被中断的那半轮）。
+//     这正是 fix 轮 I-2 要堵的洞，而不是要绕开的边界情况。
+//  3. 强改回「落库合成终态」会同时打破 I-1 的不变式（落库内容必须等于客户端所见的上游结果）
+//     并让中断轮在会话里看起来与正常轮完全一样，运维再也分不出哪些轮次其实失败了。
+//
+// 对照实验：TestResponseState_StreamingInterruptedDoesNotPersist（上游只发部分 chunk 即断开
+// → 落库 0 行，同时断言客户端**仍**收到 response.completed，证明这不是「没有终态事件」）。
 func (h *Handler) persistResponsesStream(
 	r *http.Request,
 	key *model.APIKey,
@@ -322,7 +342,8 @@ func (h *Handler) persistResponsesStream(
 	if !state.store {
 		return
 	}
-	// take：终态快照消费即清；没有（上游中断、收尾是合成的）就不落库。
+	// take：终态快照消费即清。为空即「上游未自行收尾」（流被中断，quick 收尾是 Finish 合成的）
+	// → **不落库**，理由见上方函数注释「为什么上游中断时故意不落库」。
 	terminal := t.TakeTerminal()
 	if len(terminal) == 0 {
 		return

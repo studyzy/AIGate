@@ -343,9 +343,13 @@ func (h *Handler) persistResponsesState(
 	switch {
 	case err == nil:
 	case errors.Is(err, gorm.ErrDuplicatedKey):
+		// 【依赖】本判定成立的前提是 model.Open 开启了 gorm.Config.TranslateError: true。
+		// 关掉它，驱动只会回裸的 "UNIQUE constraint failed: ..." 文本错误，errors.Is 恒为 false，
+		// 这个 case 会**静默失效**——重复落库退回 ERROR 分支（不丢数据、也不报错，但可观测性变差）。
+		// 改动 model.Open 的该开关或升级 GORM 时，请同步复核这里的判定是否仍然成立。
+		//
 		// 同一 ID 重复落库（重试、或同一响应被两条路径各写一次）：内容早已存在，
 		// 不是故障，降到 Warn——但也不能静默吞掉，重复本身仍是需要观测的现象。
-		// 依赖 model.Open 的 TranslateError：未开启时驱动只回裸的 UNIQUE 约束错误，这里判定不到。
 		slog.Warn("response state already stored, skipping duplicate", "response_id", respID,
 			"model", requestedModel)
 	default:
@@ -355,7 +359,9 @@ func (h *Handler) persistResponsesState(
 
 // persistResponsesStreamState 是流式路径的落库包装：终态事件（response.completed /
 // incomplete / failed）携带完整 response 对象，以其为响应体；没有终态事件（上游中断）
-// 时不落库——半截对话不应成为下一轮的父行。
+// 时不落库——半截对话不应成为下一轮的父行，否则续接会重放客户端从未真正收到的内容。
+// 完整论证（为什么这是有意的不对称、为什么不能改回「落库合成终态」）见
+// persistResponsesStream 的函数注释，改动此处前请先读那一段。
 func (h *Handler) persistResponsesStreamState(
 	ctx context.Context,
 	key *model.APIKey,

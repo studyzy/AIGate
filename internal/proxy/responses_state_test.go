@@ -516,6 +516,8 @@ func TestResponseState_DuplicatePersistIsNotAnError(t *testing.T) {
 		t.Fatal("duplicate id must surface an error from the store")
 	}
 	// 生产装配（model.Open）与测试夹具（model.Open）同一条路径，故这里的判定口径即生产口径。
+	// 【依赖】该判定依赖 model.Open 的 gorm.Config.TranslateError: true；关掉它，这里与
+	// responses_state.go 的降级分支会同时失效——本用例是那条依赖的回归哨兵，不要删。
 	if !errors.Is(err, gorm.ErrDuplicatedKey) {
 		t.Fatalf("duplicate create error = %v, want it to satisfy errors.Is(gorm.ErrDuplicatedKey); "+
 			"without TranslateError the caller cannot tell a benign duplicate from a real failure", err)

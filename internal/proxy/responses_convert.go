@@ -572,6 +572,8 @@ type responsesStreamTranslator struct {
 	// 凭空合成的，上游实际并未结束，不能当成本轮结果落库（见 finishSynthesized）。
 	terminal []byte
 	// finishSynthesized 标记收尾是由 Finish() 补发的（上游中途断开、从未给出终态）。
+	// 合成收尾不算本轮结果：有状态路径据此**不落库**（中断轮不进会话历史），
+	// 理由与取舍见 proxy.persistResponsesStream 的函数注释，改这里之前请先读那一段。
 	finishSynthesized bool
 }
 
