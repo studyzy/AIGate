@@ -1,3 +1,5 @@
+//
+//
 // Tencent is pleased to support the open source community by making Tencent Cloud AIGate available.
 //
 // Copyright (C) 2026 Tencent.
@@ -6,6 +8,9 @@
 // If you have downloaded a copy of the Tencent Cloud AIGate source code from Tencent,
 // please note that Tencent Cloud AIGate source code is licensed under the Apache 2.0 License,
 // A copy of the Apache 2.0 License is included in this file.
+//
+//
+
 package webui_test
 
 import (
@@ -40,6 +45,26 @@ func TestHandlerServesIndex(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	if !strings.Contains(string(body), "<html") {
 		t.Fatalf("body does not look like an html page")
+	}
+}
+
+// TestHandlerSetsSecurityHeaders 覆盖静态托管的所有响应都带最小安全头（含占位页与 404）。
+func TestHandlerSetsSecurityHeaders(t *testing.T) {
+	for _, target := range []string{"/ui/", "/ui/keys", "/ui/assets/missing-abc123.js"} {
+		rec := serve(t, target)
+		head := rec.Header()
+		if got := head.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s: x-content-type-options = %q, want nosniff", target, got)
+		}
+		if got := head.Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("%s: x-frame-options = %q, want DENY", target, got)
+		}
+		if got := head.Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+			t.Fatalf("%s: content-security-policy = %q, want frame-ancestors 'none'", target, got)
+		}
+		if got := head.Get("Referrer-Policy"); got != "no-referrer" {
+			t.Fatalf("%s: referrer-policy = %q, want no-referrer", target, got)
+		}
 	}
 }
 

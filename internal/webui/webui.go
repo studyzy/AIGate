@@ -1,3 +1,5 @@
+//
+//
 // Tencent is pleased to support the open source community by making Tencent Cloud AIGate available.
 //
 // Copyright (C) 2026 Tencent.
@@ -7,6 +9,8 @@
 // please note that Tencent Cloud AIGate source code is licensed under the Apache 2.0 License,
 // A copy of the Apache 2.0 License is included in this file.
 //
+//
+
 // Package webui 托管管理后台前端：把构建产物 webui/dist 经 go:embed 编进二进制，
 // 在 /ui/ 下提供静态资源与单页应用回退。本包不读写数据库，也不依赖任何业务包。
 package webui
@@ -45,6 +49,7 @@ func Handler() http.Handler {
 	files := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
 		name := serverPath(r.URL.Path)
 		target := name
 		if name != "/" {
@@ -64,6 +69,18 @@ func Handler() http.Handler {
 		w.Header().Set("Cache-Control", cacheControl(target))
 		files.ServeHTTP(w, r)
 	})
+}
+
+// setSecurityHeaders 给静态托管的所有响应加最小安全头。
+//
+// 本包是该进程里唯一输出 HTML 的地方：禁止 MIME 嗅探、禁止被第三方页面内嵌，
+// 并限制页面只能加载同源资源（CSP 允许内联样式，recharts 与占位页依赖 style 属性）。
+func setSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 }
 
 // serverPath 把 /ui 前缀去掉并清理 .. 等路径穿越，返回以 / 开头的 dist 内路径。
