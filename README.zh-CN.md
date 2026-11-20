@@ -53,6 +53,8 @@ make run
 完整配置、MySQL、凭据加密和容器说明见
 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.md)。
 
+`aigatectl` 管控命令行工具见 [docs/CLI.zh-CN.md](docs/CLI.zh-CN.md)。
+
 ## 为什么用 AIGate
 
 - **为模型访问而做，不是通用 API 网关。** 路由、配额、凭据、用量和 Webhook

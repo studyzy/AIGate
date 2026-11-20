@@ -56,6 +56,8 @@ make run
 Full configuration, MySQL, credential encryption and container details:
 [docs/deploy.md](docs/deploy.md).
 
+For the `aigatectl` management CLI, see [docs/CLI.md](docs/CLI.md).
+
 ## Why AIGate
 
 - **Built for model access, not general API traffic.** Routing, quotas,

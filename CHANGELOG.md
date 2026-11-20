@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`aigatectl` management CLI** — a second binary (`make build-cli` → `bin/aigatectl`)
+  that exposes all 52 admin/user-plane endpoints plus `GET /healthz` as discoverable
+  commands, built on a reusable `internal/client` HTTP client and covered by end-to-end
+  tests. Credentials are read only from the environment; see [docs/CLI.md](docs/CLI.md).
+
 ## [0.1.0] - 2026-10-02
 
 First release: a single-binary, self-hostable LLM gateway with a data plane
