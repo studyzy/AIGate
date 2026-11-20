@@ -1411,3 +1411,46 @@ func TestResponsesRequestToChat_ToolsNullOrAbsent(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 终态快照（有状态路径落库用）：只由上游驱动，且消费即清
+// ---------------------------------------------------------------------------
+
+// TestResponsesStreamTranslator_TerminalIsUpstreamDrivenOnly：终态快照只在**上游**给出收尾
+// （[DONE]）时产生；Finish() 补发的收尾是网关凭空合成的，上游并未结束，快照必须保持为空。
+//
+// 这条正是有状态路径「上游中断不落库」的依据：黑盒用例只能看到结果，这里钉住成因。
+func TestResponsesStreamTranslator_TerminalIsUpstreamDrivenOnly(t *testing.T) {
+	t.Run("upstream [DONE] produces a terminal snapshot", func(t *testing.T) {
+		tr, _ := respStreamNew(t, "m")
+		respStreamFeed(t, tr, respStreamSSE(`{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}`), 7)
+		respStreamFeed(t, tr, respStreamSSE("[DONE]"), 7)
+		if len(tr.TakeTerminal()) == 0 {
+			t.Fatal("terminal snapshot must exist when the upstream closes the stream itself")
+		}
+	})
+
+	t.Run("Finish-synthesized completion produces none", func(t *testing.T) {
+		tr, rec := respStreamNew(t, "m")
+		respStreamFeed(t, tr, respStreamSSE(`{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}`), 7)
+		tr.Finish()
+		if stream := rec.Body.String(); !strings.Contains(stream, "response.completed") {
+			t.Fatalf("Finish must still emit response.completed to the client, got %q", stream)
+		}
+		if len(tr.TakeTerminal()) != 0 {
+			t.Fatal("a Finish-synthesized completion must never become the stored result")
+		}
+	})
+}
+
+// TestResponsesStreamTranslator_TakeTerminalConsumesOnce：取走即清空，重复取为空。
+func TestResponsesStreamTranslator_TakeTerminalConsumesOnce(t *testing.T) {
+	tr, _ := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamSSE("[DONE]"), 5)
+	if len(tr.TakeTerminal()) == 0 {
+		t.Fatal("first TakeTerminal must return the snapshot")
+	}
+	if got := tr.TakeTerminal(); got != nil {
+		t.Fatalf("second TakeTerminal = %q, want nil (consume-once)", got)
+	}
+}

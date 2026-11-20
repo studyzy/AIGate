@@ -45,6 +45,11 @@ func TestLoad_InvalidValues(t *testing.T) {
 			[]string{"-response-retention-days", "-1"},
 			"response-retention-days must be >= 0",
 		},
+		{
+			"overflowing response retention",
+			[]string{"-response-retention-days", "9223372036854775807"},
+			"response-retention-days must be <=",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

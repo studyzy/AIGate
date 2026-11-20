@@ -567,9 +567,12 @@ type responsesStreamTranslator struct {
 	finishReason string
 	usage        map[string]any
 
-	// terminal 是终态事件（response.completed / incomplete / failed）[response] 对象的
-	// JSON 原文：有状态路径据此落库完整响应体（字段为 nil 表示未收到终态事件）。
+	// terminal 是首个终态事件 response 对象的 JSON 原文，供有状态路径落库完整响应体
+	// （nil 表示还没有终态）。只由**上游驱动**的收尾写入：Finish() 补发的收尾是网关
+	// 凭空合成的，上游实际并未结束，不能当成本轮结果落库（见 finishSynthesized）。
 	terminal []byte
+	// finishSynthesized 标记收尾是由 Finish() 补发的（上游中途断开、从未给出终态）。
+	finishSynthesized bool
 }
 
 // responsesStreamItem 是一个流式 output item 的累积状态。
@@ -653,7 +656,14 @@ func (t *responsesStreamTranslator) Wrote() bool { return t.wrote }
 // Finish() **不改变** Wrote() 的语义（收尾阶段写出的事件不计入 wrote）：上游 200 但零增量时
 // Wrote() 保持 false，供调用方识别「空响应」；但如 Wrote 注释所述，回退 502 的依据应当是
 // 上游状态码异常，而不是 Wrote()==false。
-func (t *responsesStreamTranslator) Finish() { t.finalize() }
+func (t *responsesStreamTranslator) Finish() { t.finishSynthesized = true; t.finalize() }
+
+// TakeTerminal 取走并清空终态 JSON 原文（消费即清，避免落库失败/重入后复用旧快照）。
+func (t *responsesStreamTranslator) TakeTerminal() []byte {
+	terminal := t.terminal
+	t.terminal = nil
+	return terminal
+}
 
 // processEvent 处理一个完整 SSE 事件块（多行 data: 会被拼接）。
 func (t *responsesStreamTranslator) processEvent(block string) {
@@ -873,8 +883,16 @@ func (t *responsesStreamTranslator) finalize() {
 	terminal := t.responseBody(t.finalStatus(), output)
 	// 收尾事件的 response 对象是最终形态的完整响应；缓存其 JSON 原文供有状态路径落库
 	// （与写出的事件同源，避免二次构造出现字段漂移）。编码失败不影响事件写出。
-	if raw, err := json.Marshal(terminal); err == nil {
-		t.terminal = raw
+	//
+	// 两条写入约束（不变式：落库内容必须等于客户端所见）：
+	//   · 只写一次：finalize 本身有幂等前置（closed/failed 直接返回），这里再挡住未来可能的
+	//     重入路径，保证落库的是**第一个**终态；
+	//   · 合成的收尾不进 terminal：上游中途断开时客户端会收到网关补发的 completed，
+	//     但那不是上游给出的结果，落库等于把半截对话伪装成一轮完整对话。
+	if t.terminal == nil && !t.finishSynthesized {
+		if raw, err := json.Marshal(terminal); err == nil {
+			t.terminal = raw
+		}
 	}
 	t.emit("response.completed", map[string]any{"response": terminal})
 }

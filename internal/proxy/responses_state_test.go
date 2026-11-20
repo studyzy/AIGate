@@ -25,6 +25,8 @@ import (
 
 	"aigate/internal/model"
 	"aigate/internal/proxy"
+
+	"gorm.io/gorm"
 )
 
 // 本文件是 POST /v1/responses 有状态能力（Task 8）的黑盒用例：
@@ -223,6 +225,58 @@ func TestResponseState_StorageDisabledByConfig(t *testing.T) {
 
 	if calls := e.rec.Calls(); calls != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (only the accepted request may be forwarded)", calls)
+	}
+}
+
+// TestResponseState_InvalidStoreRejected（M-2）：store 必须是布尔值。
+// 与站点开关无关：非法类型永远是「参数非法」，不能被站点开关的文案掩盖。
+func TestResponseState_InvalidStoreRejected(t *testing.T) {
+	const invalidStoreMessage = "invalid store"
+	for _, tc := range []struct {
+		name  string
+		store bool
+	}{{"storage enabled", true}, {"storage disabled", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSteerableEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody),
+				func(h *proxy.Handler) {
+					if err := h.SetResponseStorage(tc.store); err != nil {
+						t.Fatalf("SetResponseStorage: %v", err)
+					}
+				})
+			m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+			_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+			for _, body := range []string{
+				`{"model":"mock-a","input":"hi","store":"yes"}`,
+				`{"model":"mock-a","input":"hi","store":1}`,
+			} {
+				resp := e.postResponses(t, token, body)
+				assertErrorResponse(t, resp, http.StatusBadRequest, invalidStoreMessage)
+			}
+			if calls := e.rec.Calls(); calls != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls)
+			}
+		})
+	}
+}
+
+// TestResponseState_StorageNullIsDefault：JSON null 视同「未设置」（缺省 true），
+// 站点关闭时按 store:false 处理而不是 400——null 不是客户端的显式诉求。
+func TestResponseState_StorageNullIsDefault(t *testing.T) {
+	e := newSteerableEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody),
+		func(h *proxy.Handler) {
+			if err := h.SetResponseStorage(false); err != nil {
+				t.Fatalf("SetResponseStorage(false): %v", err)
+			}
+		})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi","store":null}`)
+	assertStatus(t, resp, http.StatusOK)
+	out := decodeResponsesBody(t, readBody(t, resp))
+	if got, ok := out["store"].(bool); !ok || got {
+		t.Fatalf("response.store = %v (present=%v), want false", out["store"], ok)
 	}
 }
 
@@ -446,6 +500,28 @@ func TestResponseState_RetentionLoopPrunes(t *testing.T) {
 	})
 }
 
+// TestResponseState_DuplicatePersistIsNotAnError（M-5）：同一 ID 重复落库（重试/并发写入）
+// 不是故障——唯一键冲突应降级为 Warn，而不是让运维按 ERROR 排查一场并不存在的故障。
+// 这里直接验证存储层行为：第二次 CreateResponseState 返回的错误能被 ErrDuplicatedKey 判定。
+func TestResponseState_DuplicatePersistIsNotAnError(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
+	row := &model.ResponseState{ID: "resp_dup_1", Status: model.ResponseStateStatusCompleted}
+	if err := e.store.CreateResponseState(ctx(), row); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	err := e.store.CreateResponseState(ctx(), &model.ResponseState{
+		ID: "resp_dup_1", Status: model.ResponseStateStatusCompleted,
+	})
+	if err == nil {
+		t.Fatal("duplicate id must surface an error from the store")
+	}
+	// 生产装配（model.Open）与测试夹具（model.Open）同一条路径，故这里的判定口径即生产口径。
+	if !errors.Is(err, gorm.ErrDuplicatedKey) {
+		t.Fatalf("duplicate create error = %v, want it to satisfy errors.Is(gorm.ErrDuplicatedKey); "+
+			"without TranslateError the caller cannot tell a benign duplicate from a real failure", err)
+	}
+}
+
 // waitGone 轮询等待会话状态行消失（清理循环在独立 goroutine 里执行）。
 func waitGone(t *testing.T, store *model.Store, id string) {
 	t.Helper()
@@ -545,6 +621,128 @@ func TestResponseState_StreamingPersists(t *testing.T) {
 		t.Fatalf("total_tokens = %d, want 9", rows[0].TotalTokens)
 	}
 	_ = e.rec
+}
+
+// TestResponseState_StreamingPassthroughKeepsFirstTerminal（I-1）：
+// 落库内容必须等于客户端所见。上游在终态之后再补一个内容不同的 response.completed 时，
+// 客户端收到的是**第一个**终态事件，落库的 response_body 与 items 快照也必须取自那一个。
+//
+// 判别力：守卫（仅首个终态事件可赋值 + 消费后置 nil）被删掉时，落库会变成**最后一个**，
+// 本用例打红。这条守卫同时是异常上游「用后续终态改写下一轮重放内容」的唯一闸门。
+func TestResponseState_StreamingPassthroughKeepsFirstTerminal(t *testing.T) {
+	const secondOutput = "INJECTED-SECOND-TERMINAL"
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(responsesSSEStream +
+			"event: response.completed\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_up_1\",\"object\":\"response\"," +
+			"\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\"," +
+			`"content":[{"type":"output_text","text":"` + secondOutput + `"}]}],` +
+			"\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+		w.(http.Flusher).Flush()
+	})
+	m := mustCreateAIModel(t, e.store, newResponsesAIModel("mock-responses", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-responses","input":"hi","stream":true}`)
+	assertStatus(t, resp, http.StatusOK)
+	stream := readBody(t, resp)
+
+	// 前提：客户端确实收到了两个终态事件，且两者内容不同（否则本用例没有判别力）。
+	if n := strings.Count(stream, "event: response.completed"); n != 2 {
+		t.Fatalf("client must see both terminal events, got %d:\n%s", n, stream)
+	}
+	if !strings.Contains(stream, secondOutput) {
+		t.Fatalf("second terminal event must be forwarded to the client verbatim, got:\n%s", stream)
+	}
+
+	rows := waitStoredResponses(t, e, 1)
+	body := string(rows[0].ResponseBody)
+	if strings.Contains(body, secondOutput) {
+		t.Fatalf("stored response_body came from the LAST terminal event; it must be the FIRST one:\n%s", body)
+	}
+	if !strings.Contains(body, `"status":"completed"`) {
+		t.Fatalf("stored response_body is not the first terminal response object:\n%s", body)
+	}
+	if items := string(rows[0].Items); strings.Contains(items, secondOutput) {
+		t.Fatalf("stored items snapshot came from the LAST terminal event:\n%s", items)
+	}
+
+	// 「等于客户端所见」：落库的 response_body 必须是客户端收到的第一个终态 response 对象
+	// （把网关回显的 store 除外——那是网关口径，不是上游内容）。
+	var stored map[string]any
+	if err := json.Unmarshal(rows[0].ResponseBody, &stored); err != nil {
+		t.Fatalf("decode stored body: %v", err)
+	}
+	delete(stored, "store")
+	firstClient := firstTerminalResponse(t, stream)
+	delete(firstClient, "store")
+	want, _ := json.Marshal(firstClient)
+	got, _ := json.Marshal(stored)
+	if string(want) != string(got) {
+		t.Fatalf("stored body != first terminal event seen by the client:\n stored=%s\n client=%s", got, want)
+	}
+}
+
+// firstTerminalResponse 取客户端 SSE 流里**第一个**终态事件的 response 对象。
+func firstTerminalResponse(t *testing.T, stream string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(stream, "\n") {
+		rest, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(strings.TrimSpace(rest)), &ev) != nil {
+			continue
+		}
+		if typ, _ := ev["type"].(string); !strings.HasPrefix(typ, "response.completed") &&
+			typ != "response.incomplete" && typ != "response.failed" {
+			continue
+		}
+		target, ok := ev["response"].(map[string]any)
+		if !ok {
+			target = ev
+		}
+		return target
+	}
+	t.Fatalf("no terminal event in client stream")
+	return nil
+}
+
+// TestResponseState_StreamingInterruptedDoesNotPersist（I-2）：
+// 上游只发部分 chunk 就断开（没有终态事件）时，**不落库**——半截对话不应成为下一轮的父行。
+// 这条覆盖转换路径：终态事件由翻译器在流结束时合成，一旦翻译器的收尾逻辑变化就会静默回归。
+func TestResponseState_StreamingInterruptedDoesNotPersist(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// 一个内容分片 + 一个只带 finish_reason 的分片：都没有 [DONE]，也没有 usage 分片。
+		_, _ = w.Write([]byte(
+			`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{"role":"assistant","content":"par"},"finish_reason":null}]}` + "\n\n" +
+				`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// 直接返回：连接结束，网关读到的 body 到此为止。
+	})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","stream":true,"input":"interrupted question"}`)
+	assertStatus(t, resp, http.StatusOK)
+	stream := readBody(t, resp)
+
+	// 前提：网关确实**补发**了 response.completed（这是 Finish 的既定行为），
+	// 所以「不落库」不能由「没有终态事件」来解释，必须是明确的策略。
+	if !strings.Contains(stream, "event: response.completed") {
+		t.Fatalf("Finish must still emit a terminal event to the client, got:\n%s", stream)
+	}
+
+	// 给落库一个明确的观察窗（它发生在响应写出之后）。
+	time.Sleep(100 * time.Millisecond)
+	if rows := storedResponseRows(t, e); len(rows) != 0 {
+		t.Fatalf("response_states rows = %d, want 0 for an interrupted upstream stream", len(rows))
+	}
 }
 
 // ---------------------------------------------------------------------------

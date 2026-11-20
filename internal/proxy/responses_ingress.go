@@ -322,8 +322,13 @@ func (h *Handler) persistResponsesStream(
 	if !state.store {
 		return
 	}
+	// take：终态快照消费即清；没有（上游中断、收尾是合成的）就不落库。
+	terminal := t.TakeTerminal()
+	if len(terminal) == 0 {
+		return
+	}
 	items := buildResponsesItemsSnapshot(state.history, reqBody, t.finalOutput())
-	h.persistResponsesStreamState(r.Context(), key, respID, state, requestedModel, items, t.terminal)
+	h.persistResponsesStreamState(r.Context(), key, respID, state, requestedModel, items, terminal)
 }
 
 // openAIErrorBody 构造 OpenAI 风格的错误体 {"error":{"message","type","code"}}，
@@ -475,10 +480,11 @@ func (h *Handler) forwardResponsesPassthrough(
 	}
 	_, _ = io.Copy(sink, resp.Body)
 	sink.close()
-	if state.store && sink.terminal != nil {
-		items := buildResponsesItemsSnapshot(state.history, reqBody, responsesOutputItems(sink.terminal))
+	// takeTerminal 是「消费即清」：取走终态快照后 stream 不再持有引用。
+	if terminal := sink.takeTerminal(); terminal != nil {
+		items := buildResponsesItemsSnapshot(state.history, reqBody, responsesOutputItems(terminal))
 		h.persistResponsesState(r.Context(), key, respID, state, requestedModel, items,
-			marshalJSONOrEmpty(sink.terminal))
+			marshalJSONOrEmpty(terminal))
 	}
 	h.logUsage(key, resolved, sink.usage, resp.StatusCode, start)
 }
@@ -528,8 +534,16 @@ type responsesPassthroughStream struct {
 	usage *provider.Usage
 	// store 是回显给客户端的 store 值（上游一律被改写为 false，客户端看到的必须是网关口径）。
 	store bool
-	// terminal 是终态事件里 response 对象的快照，供有状态路径落库。
+	// terminal 是**首个**终态事件里 response 对象的快照，供有状态路径落库；
+	// 落库后由 takeTerminal 取走并置 nil。只有 store 为真时才保留（不落库的请求不占内存）。
 	terminal map[string]any
+}
+
+// takeTerminal 取走并清空终态快照（消费即清：返回后 stream 不再持有该引用）。
+func (s *responsesPassthroughStream) takeTerminal() map[string]any {
+	terminal := s.terminal
+	s.terminal = nil
+	return terminal
 }
 
 // Write 实现 io.Writer：按行切分后逐行处理。
@@ -630,7 +644,12 @@ func (s *responsesPassthroughStream) rewriteEvent(payload string) (string, bool)
 		}
 	}
 	target["store"] = s.store
-	if s.store {
+	// 不变式：**落库内容必须等于客户端所见**。
+	//   · 只保留**首个**终态事件：客户端收到的是它，后续终态事件（上游异常多发的
+	//     response.completed，或同一块内的多个 data: 行）不得改写落库内容——否则异常上游
+	//     可以用后一个终态决定下一轮续接时重放什么；
+	//   · usage 仍取各终态事件里最后一个非空值（usage 的注释见上），与这里互不影响。
+	if s.store && s.terminal == nil {
 		s.terminal = target
 	}
 	out, err := json.Marshal(ev)

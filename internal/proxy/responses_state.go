@@ -42,6 +42,8 @@ import (
 	"aigate/internal/httpx"
 	"aigate/internal/model"
 	"aigate/internal/provider"
+
+	"gorm.io/gorm"
 )
 
 // responsesStatefulInput 是一次有状态请求在第 3 步解析出的全部上下文。
@@ -90,6 +92,8 @@ func (h *Handler) prepareResponsesState(
 
 	// 站点开关一票否决：有状态能力整体不可用，显式开启存储也明确拒绝（不静默改写）。
 	// 判定顺序：先看有状态字段（它们在任何取值下都不可用），再看显式 store:true。
+	// store 的**类型**合法性已在上面判过，因此站点关闭时 "store":"yes" 报的仍是
+	// invalid store 而不是「站点已关闭存储」——参数非法与站点策略是两件事，不能互相掩盖。
 	if !h.allowResponseStorage {
 		if stateful {
 			httpx.WriteError(w, http.StatusBadRequest, msgResponsesStatefulDisabled)
@@ -213,6 +217,11 @@ func decodeResponsesItems(raw []byte) ([]any, bool) {
 		slog.Warn("decode stored response items failed", "error", err)
 		return nil, false
 	}
+	// JSON null 解码成功但语义上是「没有历史」：与解码失败同口径返回 false，
+	// 避免把「解码成功」与「有历史」混为一谈（调用方只关心后者）。
+	if items == nil {
+		return nil, false
+	}
 	return items, true
 }
 
@@ -330,7 +339,16 @@ func (h *Handler) persistResponsesState(
 		TotalTokens:        totalTokens,
 		ReasoningTokens:    reasoningTokens,
 	}
-	if err := h.store.CreateResponseState(ctx, row); err != nil {
+	err = h.store.CreateResponseState(ctx, row)
+	switch {
+	case err == nil:
+	case errors.Is(err, gorm.ErrDuplicatedKey):
+		// 同一 ID 重复落库（重试、或同一响应被两条路径各写一次）：内容早已存在，
+		// 不是故障，降到 Warn——但也不能静默吞掉，重复本身仍是需要观测的现象。
+		// 依赖 model.Open 的 TranslateError：未开启时驱动只回裸的 UNIQUE 约束错误，这里判定不到。
+		slog.Warn("response state already stored, skipping duplicate", "response_id", respID,
+			"model", requestedModel)
+	default:
 		slog.Error("persist response state failed", "error", err, "response_id", respID, "model", requestedModel)
 	}
 }
