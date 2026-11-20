@@ -219,6 +219,9 @@ export interface ConnectivityResult {
   latency_ms?: number;
   /** 上游真实返回的助手文本（探测要求模型回一个 hello）。 */
   reply?: string;
+  /** 上游自报的请求 id 与模型名，便于和上游日志对齐。 */
+  upstream_id?: string;
+  upstream_model?: string;
   error_kind?: string;
   message?: string;
 }

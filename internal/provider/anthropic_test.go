@@ -305,7 +305,7 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	defer srv.Close()
 
 	p := &provider.AnthropicProvider{}
-	latency, reply, err := p.CheckConnectivityWithChat(
+	latency, out, err := p.CheckConnectivityWithChat(
 		context.Background(),
 		"sk-anthropic",
 		srv.URL,
@@ -317,8 +317,8 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	if latency <= 0 {
 		t.Fatalf("expected positive latency, got %v", latency)
 	}
-	if reply != "hello" {
-		t.Fatalf("reply = %q, want the assistant text block", reply)
+	if out.Reply != "hello" {
+		t.Fatalf("reply = %q, want the assistant text block", out.Reply)
 	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %s, want POST", gotMethod)

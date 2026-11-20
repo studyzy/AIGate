@@ -29,11 +29,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type connectivityResp struct {
-	OK        bool   `json:"ok"`
-	LatencyMS int64  `json:"latency_ms"`
-	Reply     string `json:"reply"`
-	ErrorKind string `json:"error_kind"`
-	Message   string `json:"message"`
+	OK            bool   `json:"ok"`
+	LatencyMS     int64  `json:"latency_ms"`
+	Reply         string `json:"reply"`
+	UpstreamID    string `json:"upstream_id"`
+	UpstreamModel string `json:"upstream_model"`
+	ErrorKind     string `json:"error_kind"`
+	Message       string `json:"message"`
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +97,7 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 		// 稍作延迟，保证 latency_ms 为可观测的正值。
 		time.Sleep(10 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+		_, _ = w.Write([]byte(`{"id":"c1","model":"m1","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	}))
 	defer upstream.Close()
 
@@ -111,8 +113,8 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 	if resp.LatencyMS <= 0 {
 		t.Fatalf("latency_ms = %d, want > 0", resp.LatencyMS)
 	}
-	if resp.Reply != "hi" {
-		t.Fatalf("reply = %q, want the upstream assistant text", resp.Reply)
+	if resp.Reply != "hi" || resp.UpstreamID != "c1" || resp.UpstreamModel != "m1" {
+		t.Fatalf("reply/id/model = %q/%q/%q, want hi/c1/m1", resp.Reply, resp.UpstreamID, resp.UpstreamModel)
 	}
 	if resp.ErrorKind != "" || resp.Message != "" {
 		t.Fatalf("success response should not carry error_kind/message: %+v", resp)

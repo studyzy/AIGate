@@ -86,7 +86,10 @@ export function ProvidersPage() {
     try {
       const res = await api<ConnectivityResult>("/admin/models/" + id + "/connectivity", { method: "POST" });
       if (res.ok) {
-        toast(t("model.testOk", { ms: res.latency_ms ?? 0 }) + (res.reply ? " · " + t("model.testReply", { reply: res.reply }) : ""), "success");
+        const parts = [t("model.testOk", { ms: res.latency_ms ?? 0 })];
+        if (res.reply) parts.push(t("model.testReply", { reply: res.reply }));
+        if (res.upstream_id) parts.push(res.upstream_model ? res.upstream_model + " · " + res.upstream_id : res.upstream_id);
+        toast(parts.join(" · "), "success");
       } else {
         toast(res.message ?? res.error_kind ?? t("usage.status"));
       }

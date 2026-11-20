@@ -272,7 +272,7 @@ func firstPositiveInt(values ...int) int {
 func (p *OpenAIProvider) CheckConnectivityWithChat(
 	ctx context.Context,
 	apiKey, apiBase, model string,
-) (time.Duration, string, error) {
+) (time.Duration, ProbeOutcome, error) {
 	req := map[string]interface{}{
 		"model": model,
 		"messages": []map[string]interface{}{
@@ -284,7 +284,7 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 	normalizeMaxTokensParam(req, model)
 	body, err := json.Marshal(req)
 	if err != nil {
-		return 0, "", &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return 0, ProbeOutcome{}, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 
 	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+"/chat/completions", body, func(h http.Header) {
@@ -293,14 +293,16 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 		}
 	})
 	if err != nil {
-		return 0, "", err
+		return 0, ProbeOutcome{}, err
 	}
 	return runConnectivityProbe(httpReq, openAIProbeReply)
 }
 
 // openAIProbeReply 从 OpenAI 兼容响应里取出助手回复；空回复视为未真正调用模型。
-func openAIProbeReply(body []byte) (string, error) {
+func openAIProbeReply(body []byte) (ProbeOutcome, error) {
 	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
 				Content          *string `json:"content"`
@@ -309,10 +311,10 @@ func openAIProbeReply(body []byte) (string, error) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", errors.New("response is not a chat completion")
+		return ProbeOutcome{}, errors.New("response is not a chat completion")
 	}
 	if len(parsed.Choices) == 0 {
-		return "", errors.New("response has no choices")
+		return ProbeOutcome{}, errors.New("response has no choices")
 	}
 	msg := parsed.Choices[0].Message
 	reply := ""
@@ -324,7 +326,11 @@ func openAIProbeReply(body []byte) (string, error) {
 		reply = strings.TrimSpace(*msg.ReasoningContent)
 	}
 	if reply == "" {
-		return "", errors.New("response has empty assistant message")
+		return ProbeOutcome{}, errors.New("response has empty assistant message")
 	}
-	return truncateReply(reply), nil
+	return ProbeOutcome{
+		Reply:         truncateReply(reply),
+		UpstreamID:    parsed.ID,
+		UpstreamModel: parsed.Model,
+	}, nil
 }

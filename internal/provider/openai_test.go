@@ -282,15 +282,15 @@ func TestOpenAICheckConnectivityWithChat_Success(t *testing.T) {
 	defer srv.Close()
 
 	p := &provider.OpenAIProvider{}
-	latency, reply, err := p.CheckConnectivityWithChat(context.Background(), "sk-ok", srv.URL, "gpt-4o-mini")
+	latency, out, err := p.CheckConnectivityWithChat(context.Background(), "sk-ok", srv.URL, "gpt-4o-mini")
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if latency <= 0 {
 		t.Fatalf("expected positive latency, got %v", latency)
 	}
-	if reply != "hello" {
-		t.Fatalf("reply = %q, want the assistant message text", reply)
+	if out.Reply != "hello" {
+		t.Fatalf("reply = %q, want the assistant message text", out.Reply)
 	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %s, want POST", gotMethod)

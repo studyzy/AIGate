@@ -2141,10 +2141,16 @@ components:
           type: boolean
         latency_ms:
           type: integer
-          description: 一次最小对话请求的往返毫秒数（`ok=true` 时存在）
+          description: 一次最小对话请求的完整往返毫秒数，读完响应体后才计时（`ok=true` 时存在）
         reply:
           type: string
           description: 上游真实返回的助手文本（`ok=true` 时存在，通常为 hello）
+        upstream_id:
+          type: string
+          description: 上游响应自报的请求 id，用于和上游日志对齐
+        upstream_model:
+          type: string
+          description: 上游响应自报的模型名
         error_kind:
           type: string
           description: 失败原因枚举（`ok=false` 时存在）

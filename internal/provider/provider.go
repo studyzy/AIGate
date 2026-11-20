@@ -124,6 +124,14 @@ func classifyHTTPStatus(status int) error {
 	}
 }
 
+// ProbeOutcome 是一次连通性探测拿到的上游事实：回复文本与上游自报的请求 id/模型名，
+// 便于把「这次探测」和上游自己的日志对上。
+type ProbeOutcome struct {
+	Reply         string
+	UpstreamID    string
+	UpstreamModel string
+}
+
 // Provider abstracts an LLM provider's chat completion API.
 type Provider interface {
 	// ChatCompletion sends a non-streaming request and returns the raw
@@ -157,7 +165,7 @@ type Provider interface {
 	// On success it returns the round-trip latency and a nil error. On
 	// failure it returns a *ConnectivityError wrapping one of the Err*
 	// sentinels; callers can use errors.Is to classify the failure.
-	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, reply string, err error)
+	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, out ProbeOutcome, err error)
 }
 
 // richErrorf 用英文文案替换上游实现里的 i18n 文案，并通过 %w 把 base 保留在

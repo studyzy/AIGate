@@ -433,7 +433,7 @@ Probe an upstream with a minimal request — one user message asking the model t
 
 | Body | Meaning |
 |------|---------|
-| `{"ok": true, "latency_ms": N, "reply": "hello"}` | Success. `latency_ms` is the round-trip in milliseconds (rounded, and at least `1`); `reply` is the assistant text the upstream actually returned. |
+| `{"ok": true, "latency_ms": N, "reply": "hello", "upstream_id": "…", "upstream_model": "…"}` | Success. `latency_ms` is the full round trip in milliseconds — measured after the response body has been read, not when headers arrive — rounded and at least `1`. `reply` is the assistant text the upstream actually returned; `upstream_id`/`upstream_model` are what the upstream reported, for correlating with its own logs. |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | Failure. `error_kind` is a closed enum; `message` is human-readable. |
 
 `error_kind` values:

@@ -446,7 +446,7 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 
 | Body | 含义 |
 |------|------|
-| `{"ok": true, "latency_ms": N, "reply": "hello"}` | 成功。`latency_ms` 为往返毫秒数（取整且至少为 `1`）；`reply` 为上游真实返回的助手文本。 |
+| `{"ok": true, "latency_ms": N, "reply": "hello", "upstream_id": "…", "upstream_model": "…"}` | 成功。`latency_ms` 是完整往返毫秒数（读完响应体才计时，不是收到响应头就停），取整且至少为 `1`；`reply` 为上游真实返回的助手文本；`upstream_id`/`upstream_model` 是上游自报的请求 id 与模型名，便于和上游日志对齐。 |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | 失败。`error_kind` 为封闭枚举，`message` 为人类可读原因。 |
 
 `error_kind` 取值：
