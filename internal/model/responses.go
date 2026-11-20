@@ -192,20 +192,22 @@ func (s *Store) ListResponseStatesUpdatedBefore(ctx context.Context, status stri
 	return ids, nil
 }
 
-// DeleteResponseState 删除一行会话状态；行不存在返回 ErrResponseStateNotFound。
+// DeleteResponseStateIfStatus 单条条件删除：只有当前状态属于 statuses 时才删，返回删除行数。
 //
-// 条件删除（WHERE id = ?）由调用方保证：归属与终态校验在读到的行上完成后才会调用本方法。
-// 返回哨兵而不是静默 nil：删除一个不存在的行为调用方要回 404（GET/DELETE 的区分语义），
-// 与 UpdateResponseStateStatus 的静默 nil 口径不同——后者是后台收尾，无可回退的响应可发。
-func (s *Store) DeleteResponseState(ctx context.Context, id string) error {
-	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&ResponseState{})
+// 「读到终态 → 删除」的两步在并发下不是原子的（行可能在两步之间被后台任务改成别的状态），
+// 唯一需要原子性的场景就是这里，所以判定与删除合并成一条 SQL。
+// 返回 (0, nil) 表示「行不存在或状态不符」，由调用方区分（前者 404、后者 400）。
+func (s *Store) DeleteResponseStateIfStatus(ctx context.Context, id string, statuses ...string) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).
+		Where("id = ? AND status IN ?", id, statuses).
+		Delete(&ResponseState{})
 	if res.Error != nil {
-		return fmt.Errorf("delete response state: %w", res.Error)
+		return 0, fmt.Errorf("delete response state: %w", res.Error)
 	}
-	if res.RowsAffected == 0 {
-		return ErrResponseStateNotFound
-	}
-	return nil
+	return res.RowsAffected, nil
 }
 
 // getResponseState 执行查询并把「无行」统一映射为 ErrResponseStateNotFound。

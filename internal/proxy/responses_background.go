@@ -145,11 +145,55 @@ func buildQueuedResponseBody(respID, requestedModel string) map[string]any {
 	return body
 }
 
+// --- 在途后台任务的注册表（取消传播的载体） ---
+
+// registerBackgroundRun 登记一个在途后台任务的可取消 ctx：cancel 端点据此中断上游请求。
+//
+// 不登记后果（实测）：cancel 后状态确实变 cancelled，但上游请求会一直跑到后台超时，
+// 算力与配额白烧最多 30 分钟。
+func (h *Handler) registerBackgroundRun(respID string, cancel context.CancelFunc) {
+	h.backgroundMu.Lock()
+	defer h.backgroundMu.Unlock()
+	if h.backgroundRuns == nil {
+		h.backgroundRuns = make(map[string]context.CancelFunc)
+	}
+	h.backgroundRuns[respID] = cancel
+}
+
+// releaseBackgroundRun 注销登记（任务退出时无条件调用）。只删自己登记的那个 cancel，
+// 避免误删「同一 respID 的新任务」（respID 唯一，这里是防御性写法）。
+func (h *Handler) releaseBackgroundRun(respID string, cancel context.CancelFunc) {
+	h.backgroundMu.Lock()
+	defer h.backgroundMu.Unlock()
+	if _, exists := h.backgroundRuns[respID]; exists {
+		delete(h.backgroundRuns, respID)
+	}
+	_ = cancel
+}
+
+// abortBackgroundRun 中断一个在途后台任务（cancel 端点调用）：返回是否确实有在途任务。
+// 没有登记不代表「没在跑」——任务可能尚未登记（goroutine 未调度）或已结束，
+// 这两种情形都由 worker 启动前的行为保证：未登记时 cancel 已把行写成 cancelled，
+// worker 启动后重新读行会发现 cancelled 并直接退出、不发起上游请求。
+func (h *Handler) abortBackgroundRun(respID string) bool {
+	h.backgroundMu.Lock()
+	cancel, exists := h.backgroundRuns[respID]
+	h.backgroundMu.Unlock()
+	if !exists {
+		return false
+	}
+	cancel()
+	return true
+}
+
 // runResponseBackground 是后台任务的 goroutine 入口（**只能由 handleResponses 调用一次**）。
 func (h *Handler) runResponseBackground(bg *responsesBackgroundRequest) {
 	// 与原请求脱离：handler 返回后 r.Context() 立刻被取消，这里必须用独立 ctx。
+	// 该 ctx 同时登记到注册表，cancel 端点可以据此中断正在进行的上游请求。
 	ctx, cancel := context.WithTimeout(context.Background(), h.ResponseBackgroundTimeout())
 	defer cancel()
+	h.registerBackgroundRun(bg.respID, cancel)
+	defer h.releaseBackgroundRun(bg.respID, cancel)
 	// 状态写回必须**脱离**上面这个 ctx：ctx 到期正是「任务失败」的触发条件，
 	// 若写回也用 ctx，超时那一刻连 failed 都写不进去（实测：UPDATE 直接报
 	// context deadline exceeded，行永远停在 in_progress）。写回只做一次 UPDATE，

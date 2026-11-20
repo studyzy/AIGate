@@ -60,7 +60,7 @@ func (h *Handler) StartResponseRetention(retention time.Duration) {
 			h.pruneResponseStates(retention)
 			go h.pruneLoop(ctx, retention)
 		}
-		startResponseSweep(ctx, h, retention)
+		startResponseSweep(ctx, h)
 	})
 }
 
@@ -87,32 +87,28 @@ func (h *Handler) pruneLoop(ctx context.Context, retention time.Duration) {
 	}
 }
 
-// startResponseSweep 启动「重启遗留行」检查循环（与保留期互相独立，见 StartResponseRetention）。
+// startResponseSweep 启动「重启遗留行」检查循环。
+//
+// 与保留期**完全独立**：它只把状态标记为 failed，不删除任何行（删除只发生在
+// pruneResponseStates，且只在 retention > 0 时由 StartResponseRetention 触发）。
 //
 // 启动后的首个检查在 responseBackgroundSweepStartDelay 之后执行，而不是立刻执行：
 // 清理循环在 Register 之前装配，此刻库里的在途行**可能正是本进程即将收尾的任务**
 // （例如同一进程内先起服务再被外部探活触发的短暂重叠）。延迟一秒并用「老过后台超时」
 // 判定，两者叠加后误伤一个本实例在途任务所需的时间窗远大于后台超时本身。
 // 之后每分钟检查一次，让可观测残留窗口从「保留期循环的 1 小时」压到分钟级。
-func startResponseSweep(ctx context.Context, h *Handler, retention time.Duration) {
-	go h.backgroundSweepLoop(ctx, retention)
+func startResponseSweep(ctx context.Context, h *Handler) {
+	go h.backgroundSweepLoop(ctx)
 }
 
-// backgroundSweepLoop 周期性地把重启遗留的在途行标记为 failed。
-// 保留期有效（> 0）时顺带清理过期行，形态与 pruneLoop 一致。
-func (h *Handler) backgroundSweepLoop(ctx context.Context, retention time.Duration) {
+// backgroundSweepLoop 周期性地把重启遗留的在途行标记为 failed（只改状态，不删行）。
+func (h *Handler) backgroundSweepLoop(ctx context.Context) {
 	select {
 	case <-time.After(responseBackgroundSweepStartDelay):
 	case <-ctx.Done():
 		return
 	}
-	sweep := func() {
-		if n := h.staleResponseStates(ctx, time.Now()); n > 0 && retention > 0 {
-			// 与清理同一节奏：残留检查不负责删除，但保留期有效时顺带触发一次，
-			// 保证 startup 之后新出现的过期行也会在分钟级被清掉（pruneLoop 仍是主清理者）。
-			h.pruneResponseStates(retention)
-		}
-	}
+	sweep := func() { h.staleResponseStates(ctx, time.Now()) }
 	sweep()
 	ticker := time.NewTicker(responseBackgroundSweepInterval)
 	defer ticker.Stop()

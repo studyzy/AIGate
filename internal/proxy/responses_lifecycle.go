@@ -71,29 +71,46 @@ func (h *Handler) handleGetResponse(w http.ResponseWriter, r *http.Request) {
 // 为什么在途行不能删：删除会让正在运行的后台任务在下一次写回时命中 0 行并静默返回 nil
 // （存储层契约），运维既看不到结果也看不到失败原因；先 cancel 再删，才能保证
 // 「删掉的行一定有明确终态」。
+//
+// 终态判定与删除是**同一条 SQL**（WHERE id = ? AND status IN 终态集合）：读到终态之后、
+// 删除之前，行可能被后台任务改成别的状态；分两步做会留下一个可删在途行的窗口。
+// 受影响行数为 0 时再点查一次，区分「不存在 → 404」与「仍在途 → 400」。
 func (h *Handler) handleDeleteResponse(w http.ResponseWriter, r *http.Request) {
 	key := h.authKey(w, r)
 	if key == nil {
 		return
 	}
-	row, ok := h.loadOwnedResponseState(w, r, key)
+	id, ok := h.responsePathID(w, r)
 	if !ok {
 		return
 	}
-	if !isTerminalResponseStatus(row.Status) {
-		httpx.WriteError(w, http.StatusBadRequest, msgResponsesDeleteInFlight)
+	row, ok := h.loadOwnedResponseStateByID(w, r, key, id)
+	if !ok {
 		return
 	}
-	err := h.store.DeleteResponseState(r.Context(), row.ID)
-	switch {
-	case err == nil:
-	case errors.Is(err, model.ErrResponseStateNotFound):
-		// 读到与删除之间被取消了（或已被清理）：与「不存在」同一个 404。
-		httpx.WriteError(w, http.StatusNotFound, msgResponsesNotFound)
-		return
-	default:
+	deleted, err := h.store.DeleteResponseStateIfStatus(r.Context(), row.ID, terminalResponseStatuses...)
+	if err != nil {
 		slog.Error("delete response state failed", "error", err, "response_id", row.ID)
 		httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+		return
+	}
+	if deleted == 0 {
+		// 未删成：要么行在读到之后消失了（404，与「不存在」逐字节一致），要么仍在途（400）。
+		current, err := h.store.GetResponseState(r.Context(), row.ID)
+		switch {
+		case errors.Is(err, model.ErrResponseStateNotFound):
+			httpx.WriteError(w, http.StatusNotFound, msgResponsesNotFound)
+			return
+		case err != nil:
+			slog.Error("reload response state failed", "error", err, "response_id", row.ID)
+			httpx.WriteError(w, http.StatusInternalServerError, msgInternalError)
+			return
+		case !isTerminalResponseStatus(current.Status):
+			httpx.WriteError(w, http.StatusBadRequest, msgResponsesDeleteInFlight)
+			return
+		}
+		// 状态已是终态却删不掉：只可能是并发删除抢先一步，按「已不存在」处理。
+		httpx.WriteError(w, http.StatusNotFound, msgResponsesNotFound)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -137,21 +154,46 @@ func (h *Handler) handleCancelResponse(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusBadRequest, cancelConflictBody(current, msgResponsesCancelFinished))
 		return
 	}
+	// 状态已落 cancelled：接着中断在途的上游请求，避免算力/配额白烧到后台超时。
+	// 顺序不能颠倒——先中断再写状态会留下「上游已停、行仍是 in_progress」的窗口，
+	// 那期间的后台收尾会按普通失败写入 failed。
+	if h.abortBackgroundRun(row.ID) {
+		slog.Info("aborted in-flight background upstream request", "response_id", row.ID)
+	}
 	httpx.WriteJSON(w, http.StatusOK, cancelResponseObject(current, row))
 }
 
-// loadOwnedResponseState 是三个端点共用的「取路径 id → 查行 → 校验归属」。
+// responsePathID 取路径里的响应 ID；空 ID 直接按「不存在」处理（404）。
+func (h *Handler) responsePathID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		httpx.WriteError(w, http.StatusNotFound, msgResponsesNotFound)
+		return "", false
+	}
+	return id, true
+}
+
+// loadOwnedResponseState 是 GET / cancel 共用的「取路径 id → 查行 → 校验归属」。
 // 失败时已写出 404/500（归属失配与不存在同文同码）并返回 ok=false。
 func (h *Handler) loadOwnedResponseState(
 	w http.ResponseWriter,
 	r *http.Request,
 	key *model.APIKey,
 ) (*model.ResponseState, bool) {
-	id := strings.TrimSpace(r.PathValue("id"))
-	if id == "" {
-		httpx.WriteError(w, http.StatusNotFound, msgResponsesNotFound)
+	id, ok := h.responsePathID(w, r)
+	if !ok {
 		return nil, false
 	}
+	return h.loadOwnedResponseStateByID(w, r, key, id)
+}
+
+// loadOwnedResponseStateByID 是「查行 → 校验归属」的主体（id 已由调用方解析）。
+func (h *Handler) loadOwnedResponseStateByID(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	id string,
+) (*model.ResponseState, bool) {
 	row, err := h.store.GetResponseState(r.Context(), id)
 	switch {
 	case err == nil:
@@ -171,6 +213,14 @@ func (h *Handler) loadOwnedResponseState(
 		return nil, false
 	}
 	return row, true
+}
+
+// terminalResponseStatuses 是可删除的终态集合（供单条条件 DELETE 使用）。
+var terminalResponseStatuses = []string{
+	model.ResponseStateStatusCompleted,
+	model.ResponseStateStatusFailed,
+	model.ResponseStateStatusIncomplete,
+	model.ResponseStateStatusCancelled,
 }
 
 // isTerminalResponseStatus 报告状态是否已终态（不可再取消、可以删除）。

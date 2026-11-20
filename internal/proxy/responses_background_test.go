@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,11 +83,20 @@ type backgroundGate struct {
 	enteredC  chan struct{}
 	release   chan struct{}
 	closeOnce sync.Once
+	// aborted 在 handler 观测到「请求 ctx 被取消」时关闭一次；completed 在 handler
+	// 跑完整个响应并返回时置位。两者互斥，用于区分「请求被中断」与「跑完」。
+	aborted     chan struct{}
+	abortedOnce sync.Once
+	completed   atomic.Bool
 }
 
 // newBackgroundGate 创建一个未放行的闸门。
 func newBackgroundGate() *backgroundGate {
-	g := &backgroundGate{enteredC: make(chan struct{}), release: make(chan struct{}, 1)}
+	g := &backgroundGate{
+		enteredC: make(chan struct{}),
+		release:  make(chan struct{}, 1),
+		aborted:  make(chan struct{}),
+	}
 	return g
 }
 
@@ -107,11 +117,22 @@ func (g *backgroundGate) enter(r *http.Request) bool {
 	case <-g.release:
 		return true
 	case <-done:
+		g.abortedOnce.Do(func() { close(g.aborted) })
 		return false
 	}
 }
 
-// releaseOnce 放行一次（非阻塞；release 容量为 1，重复投递不会阻塞）。
+// abortedClosed 报告是否已观测到请求被中断。
+func (g *backgroundGate) abortedClosed() bool {
+	select {
+	case <-g.aborted:
+		return true
+	default:
+		return false
+	}
+}
+
+// release_ 放行一次（非阻塞；release 容量为 1，重复投递不会阻塞）。
 func (g *backgroundGate) release_() {
 	select {
 	case g.release <- struct{}{}:
@@ -130,6 +151,7 @@ func respondChatGate(g *backgroundGate, body string) func(http.ResponseWriter, *
 		if !g.enter(r) {
 			return
 		}
+		defer g.completed.Store(true)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, body)
@@ -997,4 +1019,234 @@ func TestResponseBackground_DefaultTimeout(t *testing.T) {
 	if got := h.ResponseBackgroundTimeout(); got != 30*time.Minute {
 		t.Fatalf("default background timeout = %v, want 30m", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 9. 取消传播到手头在途的上游请求（I-1）
+// ---------------------------------------------------------------------------
+
+// TestResponseBackground_CancelAbortsUpstream：取消必须**中断**正在上游跑的后台请求，
+// 而不只是把状态改成 cancelled（状态靠条件更新兜底，但上游算力/配额会白烧到超时）。
+//
+// 观测方式：mock 上游 handler 阻塞在闸门上并 select「放行 / r.Context().Done()」；
+// 若网关真的传播了取消，handler 会从 Done() 分支返回——这是「请求被中断」的直接证据，
+// 与「放行后跑完」可区分。
+func TestResponseBackground_CancelAbortsUpstream(t *testing.T) {
+	gate := newBackgroundGate()
+	e := newEnv(t, respondChatGate(gate, responsesOKChatBody))
+	t.Cleanup(gate.closeGate)
+	token, _ := setupBackground(t, e)
+
+	id, _ := postBackground(t, e, token, "abort me")
+	gate.waitEntered(t, "background task")
+	waitAnyStatus(t, e, token, id, []string{model.ResponseStateStatusInProgress, model.ResponseStateStatusQueued})
+
+	assertStatus(t, e.cancelResponse(t, token, id), http.StatusOK)
+
+	// 上游请求被中断 → handler 从 Done() 分支返回（未被放行）。
+	select {
+	case <-gate.aborted:
+	case <-time.After(responsesPollTimeout):
+		t.Fatalf("upstream request was not aborted within %s after cancel", responsesPollTimeout)
+	}
+	// 中断不是「跑完」：圆满完成只会在放行之后发生。
+	if gate.completed.Load() {
+		t.Fatalf("upstream handler completed after cancel, want the request aborted")
+	}
+	assertStatusStays(t, e, token, id, model.ResponseStateStatusCancelled, "after cancel abort")
+}
+
+// TestResponseBackground_CancelBeforeStartSkipsUpstream：取消落在「goroutine 尚未发起上游请求」
+// 的窗口里（这里把后台超时压到 1ns 使窗口扩大到可复现），任务必须直接退出、**不触达上游**。
+//
+// 这是 (b)「worker 启动前复核」的守卫：ctx 传播管不到还没发出的请求，复核才管得住。
+// 判别方式：整个观察窗内 mock 上游的 handler 从未被进入（entered == false）。
+//
+// 注：同一窗口里还有另一种合法结局——worker 先跑到、发现 ctx 已超时而收尾为 failed
+// （取消与超时同时发生，以先到者为准）。因此这里**不对状态做断言**，只断言「不触达上游」，
+// 后者与两种结局都相容，也更接近本用例要守的边界。
+func TestResponseBackground_CancelBeforeStartSkipsUpstream(t *testing.T) {
+	gate := newBackgroundGate()
+	e := newSteerableEnv(t,
+		respondChatGate(gate, responsesOKChatBody),
+		func(h *proxy.Handler) { _ = h.SetResponseBackgroundTimeout(time.Nanosecond) })
+	t.Cleanup(gate.closeGate)
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	id, _ := postBackground(t, e, token, "cancel before start")
+	readBody(t, e.cancelResponse(t, token, id))
+
+	// 观察窗：超过一次完整的后台超时（1ns）与静默窗。
+	time.Sleep(quietWindow)
+	gate.mu.Lock()
+	entered := gate.entered
+	gate.mu.Unlock()
+	if entered {
+		t.Fatalf("upstream was reached although the row was already cancelled or timed out; " +
+			"the worker must re-read the row before starting the upstream call")
+	}
+	if e.rec.Calls() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", e.rec.Calls())
+	}
+	if got := responseStatus(t, e, token, id); isTerminalStatus(got) == false {
+		t.Fatalf("status = %q, want a terminal status (cancelled or failed)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 10. 状态跃迁与「先建行再返回」（I-2）
+// ---------------------------------------------------------------------------
+
+// TestResponseBackground_PassesThroughInProgress：后台任务必须真正经历 queued → in_progress。
+//
+// 观测点在上游 handler **内部**（此刻任务一定在跑）：读 DB 断言当行 status 恒为 in_progress。
+// 把跃迁改成 queued（即根本不写 in_progress）时，这里会读到 queued 而失败。
+func TestResponseBackground_PassesThroughInProgress(t *testing.T) {
+	gate := newBackgroundGate()
+	e := newEnv(t, respondChatGate(gate, responsesOKChatBody))
+	t.Cleanup(gate.closeGate)
+	token, _ := setupBackground(t, e)
+
+	id, _ := postBackground(t, e, token, "in progress")
+	gate.waitEntered(t, "background task")
+	// handler 已进入上游：任务在跑，此刻行状态必须是 in_progress（而不是 queued/completed）。
+	row, ok := storedResponse(t, e, id)
+	if !ok {
+		t.Fatalf("row %q missing while the task is running", id)
+	}
+	if row.Status != model.ResponseStateStatusInProgress {
+		t.Fatalf("status while the task is running upstream = %q, want %q", row.Status, model.ResponseStateStatusInProgress)
+	}
+	// 端点口径说明：GET 返回的是 response_body，进行中它仍是建行时的 queued 快照
+	// （终态才一次性写回），所以「经过 in_progress」只能从表侧状态列观测——
+	// 这正是本用例存在的原因：只看响应体永远区分不出 in_progress 有没有被写过。
+
+	gate.release_()
+	waitResponseStatus(t, e, token, id, model.ResponseStateStatusCompleted)
+}
+
+// TestResponseBackground_RowExistsBeforePostReturns：钉住「POST 返回时行已存在，且回包就是该行的
+// queued 快照」。
+//
+// 【可判别性说明（否则这条用例会被误读为能抓住「回包后建行」）】
+// 断言：收到回包之后行存在；GET 回包与 POST 回包逐字节相同。
+// 它**不能**证伪「建行发生在回包之后」——那种实现同样在客户端读完回包之前建好行，已实测
+// （把回包 Flush 之后再建行）本条全绿；经由 HTTP 也观测不到该窗口（客户端读到 EOF 时后台
+// goroutine 早已建完行）。真正钉住「位次」的是 `ReturnsQueued` 的状态序列：先 GET 到 queued
+// 回包，随后才出现终态。
+// **不断言表侧 status == queued**：那是竞态——后台任务的跃迁与用例的读表没有顺序关系
+// （-race 下实测会读到 in_progress，曾因此偶发红）。“结果未被提前写回”由「GET 回包仍是
+// queued 快照」表达，这正是客户端可见的口径。
+func TestResponseBackground_RowExistsBeforePostReturns(t *testing.T) {
+	gate := newBackgroundGate()
+	e := newEnv(t, respondChatGate(gate, responsesOKChatBody))
+	t.Cleanup(gate.closeGate)
+	token, _ := setupBackground(t, e)
+
+	tr := &statusTracker{}
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"row before return","background":true}`)
+	assertStatus(t, resp, http.StatusOK)
+	raw := readBody(t, resp)
+	id, _ := decodeResponsesBody(t, raw)["id"].(string)
+
+	if _, ok := storedResponse(t, e, id); !ok {
+		t.Fatalf("response_states row %q missing right after POST returned", id)
+	}
+	getResp := e.getResponse(t, token, id)
+	assertStatus(t, getResp, http.StatusOK)
+	if got := readBody(t, getResp); got != raw {
+		t.Fatalf("GET right after POST = %q, want byte-identical to the POST body %q", got, raw)
+	}
+	tr.observe(model.ResponseStateStatusQueued)
+
+	gate.release_()
+	waitTerminalTracked(t, e, token, id, tr)
+}
+
+// ---------------------------------------------------------------------------
+// 11. DELETE 的单条条件删除（审查观察项 a）
+// ---------------------------------------------------------------------------
+
+// TestResponseBackground_DeleteIsSingleConditionalDelete：终态判定与删除必须在**同一条** SQL 里完成。
+// 黑盒可观测的后果：对同一行并发 DELETE 只有一个成功（其余 404），且不存在
+// 「非终态却删成功」或「终态却 404（除并发抢先者）」之外的结果。
+func TestResponseBackground_DeleteIsSingleConditionalDelete(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
+	token, _ := setupBackground(t, e)
+
+	id, _ := postBackground(t, e, token, "concurrent delete")
+	waitResponseStatus(t, e, token, id, model.ResponseStateStatusCompleted)
+
+	const workers = 8
+	var wg sync.WaitGroup
+	codes := make([]int, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp := e.deleteResponse(t, token, id)
+			codes[i] = resp.StatusCode
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	okCount, notFound := 0, 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusNotFound:
+			notFound++
+		default:
+			t.Fatalf("unexpected delete status %d, want 200 or 404", code)
+		}
+	}
+	if okCount != 1 || notFound != workers-1 {
+		t.Fatalf("delete outcomes = %d ok / %d 404, want exactly 1 ok and %d 404", okCount, notFound, workers-1)
+	}
+	if _, exists := storedResponse(t, e, id); exists {
+		t.Fatalf("row %q still exists after delete", id)
+	}
+}
+
+// TestResponseBackground_DeletedRowSkipsUpstream：行在任务真正发起上游请求之前消失
+// （模拟保留期清理/并发删除抢先一步），任务必须直接退出、不触达上游。
+//
+// 判别依据是**上游触达次数与行是否存在**的配对关系：
+//   - 行的 DELETE **成功**（行确已被删）时，上游调用数必须是 0；
+//   - 更常见的是删除被 400 挡下——任务抢先写了 in_progress，属正常竞态，
+//     此时不构成「行已消失」的观测前提，跳过断言（并记日志）。
+//
+// 之所以不能只断言「entered == false」：删除在 worker 抢到之后失败时，上游当然会被触达，
+// 那与「行已消失仍发上游」是两件不同的事，必须按 DELETE 的实际结果区分。
+func TestResponseBackground_DeletedRowSkipsUpstream(t *testing.T) {
+	gate := newBackgroundGate()
+	e := newSteerableEnv(t,
+		respondChatGate(gate, responsesOKChatBody),
+		func(h *proxy.Handler) { _ = h.SetResponseBackgroundTimeout(time.Minute) })
+	t.Cleanup(gate.closeGate)
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	id, _ := postBackground(t, e, token, "delete before start")
+	deleteResp := e.deleteResponse(t, token, id)
+	deleted := deleteResp.StatusCode == http.StatusOK
+	body := readBody(t, deleteResp)
+	if !deleted {
+		t.Logf("delete raced with the worker (status %d, %s); the row is still live, skipping",
+			deleteResp.StatusCode, body)
+		gate.release_()
+		waitResponseStatus(t, e, token, id, model.ResponseStateStatusCompleted)
+		return
+	}
+
+	// 行确已被删：任务无论何时醒来，都必须发现行不存在并停手。
+	time.Sleep(2 * quietWindow)
+	if e.rec.Calls() != 0 {
+		t.Fatalf("upstream calls = %d, want 0: the row was deleted before the task started", e.rec.Calls())
+	}
+	assertStatus(t, e.getResponse(t, token, id), http.StatusNotFound)
 }

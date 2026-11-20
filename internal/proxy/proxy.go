@@ -53,6 +53,12 @@ type Handler struct {
 	// 与 allowResponseStorage 同口径：装配阶段由 SetResponseBackgroundTimeout 设置，
 	// 运行期只读（后台 goroutine 每个任务读一次），因此不需要加锁。
 	responseBackgroundTimeout time.Duration
+
+	// backgroundRuns 登记在途后台任务的可取消 ctx（键为 respID），
+	// 由 registerBackgroundRun / releaseBackgroundRun 维护，cancel 时据此中断上游请求
+	// （见 responses_background.go 顶部的「在途后台任务的注册表」一节）。
+	backgroundMu   sync.Mutex
+	backgroundRuns map[string]context.CancelFunc
 }
 
 // NewHandler 创建数据面处理器。quotaExceededStatus 非 429/403 时回退 429。
