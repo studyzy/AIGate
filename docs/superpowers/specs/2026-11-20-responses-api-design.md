@@ -378,11 +378,21 @@ URL 拼接：`<url>/responses`（`url` 含 `/v1`），与 `openai-completions`
    - 其余 → `forwardViaChatConversion`（格 8/9，`GetProvider` 内部处理上游差异）
 6. 收尾：`logUsage` + 若 `store` 则落库，生成 `resp_...` 并改写响应里的 `id`。
 
-> 第 4 步注意：`prepareForward` 会注入/压制 `max_tokens`。Responses 协议的
-> 对应字段是 `max_output_tokens`，入口侧转换时须在调用 `prepareForward` **之前**
-> 把 `max_output_tokens` 映射为 `max_tokens`，回包时再映射回去；
-> 或在 `enforceMaxTokens` 增加对 `max_output_tokens` 的支持。**实现时二选一，
-> 推荐后者**（一处改动，三个入口同时受益）。
+> **第 4 步的顺序约束（实现裁决，Task 3 落地后确认）**：`enforceMaxTokens` 用
+> **请求体形态**判定协议（有 `max_output_tokens` 且无 `messages` → Responses 形态）。
+> 因此 Responses 入口必须**在**把请求转成 chat 形状**之前**调用它：
+>
+> 1. 读 Responses 原始 body；
+> 2. 解析 `model` / `stream` / `store` 等；
+> 3. 拼入历史前缀（若有 `previous_response_id` / `conversation`）；
+> 4. **先对 Responses 形态的 body 调 `enforceMaxTokens`**（压 `max_output_tokens`）；
+> 5. 再 `responsesRequestToChat` 转成 chat 形状；
+> 6. 调 `handler.prepareForward` 的其余步骤（模型解析、配额）——此时 `max_tokens`
+>    已由第 5 步从 `max_output_tokens` 映射而来，无需二次压制。
+>
+> 若顺序颠倒（先转 chat 再压制），Responses 请求会退化为 chat 形态，`max_output_tokens`
+> 将得不到密钥上限保护。**Task 6/8 必须遵守此顺序**，并有测试钉住
+> 「密钥 `max_tokens` 上限生效于 Responses 请求」。
 
 #### 5.4.2 格 7（responses 入口 × responses 上游）：直通 vs 往返
 
