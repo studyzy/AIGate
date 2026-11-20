@@ -2,12 +2,14 @@ import { useRef, useState } from "react";
 
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/primitives";
+import { useModalA11y } from "@/components/ui/useModalA11y";
 
 /** TokenDialog 只在创建/rotate 后展示一次明文 token。 */
 export function TokenDialog({ token, onClose }: { token: string; onClose: () => void }) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const preRef = useRef<HTMLPreElement>(null);
+  const panelRef = useModalA11y<HTMLDivElement>(true, onClose);
 
   // 纯 HTTP 部署下 navigator.clipboard 不存在（非安全上下文），
   // 直接置 copied 会谎报成功；这里退回「选中 + execCommand」并以其结果为准。
@@ -33,7 +35,14 @@ export function TokenDialog({ token, onClose }: { token: string; onClose: () => 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40">
-      <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("key.oneTimeTitle")}
+        tabIndex={-1}
+        className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl outline-none"
+      >
         <h2 className="text-base font-semibold">{t("key.oneTimeTitle")}</h2>
         <p className="mt-1 text-sm text-slate-600">{t("key.oneTimeHint")}</p>
         <pre ref={preRef} className="mt-3 overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs text-emerald-300" data-testid="token-value">

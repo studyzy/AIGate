@@ -5,6 +5,8 @@ import { useI18n } from "@/i18n";
 import type { MessageKey } from "@/i18n/en";
 
 import { Brand } from "./Brand";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { useModalA11y } from "./ui/useModalA11y";
 import { LangSwitch } from "./LangSwitch";
 import { clearToken } from "@/lib/session";
 
@@ -122,6 +124,7 @@ export function AppLayout() {
   }, [collapsed]);
 
   const closeMobile = () => setMobileOpen(false);
+  const mobileRef = useModalA11y<HTMLDivElement>(mobileOpen, closeMobile);
 
   return (
     <div className="flex h-full">
@@ -136,7 +139,14 @@ export function AppLayout() {
 
       {mobileOpen ? (
         <div className="fixed inset-0 z-40 flex md:hidden">
-          <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white shadow-xl">
+          <aside
+            ref={mobileRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("nav.menu")}
+            tabIndex={-1}
+            className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white shadow-xl outline-none"
+          >
             <div className="flex h-14 items-center border-b border-slate-200 px-4">
               <Brand name={t("app.name")} />
             </div>
@@ -186,7 +196,9 @@ export function AppLayout() {
           </div>
         </header>
         <main className="min-w-0 flex-1 overflow-y-auto p-6">
-          <Outlet />
+          <ErrorBoundary>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

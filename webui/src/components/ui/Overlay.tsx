@@ -1,8 +1,9 @@
-import { useEffect, type ReactNode } from "react";
+import { type ReactNode } from "react";
 
 import { useI18n } from "@/i18n";
 
 import { Button } from "./primitives";
+import { useModalA11y } from "./useModalA11y";
 
 /** Drawer 是从右侧滑出的表单容器。 */
 export function Drawer({
@@ -18,22 +19,23 @@ export function Drawer({
   children: ReactNode;
   footer?: ReactNode;
 }) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  const { t } = useI18n();
+  const panelRef = useModalA11y<HTMLDivElement>(open, onClose);
 
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/30">
-      <div className="flex h-full w-full max-w-lg flex-col bg-white shadow-xl">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        className="flex h-full w-full max-w-lg flex-col bg-white shadow-xl outline-none"
+      >
         <header className="flex h-14 items-center justify-between border-b border-slate-200 px-4">
           <h2 className="text-base font-semibold">{title}</h2>
-          <button type="button" className="text-slate-400 hover:text-slate-600" onClick={onClose}>
+          <button type="button" aria-label={t("common.close")} className="text-slate-400 hover:text-slate-600" onClick={onClose}>
             ×
           </button>
         </header>
@@ -65,10 +67,18 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   const { t } = useI18n();
+  const panelRef = useModalA11y<HTMLDivElement>(open, onCancel);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30">
-      <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl">
+      <div
+        ref={panelRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl outline-none"
+      >
         <h2 className="text-base font-semibold">{title}</h2>
         {description ? <p className="mt-2 text-sm text-slate-600">{description}</p> : null}
         <div className="mt-5 flex justify-end gap-2">

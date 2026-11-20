@@ -52,5 +52,6 @@ export async function downloadFile(path: string, filename: string) {
   link.href = url;
   link.download = filename;
   link.click();
-  URL.revokeObjectURL(url);
+  // 同一 tick 内 revoke 会让部分浏览器取消下载，推迟到下一轮事件循环。
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }

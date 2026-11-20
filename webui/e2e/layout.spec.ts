@@ -29,3 +29,16 @@ test("opens the navigation drawer on a narrow viewport", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
   await expect(page.locator("aside")).toBeHidden();
 });
+
+test("opens a drawer as a dialog and closes it with Escape", async ({ page }) => {
+  await login(page);
+  await page.getByRole("link", { name: "Providers" }).click();
+  await page.getByRole("button", { name: "New provider" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
