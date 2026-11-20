@@ -1,0 +1,71 @@
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+
+import type { Settings } from "@/api/types";
+import { QuotaRuleEditor } from "@/components/QuotaRuleEditor";
+import { useToast } from "@/components/ui/Toast";
+import { Button, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
+import { useApiMutation } from "@/hooks/useApiMutation";
+import { useI18n } from "@/i18n";
+import { api } from "@/lib/api";
+
+export function SettingsPage() {
+  const { t } = useI18n();
+  const toast = useToast();
+  const query = useQuery({ queryKey: ["settings"], queryFn: () => api<Settings>("/admin/settings") });
+  const [form, setForm] = useState<Settings | null>(null);
+
+  useEffect(() => {
+    if (query.data) setForm(query.data);
+  }, [query.data]);
+
+  const save = useApiMutation([["settings"]], (next: Settings) =>
+    api<Settings>("/admin/settings", { method: "PUT", body: JSON.stringify(next) }), {
+    onSuccess: (data) => {
+      setForm(data);
+      toast(t("common.saved"), "success");
+    },
+  });
+
+  if (!form) return <Spinner label={t("common.loading")} />;
+
+  const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setForm((f) => (f ? { ...f, [key]: value } : f));
+
+  return (
+    <section className="max-w-3xl">
+      <PageHeader
+        title={t("settings.title")}
+        actions={
+          <Button onClick={() => save.mutate(form)} disabled={save.isPending}>
+            {t("common.save")}
+          </Button>
+        }
+      />
+      <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="mb-2 text-sm font-medium text-slate-700">{t("settings.scope")}</div>
+        <Select value={form.global_quota_scope} onChange={(e) => set("global_quota_scope", e.target.value)}>
+          <option value="site">{t("settings.scope.site")}</option>
+          <option value="group">{t("settings.scope.group")}</option>
+        </Select>
+      </div>
+      <div className="mt-4 space-y-4 rounded-xl border border-slate-200 bg-white p-4">
+        <div>
+          <div className="mb-1 text-sm font-medium text-slate-700">{t("settings.defaultQuota")}</div>
+          <QuotaRuleEditor value={form.default_token_quota_rules} onChange={(next) => set("default_token_quota_rules", next)} />
+        </div>
+        <div>
+          <div className="mb-1 text-sm font-medium text-slate-700">{t("settings.globalQuota")}</div>
+          <QuotaRuleEditor value={form.global_token_quota_rules} onChange={(next) => set("global_token_quota_rules", next)} />
+        </div>
+        <Field label={t("settings.userKeyLimit")}>
+          <Input
+            type="number"
+            min={0}
+            value={form.user_key_limit}
+            onChange={(e) => set("user_key_limit", Number(e.target.value))}
+          />
+        </Field>
+      </div>
+    </section>
+  );
+}
