@@ -1,17 +1,48 @@
+import { lazy, Suspense, type ComponentType, type ReactElement } from "react";
 import { createBrowserRouter, Navigate } from "react-router-dom";
 
 import { AppLayout } from "./components/AppLayout";
 import { AuthGuard } from "./components/AuthGuard";
-import { DashboardPage } from "./pages/dashboard";
-import { GroupsPage } from "./pages/groups";
-import { ImportPage } from "./pages/import";
-import { KeysPage } from "./pages/keys";
+import { RouteFallback } from "./components/RouteFallback";
 import { LoginPage } from "./pages/login";
-import { ProvidersPage } from "./pages/providers";
-import { SettingsPage } from "./pages/settings";
-import { UsagePage } from "./pages/usage";
-import { UsersPage } from "./pages/users";
-import { WebhooksPage } from "./pages/webhooks";
+
+// 除登录页外，页面按路由懒加载，避免首屏把全部管理页与图表库打进主 chunk。
+const DashboardPage = lazy(() =>
+  import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })),
+);
+const UsagePage = lazy(() =>
+  import("./pages/usage").then((m) => ({ default: m.UsagePage })),
+);
+const ProvidersPage = lazy(() =>
+  import("./pages/providers").then((m) => ({ default: m.ProvidersPage })),
+);
+const KeysPage = lazy(() =>
+  import("./pages/keys").then((m) => ({ default: m.KeysPage })),
+);
+const UsersPage = lazy(() =>
+  import("./pages/users").then((m) => ({ default: m.UsersPage })),
+);
+const GroupsPage = lazy(() =>
+  import("./pages/groups").then((m) => ({ default: m.GroupsPage })),
+);
+const SettingsPage = lazy(() =>
+  import("./pages/settings").then((m) => ({ default: m.SettingsPage })),
+);
+const WebhooksPage = lazy(() =>
+  import("./pages/webhooks").then((m) => ({ default: m.WebhooksPage })),
+);
+const ImportPage = lazy(() =>
+  import("./pages/import").then((m) => ({ default: m.ImportPage })),
+);
+
+// 用 Suspense 只包住页面内容，侧边栏等布局在切换时保持可见。
+function page(Component: ComponentType): ReactElement {
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <Component />
+    </Suspense>
+  );
+}
 
 // 路由挂在 /ui 下，basename 让链接与刷新后的直接访问都落在同一前缀内。
 export const router = createBrowserRouter(
@@ -23,16 +54,16 @@ export const router = createBrowserRouter(
         {
           element: <AppLayout />,
           children: [
-            { index: true, element: <DashboardPage /> },
-            { path: "usage", element: <UsagePage /> },
-            { path: "providers", element: <ProvidersPage /> },
+            { index: true, element: page(DashboardPage) },
+            { path: "usage", element: page(UsagePage) },
+            { path: "providers", element: page(ProvidersPage) },
             { path: "models", element: <Navigate to="/providers" replace /> },
-            { path: "keys", element: <KeysPage /> },
-            { path: "users", element: <UsersPage /> },
-            { path: "groups", element: <GroupsPage /> },
-            { path: "settings", element: <SettingsPage /> },
-            { path: "webhooks", element: <WebhooksPage /> },
-            { path: "import", element: <ImportPage /> },
+            { path: "keys", element: page(KeysPage) },
+            { path: "users", element: page(UsersPage) },
+            { path: "groups", element: page(GroupsPage) },
+            { path: "settings", element: page(SettingsPage) },
+            { path: "webhooks", element: page(WebhooksPage) },
+            { path: "import", element: page(ImportPage) },
           ],
         },
       ],
