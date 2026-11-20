@@ -440,13 +440,13 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 
 #### POST /admin/models/{id}/connectivity
 
-以最小请求（单条 user 消息、`max_tokens=1`）探测上游，验证地址可达、凭据有效且模型可调用。
+以最小请求（单条 user 消息，要求模型只回一个 `hello`，`max_tokens=8`）探测上游，验证地址可达、凭据有效且模型可调用。
 
 **探测结果一律以 HTTP `200` 返回**，成功/失败体现在 body 的 `ok`：
 
 | Body | 含义 |
 |------|------|
-| `{"ok": true, "latency_ms": N}` | 成功。`latency_ms` 为往返毫秒数（取整且至少为 `1`）。 |
+| `{"ok": true, "latency_ms": N, "reply": "hello", "upstream_id": "…", "upstream_model": "…"}` | 成功。`latency_ms` 是完整往返毫秒数（读完响应体才计时，不是收到响应头就停），取整且至少为 `1`；`reply` 为上游真实返回的助手文本；`upstream_id`/`upstream_model` 是上游自报的请求 id 与模型名，便于和上游日志对齐。 |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | 失败。`error_kind` 为封闭枚举，`message` 为人类可读原因。 |
 
 `error_kind` 取值：
@@ -474,6 +474,38 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 | 400 | id 非法；模型为 `user_key_required`。 |
 | 404 | 模型不存在。 |
 | 500 | 凭据/密钥解析失败。 |
+
+#### POST /admin/models/discover
+
+用一把密钥向上游查询可用模型 ID，供管理界面列出候选模型，避免手工抄写 `model_id`。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `model_type` | string，必填 | `openai-completions` 或 `anthropic-messages`。 |
+| `url` | string，必填 | 与 `model.url` 语义一致：`openai-completions` 是带 `/v1` 的 base，`anthropic-messages` 是 host。 |
+| `api_key` | string，可选 | 直接使用（适用于尚未落库的新密钥）。 |
+| `credential_id` | number，可选 | 改用已保存凭据的第一个 header 密钥。 |
+
+两种密钥来源必须给一个；同时给时以 `api_key` 为准。
+
+返回沿用连通性探测的口径：一律 HTTP `200`，成功/失败体现在 body：
+
+| Body | 含义 |
+|------|------|
+| `{"ok": true, "models": ["gpt-4o", …]}` | 上游 `/models` 返回的模型 ID 列表。 |
+| `{"ok": false, "error_kind": "…", "message": "…"}` | `error_kind` 与连通性探测同一枚举。 |
+
+只有 2xx 不算通过：响应体必须能解析出非空的助手消息，否则按 `upstream_client` 判失败，避免「网关回了 200 但没真正调用模型」被当成连通。
+
+出站请求复用数据面 SSRF 防护：默认严格模式下私网/回环地址被拦截，归类为 `network_unreachable`，需要放行时启动加 `-allow-private-upstreams`。
+
+| 状态码 | 条件 |
+|--------|------|
+| 200 | 探测完成（无论 `ok` 真假）。 |
+| 400 | `model_type`/`url` 非法、未给密钥来源、或凭据没有 header 密钥。 |
+| 404 | `credential_id` 不存在。 |
 
 ### 3.2 凭据
 

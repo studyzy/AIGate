@@ -1,9 +1,23 @@
-# Multi-stage build: static compilation (CGO disabled, SQLite uses a pure-Go driver) -> minimal runtime image.
+# Multi-stage build: web UI bundle -> static Go compilation (CGO disabled, pure-Go SQLite driver) -> minimal runtime image.
 # Build:  docker build -t aigate:0.1.0 .
 # Run:    docker run -p 8080:8080 -e AIGATE_INIT_ADMIN_TOKEN=<TOKEN> aigate:0.1.0
 #         Defaults to in-container SQLite (/data/aigate.db); for production override with
 #         `docker run ... aigate:0.1.0 -db-type mysql -db-dsn "<DSN>"`.
 
+# Stage 1: build the web UI. Output lands in internal/webui/dist, which the Go build embeds.
+FROM node:22-alpine AS webui
+
+WORKDIR /src/webui
+
+RUN corepack enable
+
+COPY webui/package.json webui/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY webui/ ./
+RUN pnpm build
+
+# Stage 2: build the Go binary with the real frontend embedded.
 FROM golang:1.24 AS build
 
 WORKDIR /src
@@ -13,6 +27,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=webui /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /aigate ./cmd/aigate
 
 FROM alpine:3.20

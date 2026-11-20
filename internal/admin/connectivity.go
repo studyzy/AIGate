@@ -35,8 +35,11 @@ const (
 
 // connectivityOK 是探测成功的结果：latency_ms 为一次最小对话请求的往返毫秒数。
 type connectivityOK struct {
-	OK        bool  `json:"ok"`
-	LatencyMS int64 `json:"latency_ms"`
+	OK            bool   `json:"ok"`
+	LatencyMS     int64  `json:"latency_ms"`
+	Reply         string `json:"reply"`
+	UpstreamID    string `json:"upstream_id,omitempty"`
+	UpstreamModel string `json:"upstream_model,omitempty"`
 }
 
 // connectivityFailure 是探测失败的结果：error_kind 为封闭枚举，message 为人类可读原因。
@@ -47,7 +50,7 @@ type connectivityFailure struct {
 }
 
 // handleModelConnectivity 实现 `POST /admin/models/{id}/connectivity`：
-// 以最小对话请求（max_tokens=1）探测模型配置是否可用。
+// 以最小对话请求（要求模型只回一个 hello，max_tokens=8）探测模型配置是否可用。
 //
 // 口径说明：
 //   - 探测结果一律以 HTTP 200 返回，成功/失败体现在 body 的 ok 字段（探测失败不是接口调用失败）；
@@ -82,7 +85,7 @@ func handleModelConnectivity(store *model.Store) http.HandlerFunc {
 			return
 		}
 
-		latency, err := provider.GetProvider(m.ModelType).
+		latency, outcome, err := provider.GetProvider(m.ModelType).
 			CheckConnectivityWithChat(r.Context(), apiKey, m.URL, m.ModelID)
 		if err != nil {
 			httpx.WriteJSON(w, http.StatusOK, connectivityFailure{
@@ -92,7 +95,13 @@ func handleModelConnectivity(store *model.Store) http.HandlerFunc {
 			})
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, connectivityOK{OK: true, LatencyMS: latencyMillis(latency)})
+		httpx.WriteJSON(w, http.StatusOK, connectivityOK{
+			OK:            true,
+			LatencyMS:     latencyMillis(latency),
+			Reply:         outcome.Reply,
+			UpstreamID:    outcome.UpstreamID,
+			UpstreamModel: outcome.UpstreamModel,
+		})
 	}
 }
 

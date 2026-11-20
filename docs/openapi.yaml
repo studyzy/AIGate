@@ -299,7 +299,7 @@ paths:
       tags: [admin]
       summary: 模型连通性测试
       description: |
-        以最小请求（单条 user 消息、`max_tokens=1`）探测上游，验证地址可达、凭据有效且模型可调用。
+        以最小请求（单条 user 消息，要求模型只回一个 `hello`，`max_tokens=8`）探测上游，验证地址可达、凭据有效且模型可调用。
 
         **探测结果一律以 HTTP 200 返回**，成功/失败体现在 body 的 `ok`：
 
@@ -321,6 +321,69 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConnectivityResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/models/discover:
+    post:
+      tags: [admin]
+      summary: 拉取上游模型列表
+      description: |
+        用密钥向上游 `/models` 查询可用模型 ID，供控制台做选择器。
+
+        **结果一律以 HTTP 200 返回**，成功/失败体现在 body 的 `ok`：
+
+        - 成功：`{"ok":true,"models":["gpt-4o",…]}`；
+        - 失败：`{"ok":false,"error_kind":"…","message":"…"}`，`error_kind` 与连通性探测同一枚举。
+
+        出站复用数据面 SSRF 防护；默认严格模式下私网/回环地址被拦截并归类为
+        `network_unreachable`，需要放行时启动加 `-allow-private-upstreams`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model_type, url]
+              properties:
+                model_type:
+                  type: string
+                  enum: [openai-completions, anthropic-messages]
+                url:
+                  type: string
+                  description: 与 model.url 语义一致（openai 带 /v1，anthropic 为 host）
+                api_key:
+                  type: string
+                  description: 直接使用该密钥（尚未落库时）
+                credential_id:
+                  type: integer
+                  description: 改用已保存凭据的第一个 header 密钥
+      responses:
+        '200':
+          description: 拉取结果（成功或失败）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  models:
+                    type: array
+                    items:
+                      type: string
+                  error_kind:
+                    type: string
+                  message:
+                    type: string
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2069,13 +2132,25 @@ components:
       type: object
       description: |
         连通性探测结果（HTTP 状态码恒为 200）。
-        `ok=true` 时给出 `latency_ms`；`ok=false` 时给出 `error_kind` 与 `message`。
+        `ok=true` 时给出 `latency_ms` 与上游真实回复 `reply`；`ok=false` 时给出 `error_kind` 与 `message`。
+
+        2xx 不足以保证可用：响应体解析不出非空的助手消息时，按 `upstream_client` 判定失败，
+        避免把「没真正调用模型」误报成连通。
       properties:
         ok:
           type: boolean
         latency_ms:
           type: integer
-          description: 一次最小对话请求的往返毫秒数（`ok=true` 时存在）
+          description: 一次最小对话请求的完整往返毫秒数，读完响应体后才计时（`ok=true` 时存在）
+        reply:
+          type: string
+          description: 上游真实返回的助手文本（`ok=true` 时存在，通常为 hello）
+        upstream_id:
+          type: string
+          description: 上游响应自报的请求 id，用于和上游日志对齐
+        upstream_model:
+          type: string
+          description: 上游响应自报的模型名
         error_kind:
           type: string
           description: 失败原因枚举（`ok=false` 时存在）

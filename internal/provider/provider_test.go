@@ -161,7 +161,7 @@ func TestOpenAIProbe_StrictBlocksDisallowedTargets(t *testing.T) {
 		"file:///etc/passwd",
 	} {
 		t.Run(base, func(t *testing.T) {
-			_, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "gpt-4o-mini")
+			_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "gpt-4o-mini")
 			if err == nil {
 				t.Fatalf("base=%q: expected SSRF rejection, got nil", base)
 			}
@@ -193,7 +193,7 @@ func TestAnthropicProbe_StrictBlocksDisallowedTargets(t *testing.T) {
 		"gopher://127.0.0.1:11211/_stats",
 	} {
 		t.Run(base, func(t *testing.T) {
-			_, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "claude")
+			_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "claude")
 			if err == nil {
 				t.Fatalf("base=%q: expected SSRF rejection, got nil", base)
 			}
@@ -219,7 +219,7 @@ func TestOpenAIProbe_TransportFailure(t *testing.T) {
 	defer cancel()
 
 	p := &provider.OpenAIProvider{}
-	_, err := p.CheckConnectivityWithChat(ctx, "sk", "https://AIGate-nonexistent.invalid", "gpt-4o-mini")
+	_, _, err := p.CheckConnectivityWithChat(ctx, "sk", "https://AIGate-nonexistent.invalid", "gpt-4o-mini")
 	if err == nil {
 		t.Fatalf("expected transport failure, got nil")
 	}
@@ -242,7 +242,7 @@ func TestOpenAIProbe_TransportFailure(t *testing.T) {
 // before any connection attempt, with the underlying cause preserved.
 func TestOpenAIProbe_InvalidURL(t *testing.T) {
 	p := &provider.OpenAIProvider{}
-	_, err := p.CheckConnectivityWithChat(context.Background(), "sk", "http://invalid\x7fhost", "gpt-4o-mini")
+	_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", "http://invalid\x7fhost", "gpt-4o-mini")
 	if err == nil {
 		t.Fatalf("expected error for invalid URL, got nil")
 	}
@@ -263,7 +263,7 @@ func TestOpenAIProbe_InvalidURL(t *testing.T) {
 
 func TestAnthropicProbe_InvalidURL(t *testing.T) {
 	p := &provider.AnthropicProvider{}
-	_, err := p.CheckConnectivityWithChat(context.Background(), "sk", "http://invalid\x7fhost", "claude")
+	_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", "http://invalid\x7fhost", "claude")
 	if err == nil {
 		t.Fatalf("expected error for invalid URL, got nil")
 	}
@@ -289,7 +289,7 @@ func TestAnthropicProbe_DefaultBaseWhenEmpty(t *testing.T) {
 	defer cancel()
 
 	p := &provider.AnthropicProvider{}
-	_, err := p.CheckConnectivityWithChat(ctx, "sk", "", "claude")
+	_, _, err := p.CheckConnectivityWithChat(ctx, "sk", "", "claude")
 	if err == nil {
 		t.Skip("network reachable to api.anthropic.com — cannot assert default base in this env")
 	}

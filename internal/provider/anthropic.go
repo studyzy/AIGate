@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -1062,7 +1063,7 @@ func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, chunk map[string
 }
 
 // CheckConnectivityWithChat probes the Anthropic Messages API by issuing a
-// minimal POST /v1/messages request (one user message, max_tokens=1).
+// minimal POST /v1/messages request (one user message asking for "hello").
 //
 // This probe validates both network reachability, the apiKey, and that the
 // supplied model name is actually invocable.
@@ -1073,16 +1074,16 @@ func writeSSEChunk(w http.ResponseWriter, flusher http.Flusher, chunk map[string
 func (p *AnthropicProvider) CheckConnectivityWithChat(
 	ctx context.Context,
 	apiKey, apiBase, model string,
-) (time.Duration, error) {
+) (time.Duration, ProbeOutcome, error) {
 	body, err := json.Marshal(map[string]interface{}{
 		"model":      model,
-		"max_tokens": 1,
+		"max_tokens": probeMaxTokens,
 		"messages": []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			{"role": "user", "content": probePrompt},
 		},
 	})
 	if err != nil {
-		return 0, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return 0, ProbeOutcome{}, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 
 	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+"/v1/messages", body, func(h http.Header) {
@@ -1092,7 +1093,37 @@ func (p *AnthropicProvider) CheckConnectivityWithChat(
 		h.Set("anthropic-version", anthropicVersion)
 	})
 	if err != nil {
-		return 0, err
+		return 0, ProbeOutcome{}, err
 	}
-	return runConnectivityProbe(httpReq)
+	return runConnectivityProbe(httpReq, anthropicProbeReply)
+}
+
+// anthropicProbeReply 从 Messages 响应里拼接文本块；没有文本内容视为未真正调用模型。
+func anthropicProbeReply(body []byte) (ProbeOutcome, error) {
+	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ProbeOutcome{}, errors.New("response is not a messages payload")
+	}
+	var parts []string
+	for _, block := range parsed.Content {
+		if strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	reply := strings.TrimSpace(strings.Join(parts, " "))
+	if reply == "" {
+		return ProbeOutcome{}, errors.New("response has no text content")
+	}
+	return ProbeOutcome{
+		Reply:         truncateReply(reply),
+		UpstreamID:    parsed.ID,
+		UpstreamModel: parsed.Model,
+	}, nil
 }

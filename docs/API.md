@@ -427,13 +427,13 @@ Response `200 OK`:
 
 #### POST /admin/models/{id}/connectivity
 
-Probe an upstream with a minimal request (a single user message and `max_tokens=1`) to check that the address is reachable, the credential is valid, and the model answers.
+Probe an upstream with a minimal request — one user message asking the model to reply with the single word `hello`, `max_tokens=8` — to check that the address is reachable, the credential is valid, and the model actually answers.
 
 **The probe result is always returned with HTTP `200`**; success or failure lives in the body's `ok` field:
 
 | Body | Meaning |
 |------|---------|
-| `{"ok": true, "latency_ms": N}` | Success. `latency_ms` is the round-trip in milliseconds (rounded, and at least `1`). |
+| `{"ok": true, "latency_ms": N, "reply": "hello", "upstream_id": "…", "upstream_model": "…"}` | Success. `latency_ms` is the full round trip in milliseconds — measured after the response body has been read, not when headers arrive — rounded and at least `1`. `reply` is the assistant text the upstream actually returned; `upstream_id`/`upstream_model` are what the upstream reported, for correlating with its own logs. |
 | `{"ok": false, "error_kind": "…", "message": "…"}` | Failure. `error_kind` is a closed enum; `message` is human-readable. |
 
 `error_kind` values:
@@ -447,6 +447,8 @@ Probe an upstream with a minimal request (a single user message and `max_tokens=
 | `upstream_server` | The upstream returned a 5xx. |
 | `upstream_client` | The upstream returned another 4xx. |
 
+A 2xx response alone is not treated as success: the body must parse into a non-empty assistant message, otherwise the probe fails with `upstream_client`. This keeps a gateway that answers 200 without actually calling the model from looking reachable.
+
 The outbound request uses the same SSRF protection as the data plane: under the default strict mode a private/loopback upstream is blocked and classified as `network_unreachable`; start with `-allow-private-upstreams` to allow it. The upstream key is resolved live (credential first, then the model's `api_key`); a resolution failure is a server-configuration error and returns `500` rather than a probe result.
 
 A `user_key_required` (BYOK) model has no shared key to probe: the endpoint returns `400 user_key_required model has no shared key to probe; verify it from the data plane with a binding key`.
@@ -459,6 +461,36 @@ Only an invalid path id (`400`) and a missing model (`404`) use the standard err
 | 400 | Invalid id; the model is `user_key_required`. |
 | 404 | Model not found. |
 | 500 | Credential/secret resolution failed. |
+
+#### POST /admin/models/discover
+
+List the model ids an upstream exposes, so a console can offer a picker instead of asking operators to copy `model_id` by hand.
+
+Request body:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `model_type` | string, required | `openai-completions` or `anthropic-messages`. |
+| `url` | string, required | Same semantics as `model.url`: `openai-completions` is a base ending in `/v1`, `anthropic-messages` is the host. |
+| `api_key` | string, optional | Used directly — for a key that has not been stored yet. |
+| `credential_id` | number, optional | Resolve the credential's first header secret instead of passing a key. |
+
+Exactly one key source is required: `api_key` wins when both are present.
+
+The result follows the connectivity convention — always HTTP `200`, with success or failure in the body:
+
+| Body | Meaning |
+|------|---------|
+| `{"ok": true, "models": ["gpt-4o", …]}` | Model ids reported by the upstream `/models` endpoint. |
+| `{"ok": false, "error_kind": "…", "message": "…"}` | Same `error_kind` enum as the connectivity probe. |
+
+Outbound requests use the data-plane SSRF protection: private/loopback targets are blocked unless `-allow-private-upstreams` is set, and are reported as `network_unreachable`.
+
+| Status | Condition |
+|--------|-----------|
+| 200 | Discovery completed (whether `ok` is true or false). |
+| 400 | Invalid `model_type`/`url`, or neither key source given, or the credential has no header secret. |
+| 404 | `credential_id` not found. |
 
 ### 3.2 Credentials
 

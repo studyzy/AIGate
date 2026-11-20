@@ -472,7 +472,7 @@ func TestOpenAIProbe_SSRFBlocked(t *testing.T) {
 		"http://localhost",
 		"file:///etc/passwd",
 	} {
-		_, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "gpt-4o-mini")
+		_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "gpt-4o-mini")
 		if err == nil {
 			t.Errorf("base=%q: expected SSRF block, got nil", base)
 			continue
@@ -494,7 +494,7 @@ func TestAnthropicProbe_SSRFBlocked(t *testing.T) {
 		"http://192.168.1.1",
 		"http://[::1]:8080",
 	} {
-		_, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "claude")
+		_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", base, "claude")
 		if err == nil {
 			t.Errorf("base=%q: expected SSRF block, got nil", base)
 			continue

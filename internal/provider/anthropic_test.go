@@ -282,7 +282,7 @@ func TestAnthropicChatCompletionStream_ReachableUpstream(t *testing.T) {
 }
 
 // TestAnthropicCheckConnectivityWithChat_Success 验证探测打到 /v1/messages，
-// 带上 x-api-key / anthropic-version 与 max_tokens=1 的最小请求体。
+// 带上 x-api-key / anthropic-version 与 max_tokens=8 的最小请求体（要求模型只回 hello）。
 func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	allowPrivateForTest(t)
 
@@ -300,12 +300,12 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 		gotMethod = r.Method
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"x","content":[{"type":"text","text":""}]}`))
+		_, _ = w.Write([]byte(`{"id":"x","content":[{"type":"text","text":"hello"}]}`))
 	}))
 	defer srv.Close()
 
 	p := &provider.AnthropicProvider{}
-	latency, err := p.CheckConnectivityWithChat(
+	latency, out, err := p.CheckConnectivityWithChat(
 		context.Background(),
 		"sk-anthropic",
 		srv.URL,
@@ -316,6 +316,9 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	}
 	if latency <= 0 {
 		t.Fatalf("expected positive latency, got %v", latency)
+	}
+	if out.Reply != "hello" {
+		t.Fatalf("reply = %q, want the assistant text block", out.Reply)
 	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %s, want POST", gotMethod)
@@ -332,12 +335,16 @@ func TestAnthropicCheckConnectivityWithChat_Success(t *testing.T) {
 	if gotBody["model"] != "claude-3-5-haiku-20241022" {
 		t.Fatalf("body.model = %v, want claude-3-5-haiku-20241022", gotBody["model"])
 	}
-	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 1 {
-		t.Fatalf("body.max_tokens = %v, want 1", gotBody["max_tokens"])
+	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 8 {
+		t.Fatalf("body.max_tokens = %v, want 8", gotBody["max_tokens"])
 	}
 	msgs, ok := gotBody["messages"].([]any)
 	if !ok || len(msgs) != 1 {
 		t.Fatalf("messages should be a single-element array, got %v", gotBody["messages"])
+	}
+	first, _ := msgs[0].(map[string]any)
+	if first["content"] != "Reply with the single word: hello" {
+		t.Fatalf("probe prompt = %v, want the hello instruction", first["content"])
 	}
 }
 
@@ -398,7 +405,7 @@ func TestAnthropicCheckConnectivityWithChat_ResponseClassification(t *testing.T)
 			defer srv.Close()
 
 			p := &provider.AnthropicProvider{}
-			_, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "claude")
+			_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "claude")
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
@@ -435,12 +442,12 @@ func TestAnthropicCheckConnectivityWithChat_NoAPIKeyHeader(t *testing.T) {
 		if r.Header.Get("anthropic-version") != "" {
 			sawVersion = true
 		}
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"hello"}]}`))
 	}))
 	defer srv.Close()
 
 	p := &provider.AnthropicProvider{}
-	if _, err := p.CheckConnectivityWithChat(context.Background(), "", srv.URL, "claude"); err != nil {
+	if _, _, err := p.CheckConnectivityWithChat(context.Background(), "", srv.URL, "claude"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sawAPIKey {

@@ -277,17 +277,20 @@ func TestOpenAICheckConnectivityWithChat_Success(t *testing.T) {
 		gotMethod = r.Method
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":""}}]}`))
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
 	}))
 	defer srv.Close()
 
 	p := &provider.OpenAIProvider{}
-	latency, err := p.CheckConnectivityWithChat(context.Background(), "sk-ok", srv.URL, "gpt-4o-mini")
+	latency, out, err := p.CheckConnectivityWithChat(context.Background(), "sk-ok", srv.URL, "gpt-4o-mini")
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if latency <= 0 {
 		t.Fatalf("expected positive latency, got %v", latency)
+	}
+	if out.Reply != "hello" {
+		t.Fatalf("reply = %q, want the assistant message text", out.Reply)
 	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %s, want POST", gotMethod)
@@ -312,6 +315,13 @@ func TestOpenAICheckConnectivityWithChat_Success(t *testing.T) {
 	if !ok || len(msgs) != 1 {
 		t.Fatalf("messages should be a single-element array, got %v", gotBody["messages"])
 	}
+	first, _ := msgs[0].(map[string]any)
+	if first["content"] != "Reply with the single word: hello" {
+		t.Fatalf("probe prompt = %v, want the hello instruction", first["content"])
+	}
+	if v, ok := gotBody["max_tokens"].(float64); !ok || int(v) != 8 {
+		t.Fatalf("body.max_tokens = %v, want 8", gotBody["max_tokens"])
+	}
 }
 
 // TestOpenAICheckConnectivityWithChat_NewModelMaxCompletionTokens 验证 GPT-5+ / o-series
@@ -322,12 +332,12 @@ func TestOpenAICheckConnectivityWithChat_NewModelMaxCompletionTokens(t *testing.
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
 	}))
 	defer srv.Close()
 
 	p := &provider.OpenAIProvider{}
-	if _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-5"); err != nil {
+	if _, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-5"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := gotBody["max_tokens"]; ok {
@@ -409,7 +419,7 @@ func TestOpenAICheckConnectivityWithChat_ResponseClassification(t *testing.T) {
 			defer srv.Close()
 
 			p := &provider.OpenAIProvider{}
-			_, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-4o-mini")
+			_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-4o-mini")
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
@@ -431,7 +441,7 @@ func TestOpenAICheckConnectivityWithChat_ResponseClassification(t *testing.T) {
 }
 
 // TestOpenAICheckConnectivityWithChat_SnippetTruncated 验证超长错误响应体被截断为
-// 不超过 512 字节的单行 snippet。
+// 不超过 200 字符的单行 snippet。
 func TestOpenAICheckConnectivityWithChat_SnippetTruncated(t *testing.T) {
 	allowPrivateForTest(t)
 
@@ -442,13 +452,13 @@ func TestOpenAICheckConnectivityWithChat_SnippetTruncated(t *testing.T) {
 	defer srv.Close()
 
 	p := &provider.OpenAIProvider{}
-	_, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-4o-mini")
+	_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL, "gpt-4o-mini")
 	var ce *provider.ConnectivityError
 	if !errors.As(err, &ce) {
 		t.Fatalf("err is not *ConnectivityError: %v", err)
 	}
-	if len(ce.Snippet) != 512 {
-		t.Fatalf("len(snippet) = %d, want 512 (truncated)", len(ce.Snippet))
+	if ce.Snippet != strings.Repeat("x", 200)+"…" {
+		t.Fatalf("snippet = %q, want 200 chars plus an ellipsis", ce.Snippet)
 	}
 	if strings.ContainsAny(ce.Snippet, "\r\n") {
 		t.Fatalf("snippet should be single-line, got %q", ce.Snippet)
@@ -464,12 +474,12 @@ func TestOpenAICheckConnectivityWithChat_NoAPIKeyHeader(t *testing.T) {
 		if r.Header.Get("Authorization") != "" {
 			sawAuth = true
 		}
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
 	}))
 	defer srv.Close()
 
 	p := &provider.OpenAIProvider{}
-	if _, err := p.CheckConnectivityWithChat(context.Background(), "", srv.URL, "gpt-4o-mini"); err != nil {
+	if _, _, err := p.CheckConnectivityWithChat(context.Background(), "", srv.URL, "gpt-4o-mini"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sawAuth {
@@ -496,7 +506,7 @@ func TestOpenAICheckConnectivityWithChat_ContextCanceled(t *testing.T) {
 	}()
 
 	p := &provider.OpenAIProvider{}
-	_, err := p.CheckConnectivityWithChat(ctx, "sk", srv.URL, "gpt-4o-mini")
+	_, _, err := p.CheckConnectivityWithChat(ctx, "sk", srv.URL, "gpt-4o-mini")
 	if err == nil {
 		t.Fatalf("expected error after ctx cancel, got nil")
 	}
@@ -514,7 +524,7 @@ func TestOpenAICheckConnectivityWithChat_NetworkUnreachable(t *testing.T) {
 	defer cancel()
 
 	p := &provider.OpenAIProvider{}
-	_, err := p.CheckConnectivityWithChat(ctx, "sk", "http://127.0.0.1:1", "gpt-4o-mini")
+	_, _, err := p.CheckConnectivityWithChat(ctx, "sk", "http://127.0.0.1:1", "gpt-4o-mini")
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}

@@ -22,5 +22,20 @@ coverage.out
 
 # Local-only process artifacts (kept on disk, not published)
 /openspec/
+/docs/superpowers/
+/docs/plans/
 /.codebuddy/
 /graphify-out/
+
+# WebUI：前端产物由 vite 构建进 embed 目录，仅保留 .gitkeep 让 go:embed 可用
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep
+/webui/node_modules/
+/webui/dist/
+
+# TS 增量编译缓存
+*.tsbuildinfo
+
+# WebUI 浏览器 e2e 产物
+/webui/test-results/
+/webui/playwright-report/

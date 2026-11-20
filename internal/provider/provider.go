@@ -97,6 +97,14 @@ func (e *ConnectivityError) Error() string {
 // Unwrap returns the sentinel kind so errors.Is(err, ErrInvalidAPIKey) works.
 func (e *ConnectivityError) Unwrap() error { return e.Kind }
 
+// 连通性探测的固定请求参数：真实发一次对话请求，但只要求回一个词，控制消耗。
+const (
+	// probePrompt 让模型只回一个 hello（比 "hi" 更能验证模型真的产生了输出）。
+	probePrompt = "Reply with the single word: hello"
+	// probeMaxTokens 只需容纳 "hello" 这几个 token；留一点余量避免被截断成空响应。
+	probeMaxTokens = 8
+)
+
 // classifyHTTPStatus maps an HTTP status code (>=400) to the matching sentinel.
 // Returns nil for 2xx/3xx, signalling success.
 func classifyHTTPStatus(status int) error {
@@ -114,6 +122,14 @@ func classifyHTTPStatus(status int) error {
 	default:
 		return ErrUpstreamClient
 	}
+}
+
+// ProbeOutcome 是一次连通性探测拿到的上游事实：回复文本与上游自报的请求 id/模型名，
+// 便于把「这次探测」和上游自己的日志对上。
+type ProbeOutcome struct {
+	Reply         string
+	UpstreamID    string
+	UpstreamModel string
 }
 
 // Provider abstracts an LLM provider's chat completion API.
@@ -141,7 +157,7 @@ type Provider interface {
 	) (result *StreamResult, statusCode int, err error)
 
 	// CheckConnectivityWithChat probes the upstream provider by issuing a
-	// minimal chat completion request (one user message, max_tokens=1).
+	// minimal chat completion request (one user message asking for "hello").
 	// This is more expensive than CheckConnectivity but works on providers
 	// that don't expose a list-models endpoint, and additionally validates
 	// that the specified model is actually invocable with the supplied key.
@@ -149,7 +165,7 @@ type Provider interface {
 	// On success it returns the round-trip latency and a nil error. On
 	// failure it returns a *ConnectivityError wrapping one of the Err*
 	// sentinels; callers can use errors.Is to classify the failure.
-	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, err error)
+	CheckConnectivityWithChat(ctx context.Context, apiKey, apiBase, model string) (latency time.Duration, out ProbeOutcome, err error)
 }
 
 // richErrorf 用英文文案替换上游实现里的 i18n 文案，并通过 %w 把 base 保留在

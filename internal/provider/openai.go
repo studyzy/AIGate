@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -260,7 +261,7 @@ func firstPositiveInt(values ...int) int {
 }
 
 // CheckConnectivityWithChat probes an OpenAI-compatible endpoint by issuing a
-// minimal POST /chat/completions request (one user message, max_tokens=1).
+// minimal POST /chat/completions request (one user message asking for "hello").
 //
 // This probe validates both network reachability, the apiKey, and that the
 // supplied model name is actually invocable.
@@ -271,19 +272,19 @@ func firstPositiveInt(values ...int) int {
 func (p *OpenAIProvider) CheckConnectivityWithChat(
 	ctx context.Context,
 	apiKey, apiBase, model string,
-) (time.Duration, error) {
+) (time.Duration, ProbeOutcome, error) {
 	req := map[string]interface{}{
 		"model": model,
 		"messages": []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			{"role": "user", "content": probePrompt},
 		},
-		"max_tokens": 1,
+		"max_tokens": probeMaxTokens,
 		"stream":     false,
 	}
 	normalizeMaxTokensParam(req, model)
 	body, err := json.Marshal(req)
 	if err != nil {
-		return 0, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+		return 0, ProbeOutcome{}, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
 	}
 
 	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+"/chat/completions", body, func(h http.Header) {
@@ -292,7 +293,44 @@ func (p *OpenAIProvider) CheckConnectivityWithChat(
 		}
 	})
 	if err != nil {
-		return 0, err
+		return 0, ProbeOutcome{}, err
 	}
-	return runConnectivityProbe(httpReq)
+	return runConnectivityProbe(httpReq, openAIProbeReply)
+}
+
+// openAIProbeReply 从 OpenAI 兼容响应里取出助手回复；空回复视为未真正调用模型。
+func openAIProbeReply(body []byte) (ProbeOutcome, error) {
+	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content          *string `json:"content"`
+				ReasoningContent *string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ProbeOutcome{}, errors.New("response is not a chat completion")
+	}
+	if len(parsed.Choices) == 0 {
+		return ProbeOutcome{}, errors.New("response has no choices")
+	}
+	msg := parsed.Choices[0].Message
+	reply := ""
+	if msg.Content != nil {
+		reply = strings.TrimSpace(*msg.Content)
+	}
+	// 推理模型可能把 8 个 token 全花在 reasoning 上、content 为空：仍说明模型真的跑了。
+	if reply == "" && msg.ReasoningContent != nil {
+		reply = strings.TrimSpace(*msg.ReasoningContent)
+	}
+	if reply == "" {
+		return ProbeOutcome{}, errors.New("response has empty assistant message")
+	}
+	return ProbeOutcome{
+		Reply:         truncateReply(reply),
+		UpstreamID:    parsed.ID,
+		UpstreamModel: parsed.Model,
+	}, nil
 }

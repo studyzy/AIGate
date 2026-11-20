@@ -29,10 +29,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type connectivityResp struct {
-	OK        bool   `json:"ok"`
-	LatencyMS int64  `json:"latency_ms"`
-	ErrorKind string `json:"error_kind"`
-	Message   string `json:"message"`
+	OK            bool   `json:"ok"`
+	LatencyMS     int64  `json:"latency_ms"`
+	Reply         string `json:"reply"`
+	UpstreamID    string `json:"upstream_id"`
+	UpstreamModel string `json:"upstream_model"`
+	ErrorKind     string `json:"error_kind"`
+	Message       string `json:"message"`
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +97,7 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 		// 稍作延迟，保证 latency_ms 为可观测的正值。
 		time.Sleep(10 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+		_, _ = w.Write([]byte(`{"id":"c1","model":"m1","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	}))
 	defer upstream.Close()
 
@@ -110,18 +113,21 @@ func TestModelConnectivity_ReachableUpstream(t *testing.T) {
 	if resp.LatencyMS <= 0 {
 		t.Fatalf("latency_ms = %d, want > 0", resp.LatencyMS)
 	}
+	if resp.Reply != "hi" || resp.UpstreamID != "c1" || resp.UpstreamModel != "m1" {
+		t.Fatalf("reply/id/model = %q/%q/%q, want hi/c1/m1", resp.Reply, resp.UpstreamID, resp.UpstreamModel)
+	}
 	if resp.ErrorKind != "" || resp.Message != "" {
 		t.Fatalf("success response should not carry error_kind/message: %+v", resp)
 	}
-	// 探测以最小对话请求（max_tokens=1）打上游的 /chat/completions，并带模型的 api_key。
+	// 探测以最小对话请求（要求回 hello）打上游的 /chat/completions，并带模型的 api_key。
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
 	}
 	if gotAuth != "Bearer sk-upstream-secret" {
 		t.Fatalf("upstream Authorization = %q, want Bearer sk-upstream-secret", gotAuth)
 	}
-	if got, ok := gotBody["max_tokens"].(float64); !ok || got != 1 {
-		t.Fatalf("probe request max_tokens = %v, want 1", gotBody["max_tokens"])
+	if got, ok := gotBody["max_tokens"].(float64); !ok || got != 8 {
+		t.Fatalf("probe request max_tokens = %v, want 8", gotBody["max_tokens"])
 	}
 }
 
