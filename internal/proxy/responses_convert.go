@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,7 +46,13 @@ const (
 // --- 请求方向：responses → chat ---
 
 // responsesRequestToChat 把 Responses 请求体转换为 OpenAI chat completions 请求体。
-// 校验：model 必填（缺失返回英文错误）。
+//
+// 校验（均返回英文错误）：
+//   - model 必填；
+//   - 必须能产出至少一条 messages：input 缺失/为 null/为空数组、或数组里全是被丢弃的
+//     Responses 专有 item 时，返回 "invalid input"。绝不发出「只有 model、没有 messages」
+//     的上游请求——那属于 §2 反目标「转换丢字段却不报错」。
+//     注意空字符串 input 是合法的：它产生一条空的 user 消息。
 func responsesRequestToChat(body []byte) (map[string]any, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -73,9 +80,11 @@ func responsesRequestToChat(body []byte) (map[string]any, error) {
 	case []any:
 		messages = append(messages, responsesItemsToMessages(input)...)
 	}
-	if len(messages) > 0 {
-		out["messages"] = messages
+	// input 无法产出任何 message 时直接拒绝，绝不向上游发一条没有 messages 的请求。
+	if len(messages) == 0 {
+		return nil, errors.New("invalid input")
 	}
+	out["messages"] = messages
 
 	// 标量字段透传（存在才写，避免改变无关字段语义）。
 	for _, key := range []string{"temperature", "top_p", "parallel_tool_calls", "metadata", "tool_choice"} {
@@ -94,8 +103,11 @@ func responsesRequestToChat(body []byte) (map[string]any, error) {
 		}
 	}
 	// 扁平 tool → 嵌套 {type:function, function:{...}}。
-	if tools := responsesToolsToChat(req["tools"]); len(tools) > 0 {
-		out["tools"] = tools
+	// 显式传入的 tools（含空数组）原样保留：部分上游见到 tool_choice 却没有 tools 会 400。
+	if rawTools, exists := req["tools"]; exists && rawTools != nil {
+		if tools := responsesToolsToChat(rawTools); tools != nil {
+			out["tools"] = tools
+		}
 	}
 	// 流式：让上游在末片带上 usage，供记账与终态事件使用。
 	if stream, _ := req["stream"].(bool); stream {
@@ -150,15 +162,66 @@ func responsesItemsToMessages(items []any) []any {
 				"content":      responsesToolOutput(item["output"]),
 			})
 		case itemType == "" || itemType == "message":
-			if role, _ := item["role"].(string); role != "" {
-				out = append(out, map[string]any{
-					"role":    role,
-					"content": responsesContentToChat(item["content"]),
-				})
+			role, _ := item["role"].(string)
+			if role == "" {
+				continue
 			}
+			message := map[string]any{"role": role, "content": responsesContentToChat(item["content"])}
+			// Responses 允许把工具调用挂在 message item 上（content 为 null）；不搬过去就等于丢字段。
+			if calls, ok := responsesToolCallsOf(item); ok {
+				message["tool_calls"] = calls
+			}
+			if message["content"] == nil && message["tool_calls"] == nil {
+				// 既无内容也无工具调用：按丢弃处理，避免产生空消息。
+				continue
+			}
+			out = append(out, message)
 		}
 	}
 	return out
+}
+
+// responsesToolCallsOf 把 Responses message item 上的 tool_calls 转成 chat 形态。
+// Responses 的 item 可能把工具调用挂在 message 上（此时 content 为 null）；
+// 这些条目在 chat 协议里必须落在 assistant 的 tool_calls 里，否则转换即丢字段。
+func responsesToolCallsOf(item map[string]any) ([]any, bool) {
+	rawCalls, ok := item["tool_calls"].([]any)
+	if !ok || len(rawCalls) == 0 {
+		return nil, false
+	}
+	calls := make([]any, 0, len(rawCalls))
+	for _, raw := range rawCalls {
+		call, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		converted := map[string]any{"type": "function"}
+		if fn, ok := call["function"].(map[string]any); ok {
+			// 已是 chat 嵌套形态：原样保留。
+			converted["id"] = call["id"]
+			converted["function"] = map[string]any{
+				"name":      fn["name"],
+				"arguments": responsesArguments(fn["arguments"]),
+			}
+			calls = append(calls, converted)
+			continue
+		}
+		// 扁平 Responses 形态：{id?, call_id?, name, arguments}。
+		id, _ := call["id"].(string)
+		if id == "" {
+			id, _ = call["call_id"].(string)
+		}
+		converted["id"] = id
+		converted["function"] = map[string]any{
+			"name":      call["name"],
+			"arguments": responsesArguments(call["arguments"]),
+		}
+		calls = append(calls, converted)
+	}
+	if len(calls) == 0 {
+		return nil, false
+	}
+	return calls, true
 }
 
 // responsesContentToChat 转换 message item 的 content：
@@ -256,12 +319,13 @@ func responsesToolOutput(v any) string {
 
 // responsesToolsToChat 把扁平的 Responses function 工具转为 chat 嵌套形态。
 // 非 function 类型（内置工具）在 chat 上游没有对应物，丢弃。
+// 入参是数组时返回非 nil 切片（空数组返回空切片），以便调用方区分「没传」与「显式传了空」。
 func responsesToolsToChat(v any) []any {
 	items, ok := v.([]any)
 	if !ok {
 		return nil
 	}
-	var out []any
+	out := make([]any, 0, len(items))
 	for _, raw := range items {
 		tool, ok := raw.(map[string]any)
 		if !ok {
@@ -437,7 +501,13 @@ func responsesInt(obj map[string]any, key string) int {
 // 首次出现的顺序递增，message 与各 function_call 互不共享。每个 item 独立累积自己的内容。
 //
 // 与 chat 流不同，Responses 流以 response.completed 为界，绝不写 "[DONE]"。
-// 收尾事件由上游 [DONE]、调用方 Finish() 触发。
+//
+// 收尾只由两种输入触发：上游的 "[DONE]" 事件，或调用方 Finish()。
+// 带 finish_reason 的末块**只记录结束原因、不触发收尾**——因为 include_usage 模式会在它
+// 之后追加一个仅含 usage 的分片，提前收尾会把终态 usage 丢掉。
+//
+// 上游约定（I-4）：收到 "[DONE]" 即视为流已结束，之后到达的字节一律忽略；
+// 终态 usage 以 "[DONE]" 之前最后一个完整事件为准。
 type responsesStreamTranslator struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
@@ -448,13 +518,23 @@ type responsesStreamTranslator struct {
 	buf []byte
 
 	// wrote 标记是否已向客户端写出过任何字节（供调用方判断「未写出即失败 → 502」）。
+	//
+	// 语义边界（I-3 / I-5）：
+	//   - 只由真实「上游增量驱动的输出」置位：文本/工具调用增量事件，以及流中的 error 事件。
+	//     流中错误说明已经开流，无法回退成 JSON 502，因此算已写出。
+	//   - 流开始**之前**的上游错误（HTTP 非 200、连接失败、首块解析失败）由 Task 6 在调用
+	//     本翻译器之前判断并返回 JSON 502，**不会**走到这里。
+	//   - 收尾事件由 Finish() 补发时**不**置位：上游 200 但零增量时 Wrote() 必须仍为 false，
+	//     Task 6 才能据此把「空响应」回退成 502。
 	wrote bool
 
 	// opened 标记 created/in_progress 是否已发出；
+	// finalizing 标记已进入收尾阶段（此后写出的事件不置 wrote）；
 	// closed 标记收尾是否已完成；failed 标记是否已输出错误事件。
-	opened bool
-	closed bool
-	failed bool
+	opened     bool
+	finalizing bool
+	closed     bool
+	failed     bool
 
 	// items 是按 output_index 排列的已开启 item（按首次出现顺序追加）。
 	items []*responsesStreamItem
@@ -534,12 +614,12 @@ func (t *responsesStreamTranslator) Write(p []byte) (int, error) {
 // Wrote 返回是否已向客户端写出过任何字节（调用方用于「未写出即失败 → 502」判断）。
 func (t *responsesStreamTranslator) Wrote() bool { return t.wrote }
 
-// Finish 幂等收尾：若已开始且未结束，补发剩余事件直到 response.completed。
-func (t *responsesStreamTranslator) Finish() {
-	if !t.closed && !t.failed {
-		t.finalize()
-	}
-}
+// Finish 幂等收尾：补发剩余事件直到 response.completed。
+//
+// 注意：Finish() **不改变** Wrote() 的语义。上游 200 但零增量时，Finish() 仍会写出一条
+// 最小合法事件序列（created/in_progress/completed）以免客户端拿到「200 + 空 body」，
+// 但 Wrote() 保持 false，调用方据此把该响应回退成 502 JSON。
+func (t *responsesStreamTranslator) Finish() { t.finalize() }
 
 // processEvent 处理一个完整 SSE 事件块（多行 data: 会被拼接）。
 func (t *responsesStreamTranslator) processEvent(block string) {
@@ -717,6 +797,7 @@ func (t *responsesStreamTranslator) finalize() {
 	if t.closed || t.failed {
 		return
 	}
+	t.finalizing = true
 	t.closed = true
 	t.ensureOpened()
 	for _, item := range t.openCalls {
@@ -742,7 +823,24 @@ func (t *responsesStreamTranslator) finalize() {
 		})
 		item.closed = true
 	}
-	t.emit("response.completed", map[string]any{"response": t.responseBody(t.finalStatus(), t.finalOutput())})
+	output := t.finalOutput()
+	// 防御：上游声明 tool_calls 结束却一个 function_call item 都没给（漏发 tool_calls 增量），
+	// 客户端会看到「完成但没有任何工具调用」。记 Warn 便于排查，不改写事件序列。
+	if t.finishReason == "tool_calls" && !t.hasFunctionCallItem() {
+		slog.Warn("responses stream: finish_reason=tool_calls but no function_call item was synthesized",
+			"response_id", t.respID, "model", t.model)
+	}
+	t.emit("response.completed", map[string]any{"response": t.responseBody(t.finalStatus(), output)})
+}
+
+// hasFunctionCallItem 报告是否有任何已合成的 function_call item。
+func (t *responsesStreamTranslator) hasFunctionCallItem() bool {
+	for _, item := range t.items {
+		if item.kind == "function_call" {
+			return true
+		}
+	}
+	return false
 }
 
 // closeCallItem 收尾一个 function_call item：parameters.done → output_item.done。幂等。
@@ -829,19 +927,15 @@ func (t *responsesStreamTranslator) responseBody(status string, output []any) ma
 }
 
 // emitError 输出 event: error 并停止后续处理（不追加 [DONE]，不再补完成事件）。
+//
+// 先 ensureOpened() 补发 response.created / response.in_progress：OpenAI SDK 依赖
+// response.created 建立 response 对象，首个增量之前就失败时也必须先给（I-3）。
+// 流中错误算「已写出」（见 wrote 字段注释），因此这里显式置位。
 func (t *responsesStreamTranslator) emitError(errValue any) {
+	t.ensureOpened()
 	t.failed = true
 	t.buf = nil
-	t.wrote = true
-	t.ensureSSEHeaders()
-	data, err := json.Marshal(map[string]any{"type": "error", "error": errValue})
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(t.w, "event: error\ndata: %s\n\n", data)
-	if t.flusher != nil {
-		t.flusher.Flush()
-	}
+	t.writeEvent("error", map[string]any{"type": "error", "error": errValue}, true)
 }
 
 // ensureSSEHeaders 在首次写出前设置 SSE 响应头（若响应头尚未提交）。
@@ -854,15 +948,23 @@ func (t *responsesStreamTranslator) ensureSSEHeaders() {
 }
 
 // emit 写出一个 Responses SSE 事件并立即 flush。
+// 收尾阶段补发的事件不计入 Wrote()，见 wrote 字段注释。
 func (t *responsesStreamTranslator) emit(eventType string, payload map[string]any) {
 	payload["type"] = eventType
+	t.writeEvent(eventType, payload, !t.finalizing)
+}
+
+// writeEvent 是唯一的事件写出路径：设响应头 → 写 event/data 行 → flush → 按需置 wrote。
+func (t *responsesStreamTranslator) writeEvent(eventType string, payload map[string]any, markWrote bool) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
 	t.ensureSSEHeaders()
 	fmt.Fprintf(t.w, "event: %s\ndata: %s\n\n", eventType, data)
-	t.wrote = true
+	if markWrote {
+		t.wrote = true
+	}
 	if t.flusher != nil {
 		t.flusher.Flush()
 	}

@@ -17,7 +17,9 @@ package proxy
 // 断言以「字段值 / 结构 / 事件序列」为准，不逐字节比对 golden。
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -1171,5 +1173,204 @@ func TestResponsesStreamTranslator_FunctionCallClosure(t *testing.T) {
 		if sp == nil || sp.added < 0 || sp.done < 0 || sp.added > sp.done {
 			t.Fatalf("item %d: span = %#v, want added before done", idx, sp)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix Round 2：契约加固（I-1 / I-2 / I-3 / I-5 / I-6）
+// ---------------------------------------------------------------------------
+
+// TestResponsesRequestToChat_RequiresMessages（I-1）断言无法产出 messages 的 input 一律报错，
+// 不允许发出「只有 model、没有 messages」的上游请求（§2 反目标：转换丢字段却不报错）。
+func TestResponsesRequestToChat_RequiresMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"input 是对象", `{"model":"m","input":{"role":"user","content":"hi"}}`},
+		{"数组里全是被丢弃的 item", `{"model":"m","input":[{"type":"reasoning"}]}`},
+		{"input 是非字符串标量", `{"model":"m","input":123}`},
+		{"完全没有 input", `{"model":"m"}`},
+		{"input 为 null", `{"model":"m","input":null}`},
+		{"input 是空数组", `{"model":"m","input":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := responsesRequestToChat([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("responsesRequestToChat(%s) = %v, want an error (no messages would be sent upstream)", tc.body, out)
+			}
+			if !strings.Contains(err.Error(), "invalid input") {
+				t.Fatalf("error = %q, want it to mention \"invalid input\"", err.Error())
+			}
+		})
+	}
+}
+
+// TestResponsesRequestToChat_EmptyStringInput 空字符串 input 产生一条空 user 消息，按合法处理。
+func TestResponsesRequestToChat_EmptyStringInput(t *testing.T) {
+	out, err := responsesRequestToChat([]byte(`{"model":"m","input":""}`))
+	if err != nil {
+		t.Fatalf("empty string input: unexpected error: %v", err)
+	}
+	msgs, ok := out["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want exactly one empty user message", out["messages"])
+	}
+	msg, _ := msgs[0].(map[string]any)
+	if msg["role"] != "user" || msg["content"] != "" {
+		t.Fatalf("messages[0] = %#v, want {role:user,content:\"\"}", msg)
+	}
+}
+
+// TestResponsesRequestToChat_ToolCallOnlyAssistant（I-1 伴生）断言 content:null 的
+// assistant item 只要带 tool_calls 就仍算有效输入（不能因为「没有文本」被误判成 invalid input）。
+func TestResponsesRequestToChat_ToolCallOnlyAssistant(t *testing.T) {
+	out, err := responsesRequestToChat([]byte(`{"model":"m","input":[
+		{"type":"message","role":"assistant","content":null,
+		 "tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}
+	]}`))
+	if err != nil {
+		t.Fatalf("tool_calls-only assistant item: unexpected error: %v", err)
+	}
+	msgs, ok := out["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want one assistant message", out["messages"])
+	}
+	msg, _ := msgs[0].(map[string]any)
+	calls, ok := msg["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("messages[0].tool_calls = %#v, want the incoming tool_calls preserved", msg["tool_calls"])
+	}
+}
+
+// TestResponsesRequestToChat_EmptyToolsPreserved（I-2）断言显式 tools:[] 原样保留，
+// 避免「tool_choice 存在但 tools 缺失」被部分上游判为 400。
+func TestResponsesRequestToChat_EmptyToolsPreserved(t *testing.T) {
+	out := respConvRequest(t, `{"model":"m","input":"hi","tools":[],"tool_choice":"auto"}`)
+	tools, ok := out["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools = %#v, want an explicit empty array (presence matters)", out["tools"])
+	}
+	if len(tools) != 0 {
+		t.Fatalf("tools = %#v, want empty", tools)
+	}
+	if out["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %#v, want \"auto\"", out["tool_choice"])
+	}
+}
+
+// TestResponsesStreamTranslator_ErrorBeforeFirstDelta（I-3）断言首个增量之前出错时
+// 仍先发 response.created / in_progress，再发 error（SDK 依赖 created 建立 response 对象）。
+func TestResponsesStreamTranslator_ErrorBeforeFirstDelta(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	tr.Write([]byte(`data: {"error":{"message":"boom","type":"server_error"}}` + "\n\n"))
+	tr.Finish()
+
+	events := respStreamEvents(t, rec.Body.String())
+	names := respStreamEventNames(events)
+	want := []string{"response.created", "response.in_progress", "error"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("event types = %v, want exactly %v", names, want)
+	}
+	created := respStreamDataOf(t, events, "response.created", 0)
+	resp, _ := created["response"].(map[string]any)
+	if resp["id"] != "resp_stream" {
+		t.Fatalf("response.created id = %#v, want resp_stream", resp["id"])
+	}
+	// 流中错误算「已写出」：已经开流，无法回退成 JSON 502。
+	if !tr.Wrote() {
+		t.Fatalf("Wrote() = false after an in-stream error, want true")
+	}
+}
+
+// TestResponsesStreamTranslator_EmptyStreamWroteFalse（I-5）断言上游 200 但零增量时，
+// Finish() 后 Wrote() 必须仍为 false，Task 6 才能据此回退成 502。
+func TestResponsesStreamTranslator_EmptyStreamWroteFalse(t *testing.T) {
+	tr, _ := respStreamNew(t, "m")
+	if tr.Wrote() {
+		t.Fatalf("Wrote() = true before any input")
+	}
+	tr.Finish()
+	if tr.Wrote() {
+		t.Fatalf("Wrote() = true after Finish() on an empty stream, want false (would break the 502 fallback)")
+	}
+}
+
+// TestResponsesStreamTranslator_WroteAfterFirstEvent 断言 Wrote() 只由真实写出驱动。
+func TestResponsesStreamTranslator_WroteAfterFirstEvent(t *testing.T) {
+	tr, _ := respStreamNew(t, "m")
+	payload := respStreamChatChunks()
+	// 只喂入第一个事件但**不含结束空行**的前缀：缓冲未构成完整事件，尚未写出任何字节。
+	firstEnd := strings.Index(payload, "\n\n")
+	if firstEnd < 0 {
+		t.Fatalf("fixture has no event boundary")
+	}
+	tr.Write([]byte(payload[:firstEnd+1]))
+	if tr.Wrote() {
+		t.Fatalf("Wrote() = true after an incomplete event prefix, want false")
+	}
+	respStreamFeed(t, tr, payload, 0)
+	if !tr.Wrote() {
+		t.Fatalf("Wrote() = false after a full stream, want true")
+	}
+}
+
+// TestResponsesStreamTranslator_ToolCallsButNoItemWarns（I-6）断言 finish_reason="tool_calls"
+// 但没有任何 function_call item 时会记 Warn（防御上游漏发 tool_calls 增量）。
+func TestResponsesStreamTranslator_ToolCallsButNoItemWarns(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	tr, rec := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatTextChunk("just text"), 0)
+	respStreamFeed(t, tr, respStreamChatFinishChunk("tool_calls"), 0)
+	tr.Finish()
+
+	if !strings.Contains(logs.String(), "tool_calls") || !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("logs = %q, want a WARN about tool_calls without any function_call item", logs.String())
+	}
+	// 事件序列本身不应被日志影响。
+	names := respStreamEventNames(respStreamEvents(t, rec.Body.String()))
+	if names[len(names)-1] != "response.completed" {
+		t.Fatalf("last event = %q, want response.completed", names[len(names)-1])
+	}
+}
+
+// TestResponsesStreamTranslator_ToolCallsWithItemNoWarn 断言正常工具流不产生该 Warn。
+func TestResponsesStreamTranslator_ToolCallsWithItemNoWarn(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	tr, _ := respStreamNew(t, "m")
+	respStreamFeed(t, tr, respStreamChatToolChunk(0, "call_1", "alpha", `{}`), 0)
+	respStreamFeed(t, tr, respStreamChatFinishChunk("tool_calls"), 0)
+	tr.Finish()
+
+	if logs.Len() != 0 {
+		t.Fatalf("logs = %q, want no warning for a normal tool-call stream", logs.String())
+	}
+}
+
+// TestResponsesStreamTranslator_FinishKeepsWroteFromDelta（I-5）断言 Wrote() 只反映增量驱动的
+// 真实输出：即便上游没有 [DONE]、收尾事件全由 Finish() 补发，Wrote() 仍为 true。
+func TestResponsesStreamTranslator_FinishKeepsWroteFromDelta(t *testing.T) {
+	tr, rec := respStreamNew(t, "m")
+	// 只给增量，不给 [DONE]、不给 finish_reason：收尾完全由 Finish() 驱动。
+	respStreamFeed(t, tr, respStreamChatTextChunk("hello"), 0)
+	if !tr.Wrote() {
+		t.Fatalf("Wrote() = false after a text delta, want true")
+	}
+	tr.Finish()
+	if !tr.Wrote() {
+		t.Fatalf("Wrote() = false after Finish(), want the flag to stay true")
+	}
+	names := respStreamEventNames(respStreamEvents(t, rec.Body.String()))
+	if names[len(names)-1] != "response.completed" {
+		t.Fatalf("last event = %q, want response.completed", names[len(names)-1])
 	}
 }
