@@ -41,6 +41,8 @@ type Config struct {
 	UsageBuffer                  int    // 用量异步写入队列容量
 	WebhookBuffer                int    // webhook 事件投递队列容量
 	WebhookDeliveryRetentionDays int    // webhook 投递记录保留天数（0 = 不清理）
+	AllowResponseStorage         bool   // Responses 站点级存储开关（默认 true；false 时有状态能力整体不可用）
+	ResponseRetentionDays        int    // Responses 会话状态保留天数（0 = 不清理）
 	QuotaExceededStatus          int    // 配额超限状态码（M2 使用；默认 429）
 	InitAdminToken               string // 初始管理员 token（为空时首次启动自动生成并打印一次）
 	AllowPrivateUpstreams        bool   // 是否放行私网/回环上游地址（SSRF 严格模式开关，默认 false）
@@ -70,6 +72,14 @@ func Load(args []string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowResponseStorageDefault, err := envBool("AIGATE_ALLOW_RESPONSE_STORAGE", true)
+	if err != nil {
+		return nil, err
+	}
+	responseRetentionDefault, err := envInt("AIGATE_RESPONSE_RETENTION_DAYS", 7)
+	if err != nil {
+		return nil, err
+	}
 
 	fs := flag.NewFlagSet("aigate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -90,6 +100,18 @@ func Load(args []string) (*Config, error) {
 		"webhook-delivery-retention-days",
 		webhookRetentionDefault,
 		"days to retain webhook delivery records (0 = keep forever)",
+	)
+	fs.BoolVar(
+		&cfg.AllowResponseStorage,
+		"allow-response-storage",
+		allowResponseStorageDefault,
+		"allow POST /v1/responses to persist response state (false disables store/previous_response_id/conversation)",
+	)
+	fs.IntVar(
+		&cfg.ResponseRetentionDays,
+		"response-retention-days",
+		responseRetentionDefault,
+		"days to retain stored responses (0 = keep forever)",
 	)
 	fs.IntVar(
 		&cfg.QuotaExceededStatus,
@@ -167,6 +189,9 @@ func (c *Config) validate() error {
 	}
 	if c.WebhookDeliveryRetentionDays < 0 {
 		return fmt.Errorf("webhook-delivery-retention-days must be >= 0")
+	}
+	if c.ResponseRetentionDays < 0 {
+		return fmt.Errorf("response-retention-days must be >= 0")
 	}
 	if c.QuotaExceededStatus != 429 && c.QuotaExceededStatus != 403 {
 		return fmt.Errorf("quota-exceeded-status must be 429 or 403")

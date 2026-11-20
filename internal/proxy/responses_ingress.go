@@ -18,7 +18,8 @@ package proxy
 //   - 执行顺序（design §5.4.1，顺序不可颠倒）：
 //       1. 读 Responses 原始 body；
 //       2. 解析 model / stream / store / previous_response_id / conversation / background；
-//       3. 有状态前置（本轮无状态：这些字段一律 400）；
+//       3. prepareResponsesState：站点开关取舍、两者互斥、取父行/会话并校验归属（失败 404）、
+//          把父行 items 前置于本轮 input（background 仍 400，属 Task 9）；
 //       4. prepareResponsesTokens：**在转 chat 之前**对 Responses 形态 body 压 max_output_tokens
 //          （enforceMaxTokens 靠请求体形态判定协议，转成 chat 后再压就压不到了）；
 //       5. resolveAndCheckQuota：模型解析 + 配额（**每条路径恰好一次**）；
@@ -31,7 +32,7 @@ package proxy
 //                               再做一次**兜底压制**（正常流下幂等无操作，用于兜住转换器
 //                               未映射 max_output_tokens 的情形，详见该函数内的注释）。
 //   - 「解析 + 配额」每条路径恰好一次（第 5 步），两条路径都不调用 prepareForward。
-//   - 收尾：logUsage（本轮不落库，store 由 Task 8 消费）。
+//   - 收尾：logUsage + store 为 true 时落一行 response_states（流式在流结束后）。
 
 import (
 	"bytes"
@@ -62,13 +63,24 @@ const (
 const (
 	msgResponsesInvalidInput    = "invalid input"
 	msgResponsesInvalidTools    = "invalid tools"
-	msgResponsesPreviousRespID  = "previous_response_id is not supported yet"
-	msgResponsesConversation    = "conversation is not supported yet"
 	msgResponsesBackground      = "background is not supported yet"
 	msgResponsesInvalidUpstream = "invalid upstream response"
+
+	// msgResponsesNotFound 同时用于「行不存在」与「行不属于本用户」：
+	// 两种情形的状态码与响应体必须逐字一致，否则可被用来枚举他人的响应 ID（§5.6 安全）。
+	msgResponsesNotFound = "previous response not found"
+	// msgResponsesStorageDisabled：站点关闭了响应存储（-allow-response-storage=false），
+	// 而客户端显式要求 store:true——明确拒绝，而不是静默改写。
+	msgResponsesStorageDisabled = "response storage is disabled on this gateway"
+	// msgResponsesStatefulDisabled：站点关闭存储时，previous_response_id / conversation 一律不可用。
+	msgResponsesStatefulDisabled = "response storage is disabled on this gateway, previous_response_id and conversation are unavailable"
+	// msgResponsesContinuationConflict：两者互斥（OpenAI 语义）。
+	msgResponsesContinuationConflict = "previous_response_id and conversation are mutually exclusive"
+	// msgResponsesInvalidStore：store 必须是布尔值。
+	msgResponsesInvalidStore = "invalid store"
 )
 
-// handleResponses 处理 POST /v1/responses（本轮只有无状态路径）。
+// handleResponses 处理 POST /v1/responses。
 func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -96,10 +108,11 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	requestedModel := extractRequestedModel(reqBody)
 	isStream, _ := reqBody["stream"].(bool)
 
-	// 3. 有状态前置：本轮无状态，相关字段一律拒绝（Task 8/9 放开）。
-	// store 不在拒绝之列：按 OpenAI 语义缺省 true，本轮接受但不落库。
-	if msg, ok := rejectStatefulResponsesFields(reqBody); !ok {
-		httpx.WriteError(w, http.StatusBadRequest, msg)
+	// 3. 有状态前置：站点开关取舍 → 两者互斥 → 取父行/会话并校验归属 → 历史前置于 input。
+	//    必须早于第 4 步（见 responses_state.go 顶部注释）：拼接只动 input，不动
+	//    max_output_tokens / messages，因此不会让第 4 步的协议形态判定失效。
+	state, ok := h.prepareResponsesState(w, r, key, reqBody)
+	if !ok {
 		return
 	}
 
@@ -120,29 +133,10 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// 6. 按上游协议二选一。
 	if resolved.ModelType == model.ModelTypeResponses {
-		h.forwardResponsesPassthrough(w, r, key, resolved, reqBody, requestedModel, isStream, start)
+		h.forwardResponsesPassthrough(w, r, key, resolved, reqBody, requestedModel, isStream, start, state)
 		return
 	}
-	h.forwardViaChatConversion(w, r, key, resolved, reqBody, requestedModel, isStream, start)
-}
-
-// rejectStatefulResponsesFields 检查本轮不支持的有状态字段，返回对外错误文案。
-//
-// 判定口径：字段出现且非 null 即拒绝。JSON null 视同「未设置」（客户端序列化时常见的空值形态），
-// background:false 这类显式假值同样拒绝——它表达的是「客户端在用它」，静默忽略会误导调用方。
-// previous_response_id / conversation 触发 400 与「本轮无状态」一致；
-// Task 8 的跨用户隔离用例（404 且不泄露存在性）届时替换本用例。
-func rejectStatefulResponsesFields(reqBody map[string]any) (string, bool) {
-	for _, field := range []struct{ key, msg string }{
-		{"previous_response_id", msgResponsesPreviousRespID},
-		{"conversation", msgResponsesConversation},
-		{"background", msgResponsesBackground},
-	} {
-		if v, ok := reqBody[field.key]; ok && v != nil {
-			return field.msg, false
-		}
-	}
-	return "", true
+	h.forwardViaChatConversion(w, r, key, resolved, reqBody, requestedModel, isStream, start, state)
 }
 
 // prepareResponsesTokens 对 Responses 形态的 body 施加密钥 max_output_tokens 上限。
@@ -184,6 +178,7 @@ func (h *Handler) forwardViaChatConversion(
 	requestedModel string,
 	isStream bool,
 	start time.Time,
+	state *responsesStatefulInput,
 ) {
 	respID := newResponsesID()
 	if respID == "" {
@@ -254,6 +249,8 @@ func (h *Handler) forwardViaChatConversion(
 			return
 		}
 		tw.Finish()
+		h.persistResponsesStream(r, key, state, respID, requestedModel, reqBody,
+			tw.responsesStreamTranslator)
 		h.logUsage(key, resolved, streamResultUsage(result), statusCode, start)
 		return
 	}
@@ -297,10 +294,36 @@ func (h *Handler) forwardViaChatConversion(
 		httpx.WriteError(w, http.StatusBadGateway, msgResponsesInvalidUpstream)
 		return
 	}
+	// 回显 store 并落库（响应已完整构造，落库失败不影响本次回包）。
+	out = normalizeResponsesStore(out, state.store)
+	if state.store {
+		var resp map[string]any
+		if json.Unmarshal(out, &resp) == nil {
+			items := buildResponsesItemsSnapshot(state.history, reqBody, responsesOutputItems(resp))
+			h.persistResponsesState(r.Context(), key, respID, state, requestedModel, items, out)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 	h.logUsage(key, resolved, completionResultUsage(result), http.StatusOK, start)
+}
+
+// persistResponsesStream 是转换路径流式收尾时的落库：累积 items 取自翻译器已合成的
+// 终态 output（message + 各 function_call），响应体取自翻译器写出的终态事件。
+func (h *Handler) persistResponsesStream(
+	r *http.Request,
+	key *model.APIKey,
+	state *responsesStatefulInput,
+	respID, requestedModel string,
+	reqBody map[string]any,
+	t *responsesStreamTranslator,
+) {
+	if !state.store {
+		return
+	}
+	items := buildResponsesItemsSnapshot(state.history, reqBody, t.finalOutput())
+	h.persistResponsesStreamState(r.Context(), key, respID, state, requestedModel, items, t.terminal)
 }
 
 // openAIErrorBody 构造 OpenAI 风格的错误体 {"error":{"message","type","code"}}，
@@ -366,6 +389,7 @@ func (h *Handler) forwardResponsesPassthrough(
 	requestedModel string,
 	isStream bool,
 	start time.Time,
+	state *responsesStatefulInput,
 ) {
 	outBody, err := json.Marshal(buildResponsesPassthroughBody(reqBody, resolved.ModelID))
 	if err != nil {
@@ -415,7 +439,13 @@ func (h *Handler) forwardResponsesPassthrough(
 			return
 		}
 		if resp.StatusCode < http.StatusBadRequest {
-			respBody = rewriteResponsesID(respBody, respID)
+			// 改写 id 之后，响应体的 id 与 store 已经是网关口径；落库与回包使用同一份字节。
+			rewritten, parsed := buildResponsesBody(respBody, respID, requestedModel, state.store)
+			respBody = rewritten
+			if state.store && parsed != nil {
+				items := buildResponsesItemsSnapshot(state.history, reqBody, responsesOutputItems(parsed))
+				h.persistResponsesState(r.Context(), key, respID, state, requestedModel, items, respBody)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -441,10 +471,26 @@ func (h *Handler) forwardResponsesPassthrough(
 		flusher:       flusher,
 		gatewayID:     respID,
 		requestedName: requestedModel,
+		store:         state.store,
 	}
 	_, _ = io.Copy(sink, resp.Body)
 	sink.close()
+	if state.store && sink.terminal != nil {
+		items := buildResponsesItemsSnapshot(state.history, reqBody, responsesOutputItems(sink.terminal))
+		h.persistResponsesState(r.Context(), key, respID, state, requestedModel, items,
+			marshalJSONOrEmpty(sink.terminal))
+	}
 	h.logUsage(key, resolved, sink.usage, resp.StatusCode, start)
+}
+
+// marshalJSONOrEmpty 序列化落库用的响应体；失败返回空字节（persistResponsesState 会按 {} 处理）。
+func marshalJSONOrEmpty(v map[string]any) []byte {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		slog.Error("marshal stored responses body failed", "error", err)
+		return nil
+	}
+	return raw
 }
 
 // buildResponsesPassthroughBody 复刻 Responses 请求体，仅替换 model 并强制 store:false。
@@ -480,6 +526,10 @@ type responsesPassthroughStream struct {
 	// event 是当前事件块的 event: 行取值（为空的块按 data.type 判定）。
 	event string
 	usage *provider.Usage
+	// store 是回显给客户端的 store 值（上游一律被改写为 false，客户端看到的必须是网关口径）。
+	store bool
+	// terminal 是终态事件里 response 对象的快照，供有状态路径落库。
+	terminal map[string]any
 }
 
 // Write 实现 io.Writer：按行切分后逐行处理。
@@ -579,26 +629,15 @@ func (s *responsesPassthroughStream) rewriteEvent(payload string) (string, bool)
 			target["model"] = s.requestedName
 		}
 	}
+	target["store"] = s.store
+	if s.store {
+		s.terminal = target
+	}
 	out, err := json.Marshal(ev)
 	if err != nil {
 		return payload, false
 	}
 	return string(out), true
-}
-
-// rewriteResponsesID 改写 JSON 响应体顶层的 id 为网关 ID；模型名回显为客户端请求名。
-// 解析失败时原样返回（直通路径不回退成错误）。
-func rewriteResponsesID(body []byte, respID string) []byte {
-	var resp map[string]any
-	if json.Unmarshal(body, &resp) != nil || resp == nil {
-		return body
-	}
-	resp["id"] = respID
-	out, err := json.Marshal(resp)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 // providerUsageFromResponsesBody 从 Responses 响应体解析用量；无 usage 时返回 nil。

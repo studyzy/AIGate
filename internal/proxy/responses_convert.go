@@ -566,6 +566,10 @@ type responsesStreamTranslator struct {
 	// 收尾用的结束原因与用量。
 	finishReason string
 	usage        map[string]any
+
+	// terminal 是终态事件（response.completed / incomplete / failed）[response] 对象的
+	// JSON 原文：有状态路径据此落库完整响应体（字段为 nil 表示未收到终态事件）。
+	terminal []byte
 }
 
 // responsesStreamItem 是一个流式 output item 的累积状态。
@@ -866,7 +870,13 @@ func (t *responsesStreamTranslator) finalize() {
 		slog.Warn("responses stream: finish_reason=tool_calls but no function_call item was synthesized",
 			"response_id", t.respID, "model", t.model)
 	}
-	t.emit("response.completed", map[string]any{"response": t.responseBody(t.finalStatus(), output)})
+	terminal := t.responseBody(t.finalStatus(), output)
+	// 收尾事件的 response 对象是最终形态的完整响应；缓存其 JSON 原文供有状态路径落库
+	// （与写出的事件同源，避免二次构造出现字段漂移）。编码失败不影响事件写出。
+	if raw, err := json.Marshal(terminal); err == nil {
+		t.terminal = raw
+	}
+	t.emit("response.completed", map[string]any{"response": terminal})
 }
 
 // hasFunctionCallItem 报告是否有任何已合成的 function_call item。

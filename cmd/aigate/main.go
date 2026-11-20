@@ -137,7 +137,14 @@ func run() error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	proxy.NewHandler(store, usage, cfg.QuotaExceededStatus).Register(mux)
+	// Responses 有状态能力：站点级存储开关 + 保留期清理循环（保留期 0 = 永不清理）。
+	proxyHandler := proxy.NewHandler(store, usage, cfg.QuotaExceededStatus)
+	if err := proxyHandler.SetResponseStorage(cfg.AllowResponseStorage); err != nil {
+		return fmt.Errorf("configure response storage: %w", err)
+	}
+	proxyHandler.StartResponseRetention(time.Duration(cfg.ResponseRetentionDays) * 24 * time.Hour)
+	defer proxyHandler.StopResponseRetention()
+	proxyHandler.Register(mux)
 	admin.Register(mux, store)
 	userapi.Register(mux, store)
 
@@ -172,6 +179,10 @@ func run() error {
 			cfg.Timezone,
 			"allow_private_upstreams",
 			cfg.AllowPrivateUpstreams,
+			"allow_response_storage",
+			cfg.AllowResponseStorage,
+			"response_retention_days",
+			cfg.ResponseRetentionDays,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

@@ -510,22 +510,19 @@ func TestResponsesIngress_PassthroughCapsMaxOutputTokens(t *testing.T) {
 // 5. 有状态字段本轮一律 400（Task 8/9 放开）
 // ---------------------------------------------------------------------------
 
-// TestResponsesIngress_StatefulFieldsRejected：previous_response_id / conversation / background
-// 在本轮（无状态）返回 400。
+// TestResponsesIngress_BackgroundRejected：background 仍属 Task 9，本轮一律 400。
 //
-// brief 原定的 TestResponsesIngress_CrossUserIsolation（跨用户 404 且不泄露存在性）
-// 依赖 previous_response_id 已被消费，推迟到 Task 8。
-func TestResponsesIngress_StatefulFieldsRejected(t *testing.T) {
+// Task 8 之前本用例还覆盖 previous_response_id / conversation 的 400——那一对已由
+// 有状态路径实现并放开，验收见 responses_state_test.go（含跨用户隔离与 404 不泄露存在性）。
+func TestResponsesIngress_BackgroundRejected(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
 	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
 
-	cases := map[string]string{
-		"previous_response_id": `{"model":"mock-a","input":"hi","previous_response_id":"resp_deadbeef"}`,
-		"conversation":         `{"model":"mock-a","input":"hi","conversation":"conv_1"}`,
-		"background":           `{"model":"mock-a","input":"hi","background":true}`,
-	}
-	for field, body := range cases {
+	for field, body := range map[string]string{
+		"true":  `{"model":"mock-a","input":"hi","background":true}`,
+		"false": `{"model":"mock-a","input":"hi","background":false}`,
+	} {
 		t.Run(field, func(t *testing.T) {
 			resp := e.postResponses(t, token, body)
 			if resp.StatusCode != http.StatusBadRequest {
@@ -538,12 +535,6 @@ func TestResponsesIngress_StatefulFieldsRejected(t *testing.T) {
 	if e.rec.Calls() != 0 {
 		t.Fatalf("upstream calls = %d, want 0 (rejected requests must not be forwarded)", e.rec.Calls())
 	}
-
-	t.Run("store is accepted and not persisted this round", func(t *testing.T) {
-		resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi","store":true}`)
-		assertStatus(t, resp, http.StatusOK)
-		_ = readBody(t, resp)
-	})
 }
 
 // ---------------------------------------------------------------------------

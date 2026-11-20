@@ -15,12 +15,14 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aigate/internal/event"
@@ -35,14 +37,32 @@ type Handler struct {
 	store               *model.Store
 	usage               *UsageWriter
 	quotaExceededStatus int // 配额超限状态码（429 或 403，默认 429）
+
+	// allowResponseStorage 是 Responses 站点级存储开关（-allow-response-storage，默认 true）。
+	// false 时所有请求按 store:false 处理、显式 store:true 与有状态字段一律 400。
+	// 由 SetResponseStorage 在装配阶段设置，运行期只读，故不需要加锁。
+	allowResponseStorage bool
+
+	// pruneStartOnce / pruneCancel 是保留期清理循环的启停句柄（StartResponseRetention 注册，
+	// StopResponseRetention 取消；未启动时 pruneCancel 为 nil）。
+	pruneStartOnce sync.Once
+	pruneCancel    context.CancelFunc
 }
 
 // NewHandler 创建数据面处理器。quotaExceededStatus 非 429/403 时回退 429。
+//
+// Responses 存储默认开启（与 -allow-response-storage 的默认值一致）；
+// 站点关闭存储与保留期清理分别由 SetResponseStorage / StartResponseRetention 装配。
 func NewHandler(store *model.Store, usage *UsageWriter, quotaExceededStatus int) *Handler {
 	if quotaExceededStatus != 429 && quotaExceededStatus != 403 {
 		quotaExceededStatus = http.StatusTooManyRequests
 	}
-	return &Handler{store: store, usage: usage, quotaExceededStatus: quotaExceededStatus}
+	return &Handler{
+		store:                store,
+		usage:                usage,
+		quotaExceededStatus:  quotaExceededStatus,
+		allowResponseStorage: true,
+	}
 }
 
 // Register 注册数据面路由。
