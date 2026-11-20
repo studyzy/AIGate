@@ -22,12 +22,14 @@ package proxy
 //       4. prepareResponsesTokens：**在转 chat 之前**对 Responses 形态 body 压 max_output_tokens
 //          （enforceMaxTokens 靠请求体形态判定协议，转成 chat 后再压就压不到了）；
 //       5. resolveAndCheckQuota：模型解析 + 配额（**每条路径恰好一次**）；
-//       6. 按 resolved.ModelType 二选一（各自施加本路径唯一的一处上限压制）：
+//       6. 按 resolved.ModelType 二选一：
 //            openai-responses → forwardResponsesPassthrough（格 7，用原始 Responses body，
 //                               仅替换 model、强制 store:false、改写终态 id）；
+//                               上限完全由第 4 步施加。
 //            其余             → forwardViaChatConversion（格 8/9，先 responsesRequestToChat
-//                               转 chat，再由 GetProvider 处理上游差异；转出的 chat 形态
-//                               由 enforceMaxTokens 复压一次密钥上限）。
+//                               转 chat，再由 GetProvider 处理上游差异）；转出的 chat 形态
+//                               再做一次**兜底压制**（正常流下幂等无操作，用于兜住转换器
+//                               未映射 max_output_tokens 的情形，详见该函数内的注释）。
 //   - 「解析 + 配额」每条路径恰好一次（第 5 步），两条路径都不调用 prepareForward。
 //   - 收尾：logUsage（本轮不落库，store 由 Task 8 消费）。
 
@@ -193,10 +195,14 @@ func (h *Handler) forwardViaChatConversion(
 		httpx.WriteError(w, http.StatusBadRequest, responsesConversionMessage(err))
 		return
 	}
-	// 上限在此施加（转换路径上**唯一**一处 max_tokens 压制）：
-	// 第 4 步已把 max_output_tokens 收敛为密钥上限，转换器把它映射成 max_tokens；
-	// 这里对 chat 形态再压一次，兜住转换器未映射 max_output_tokens 的情形，
-	// 并覆盖 max_completion_tokens 等 chat 侧字段。
+	// 兜底压制（**不要当成冗余删掉**）：
+	//   · 正常流下幂等无操作——第 4 步已把 max_output_tokens 收敛为上限，转换器再把它
+	//     映射成 max_tokens，这里压的值与已有值相同；
+	//   · 真实价值在于兜住「转换器漏映射 max_output_tokens」的情形。实测成对变异：
+	//     仅让转换器漏映射（本压制仍在）→ 上游 max_tokens 仍为上限（被这里补上）；
+	//     转换器漏映射 **且** 删掉本压制 → 上游 chat body 里 max_tokens 直接缺失，
+	//     请求等于没有输出预算上限（TestResponsesIngress_ChatUpstreamCapOnlyOnce 变红）；
+	//   · 同时覆盖 max_completion_tokens 等 chat 侧字段。
 	enforceMaxTokens(chatBody, key.MaxTokens)
 	chatBody["model"] = resolved.ModelID
 	body, err := json.Marshal(chatBody)
@@ -269,9 +275,14 @@ func (h *Handler) forwardViaChatConversion(
 		// 与流式路径、直通路径一致：原样回写上游状态码与响应体。
 		// 丢弃上游 body（换成本地拼的 "upstream returned status N"）会让调用方看不到
 		// 真正原因（如 context_length_exceeded），也造成流式/非流式行为不一致。
+		//
+		// 上游没给 body 时才兜底：仍然回 OpenAI 风格错误体（本响应恒定标 application/json，
+		// 回纯文本会让客户端按 JSON 解析失败、错误信息随之丢失）。
 		upstreamBody := []byte(upstreamStatusMessage(statusCode))
 		if result != nil && len(result.Body) > 0 {
 			upstreamBody = result.Body
+		} else if encoded, encodeErr := json.Marshal(openAIErrorBody(upstreamStatusMessage(statusCode), statusCode)); encodeErr == nil {
+			upstreamBody = encoded
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
@@ -290,6 +301,18 @@ func (h *Handler) forwardViaChatConversion(
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 	h.logUsage(key, resolved, completionResultUsage(result), http.StatusOK, start)
+}
+
+// openAIErrorBody 构造 OpenAI 风格的错误体 {"error":{"message","type","code"}}，
+// 与 httpx.WriteError 的结构一致，用于需要自行控制状态码/落盘的场景。
+func openAIErrorBody(message string, statusCode int) map[string]any {
+	return map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "upstream_error",
+			"code":    statusCode,
+		},
+	}
 }
 
 // marshalResponsesChatBody 把（已压制的）Responses 请求体转成 chat 请求体。
@@ -622,7 +645,13 @@ type responsesIngressUsage struct {
 	} `json:"input_tokens_details"`
 }
 
-// randRead 是 crypto/rand.Read 的间接引用（测试可替换以模拟熵源失败）。
+// randRead 是 crypto/rand.Read 的间接引用，**仅作为测试缝**存在：
+// 熵源失败（newResponsesID 返回空串 → 调用方回 500）在生产环境无法稳定复现，
+// 只能靠替换本变量来覆盖那条分支（TestNewResponsesID_ErrorReturnsEmpty）。
+//
+// 生产路径行为不变：仍是同一份 crypto/rand.Read，无额外开销、无状态。
+// 之所以保留包级 var 而不是改成依赖注入：这里只有一个调用点，注入会把
+// newResponsesID 的签名污染到所有调用方；该变量在运行期只读，已由 -race 全量用例验证无竞态。
 var randRead = rand.Read
 
 // newResponsesID 生成网关响应 ID：resp_ + 32 位随机十六进制（crypto/rand）。

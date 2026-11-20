@@ -349,12 +349,56 @@ func TestResponsesIngress_UpstreamErrorBodyPassedThrough(t *testing.T) {
 	}
 }
 
-// TestResponsesIngress_ChatUpstreamCapOnlyOnce：转换路径只经过一道压制，
-// 客户端给的大值既不能透出，也不能被二次改写。
+// TestResponsesIngress_UpstreamErrorWithoutBody：上游返回 4xx 但**没有响应体**时，
+// 网关必须回一个 OpenAI 风格的错误体（{"error":{...}}），而不是一段纯文本。
 //
-// 它锁住两件事：
-//  1. 发往 chat 上游的 max_tokens 恰为密钥上限，客户端的 9000 不得透出；
-//  2. 转换路径全程只有一处施加密钥上限的地方——删掉那处压制（变异 D）本用例即变红。
+// 原因：这条响应恒定带 Content-Type: application/json；若回纯文本，客户端按 JSON 解析会失败，
+// 拿到的错误信息随之丢失。回错误体也保持了「错误响应恒为 {"error":{...}}」的入口契约。
+func TestResponsesIngress_UpstreamErrorWithoutBody(t *testing.T) {
+	e := newEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // 无 body
+	})
+	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postResponses(t, token, `{"model":"mock-a","input":"hi"}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body=%s)", resp.StatusCode, readBody(t, resp))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+
+	body := readBody(t, resp)
+	var eb struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &eb); err != nil {
+		t.Fatalf("body must be JSON when Content-Type is application/json, decode failed: %v (body=%q)", err, body)
+	}
+	if eb.Error.Message == "" {
+		t.Fatalf("error.message must not be empty, body=%q", body)
+	}
+	if eb.Error.Type != "upstream_error" {
+		t.Fatalf("error.type = %q, want %q", eb.Error.Type, "upstream_error")
+	}
+}
+
+// TestResponsesIngress_ChatUpstreamCapOnlyOnce：转换路径上，客户端给的大值既不能透出，
+// 也不能被二次改写；发往 chat 上游的 max_tokens 恰为密钥上限。
+//
+// 判别力边界（重要）：本用例**不能**单独证明转换路径那道兜底压制存在。
+// 正常流下第 4 步已把 max_output_tokens 收敛为上限、转换器再映射成 max_tokens，
+// 因此单删兜底压制（变异 D）时本用例仍然通过——那是两层压制互为掩护，不是缺口：
+//
+//	· 删第 4 步（变异 A）→ 由 TestResponsesIngress_PassthroughCapsMaxOutputTokens 捕获；
+//	· 第 4 步与兜底压制同时删除（A+D）→ 本用例与 KeyMaxTokensCap 同时变红；
+//	· 兜底压制单独存在时的真实价值是兜住「转换器漏映射 max_output_tokens」：
+//	  实测仅在转换器漏映射时上游仍得到上限；转换器漏映射且兜底被删时上游 max_tokens
+//	  直接缺失，本用例变红——那时兜底压制才是唯一在起作用的一道。
 func TestResponsesIngress_ChatUpstreamCapOnlyOnce(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, responsesOKChatBody))
 	m := mustCreateAIModel(t, e.store, newAIModel("mock-a", e.upstream.URL))

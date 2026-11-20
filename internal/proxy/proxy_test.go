@@ -198,9 +198,12 @@ func TestChatCompletions_EnforceMaxTokens(t *testing.T) {
 // Responses 形态（带 max_output_tokens、不带 messages），由 enforceMaxTokens 按
 // 「请求体形态」对待——这正是 fix round 2 引入的判定依据。
 //
-// 当前进度事实（非契约）：生产入口尚未在转换前调用 enforceMaxTokens（design §5.4.1
-// 要求 Responses 入口先压制再转换，Task 8 落地），因此 Responses 形态请求体目前仅由
-// 本测试直接构造。接入入口后这些用例继续作为该路径的回归护栏。
+// 当前事实：生产入口已在转换前施加压制（POST /v1/responses 的 §5.4.1 第 4 步，
+// 见 internal/proxy/responses_ingress.go 的 prepareResponsesTokens）。本测试仍直接构造
+// Responses 形态请求体、走 /v1/chat/completions，是为了**单独**钉住 enforceMaxTokens
+// 受形态驱动的判定，不与 Responses 入口的其他步骤耦合；入口自身的端到端覆盖见
+// responses_ingress_test.go 的 TestResponsesIngress_PassthroughCapsMaxOutputTokens 与
+// TestResponsesIngress_KeyMaxTokensCap。
 // chat 形态由 TestEnforceMaxTokens_ChatShapedMaxOutputTokens 覆盖。
 func TestEnforceMaxTokens_MaxOutputTokens(t *testing.T) {
 	e := newEnv(t, respondConstantJSON(http.StatusOK, okChatBody))
