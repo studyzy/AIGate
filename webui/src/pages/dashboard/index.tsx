@@ -30,6 +30,11 @@ export function DashboardPage() {
     queryFn: () =>
       api<{ rows: UsageSummaryRow[] }>("/admin/usage/summary?group_by=model&start=" + start + "&end=" + end),
   });
+  const byUser = useQuery({
+    queryKey: ["usage-summary", "user", start, end],
+    queryFn: () =>
+      api<{ rows: UsageSummaryRow[] }>("/admin/usage/summary?group_by=user&start=" + start + "&end=" + end),
+  });
   const models = useQuery({ queryKey: ["models"], queryFn: () => api<{ models: AIGateModel[] }>("/admin/models") });
   const keys = useQuery({ queryKey: ["keys"], queryFn: () => api<{ keys: ApiKey[] }>("/admin/keys") });
   const users = useQuery({ queryKey: ["users"], queryFn: () => api<{ users: User[] }>("/admin/users") });
@@ -59,24 +64,37 @@ export function DashboardPage() {
     return map;
   }, [models.data]);
 
+  const userNameByID = useMemo(() => {
+    const map = new Map<number, string>();
+    (users.data?.users ?? []).forEach((u) => map.set(u.id, u.username));
+    return map;
+  }, [users.data]);
+
   const topModels = (byModel.data?.rows ?? [])
     .slice()
     .sort((a, b) => b.total_tokens - a.total_tokens)
     .slice(0, 5);
 
+  const topUsers = (byUser.data?.rows ?? [])
+    .slice()
+    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .slice(0, 5);
+
   const loading = summary.isLoading || models.isLoading || keys.isLoading || users.isLoading;
-  const failed = summary.error ?? models.error ?? keys.error ?? users.error;
+  const failed = summary.error ?? byUser.error ?? models.error ?? keys.error ?? users.error;
 
   return (
     <section>
       <PageHeader
         title={t("nav.dashboard")}
         actions={
-          <Select className="w-40" value={range} onChange={(e) => setRange(e.target.value as Range)}>
+          <span className="w-40">
+          <Select value={range} onChange={(e) => setRange(e.target.value as Range)}>
             <option value="today">{t("dashboard.range.today")}</option>
             <option value="7d">{t("dashboard.range.7d")}</option>
             <option value="30d">{t("dashboard.range.30d")}</option>
           </Select>
+          </span>
         }
       />
       {failed ? <p className="text-sm text-red-600">{failed.message}</p> : null}
@@ -118,20 +136,38 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="mb-3 text-sm font-medium text-slate-700">{t("dashboard.topModels")}</h2>
-            {topModels.length === 0 ? (
-              <p className="text-sm text-slate-500">{t("common.empty")}</p>
-            ) : (
-              <ul className="divide-y divide-slate-100 text-sm">
-                {topModels.map((row) => (
-                  <li key={row.ai_model_id} className="flex items-center justify-between py-2">
-                    <span>{modelNames.get(row.ai_model_id ?? 0) ?? "#" + row.ai_model_id}</span>
-                    <span className="tabular-nums text-slate-600">{formatNumber(row.total_tokens)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <h2 className="mb-3 text-sm font-medium text-slate-700">{t("dashboard.topModels")}</h2>
+              {topModels.length === 0 ? (
+                <p className="text-sm text-slate-500">{t("common.empty")}</p>
+              ) : (
+                <ul className="divide-y divide-slate-100 text-sm">
+                  {topModels.map((row) => (
+                    <li key={row.ai_model_id} className="flex items-center justify-between py-2">
+                      <span>{modelNames.get(row.ai_model_id ?? 0) ?? "#" + row.ai_model_id}</span>
+                      <span className="tabular-nums text-slate-600">{formatNumber(row.total_tokens)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <h2 className="mb-3 text-sm font-medium text-slate-700">{t("dashboard.topUsers")}</h2>
+              {topUsers.length === 0 ? (
+                <p className="text-sm text-slate-500">{t("common.empty")}</p>
+              ) : (
+                <ul className="divide-y divide-slate-100 text-sm">
+                  {topUsers.map((row) => (
+                    <li key={row.user_id} className="flex items-center justify-between py-2">
+                      <span>{userNameByID.get(row.user_id ?? 0) ?? "#" + row.user_id}</span>
+                      <span className="tabular-nums text-slate-600">{formatNumber(row.total_tokens)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
       )}
