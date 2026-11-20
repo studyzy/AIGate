@@ -134,8 +134,8 @@ function SummaryTab({
 
   return (
     <div>
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-sm text-slate-500">{t("usage.groupBy")}</span>
+      <label className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+        {t("usage.groupBy")}
         <Select className="w-36" value={groupBy} onChange={(e) => onChange(e.target.value)}>
           {(["date", "model", "key", "user", "group"] as const).map((g) => (
             <option key={g} value={g}>
@@ -143,7 +143,7 @@ function SummaryTab({
             </option>
           ))}
         </Select>
-      </div>
+      </label>
       {query.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
