@@ -112,6 +112,9 @@ var autoMigrateModels = []any{
 	&Webhook{},
 	&WebhookDelivery{},
 	&ResponseState{},
+	&AIModelPrice{},
+	&BillingCalendarDay{},
+	&CurrencyRate{},
 }
 
 // AutoMigrate 建表（仅用于 SQLite 本地开发；MySQL 生产使用 sql/init.sql）。

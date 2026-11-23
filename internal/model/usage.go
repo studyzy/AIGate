@@ -25,21 +25,31 @@ import (
 
 // LLMUsageLog 请求级用量日志（append-only）。
 type LLMUsageLog struct {
-	ID                     uint      `gorm:"primaryKey"`
-	APIKeyID               uint      `gorm:"not null;default:0;index"`
-	UserID                 uint      `gorm:"not null;default:0;index"`
-	GroupID                uint      `gorm:"not null;default:0;index"`
-	AIModelID              uint      `gorm:"not null;default:0"`
-	Model                  string    `gorm:"size:191;not null;default:''"`
-	Provider               string    `gorm:"size:64;not null;default:''"`
-	PromptTokens           int       `gorm:"not null;default:0"`
-	CompletionTokens       int       `gorm:"not null;default:0"`
-	TotalTokens            int       `gorm:"not null;default:0"`
-	PromptCacheReadTokens  int       `gorm:"not null;default:0"`
-	PromptCacheWriteTokens int       `gorm:"not null;default:0"`
-	StatusCode             int       `gorm:"not null;default:0"`
-	Latency                int       `gorm:"not null;default:0"` // 毫秒
-	CreatedAt              time.Time `gorm:"not null;index"`
+	ID                     uint   `gorm:"primaryKey"`
+	APIKeyID               uint   `gorm:"not null;default:0;index"`
+	UserID                 uint   `gorm:"not null;default:0;index"`
+	GroupID                uint   `gorm:"not null;default:0;index"`
+	AIModelID              uint   `gorm:"not null;default:0"`
+	Model                  string `gorm:"size:191;not null;default:''"`
+	Provider               string `gorm:"size:64;not null;default:''"`
+	PromptTokens           int    `gorm:"not null;default:0"`
+	CompletionTokens       int    `gorm:"not null;default:0"`
+	TotalTokens            int    `gorm:"not null;default:0"`
+	PromptCacheReadTokens  int    `gorm:"not null;default:0"`
+	PromptCacheWriteTokens int    `gorm:"not null;default:0"`
+	StatusCode             int    `gorm:"not null;default:0"`
+	Latency                int    `gorm:"not null;default:0"` // 毫秒
+	// CostVendorMicros 模型币种金额（微元）；币种不在此表冗余，报表关联 ai_models.currency。
+	CostVendorMicros int64 `gorm:"not null;default:0"`
+	// CostPlatformMicros 平台结算币种金额（微元）；记账时刻按汇率定死，之后改汇率不影响历史行。
+	CostPlatformMicros int64     `gorm:"not null;default:0"`
+	CreatedAt          time.Time `gorm:"not null;index"`
+	// ReportedCost 是上游自报的本次请求成本（usage.cost），非持久化：
+	// logUsage 用它把自报值带给 UsageWriter 计价，不落库。
+	ReportedCost *float64 `gorm:"-"`
+	// Currency 是本次请求计价所用币种，非持久化（明细表不冗余币种）：
+	// 仅用于把模型币种带给日聚合的 Currency 列，日聚合按聚合键币种唯一。
+	Currency string `gorm:"-"`
 }
 
 // DailyUsageSummary 按（日期，用户，密钥，模型）聚合的日用量，配额实时查询的数据源。
@@ -56,6 +66,10 @@ type DailyUsageSummary struct {
 	PromptCacheReadTokens  int64     `gorm:"not null;default:0"`
 	PromptCacheWriteTokens int64     `gorm:"not null;default:0"`
 	RequestCount           int64     `gorm:"not null;default:0"`
+	CostVendorMicros       int64     `gorm:"not null;default:0"`
+	CostPlatformMicros     int64     `gorm:"not null;default:0"`
+	// Currency 模型计价币种；聚合键含 ai_model_id，同行币种唯一，存一份便于分组。
+	Currency string `gorm:"size:3;not null;default:''"`
 }
 
 // InsertUsageLog 写入一条请求级用量日志。
@@ -86,11 +100,15 @@ func (s *Store) UpsertDailyUsage(ctx context.Context, entry *LLMUsageLog) error 
 		PromptCacheReadTokens:  int64(entry.PromptCacheReadTokens),
 		PromptCacheWriteTokens: int64(entry.PromptCacheWriteTokens),
 		RequestCount:           1,
+		CostVendorMicros:       entry.CostVendorMicros,
+		CostPlatformMicros:     entry.CostPlatformMicros,
+		Currency:               entry.Currency,
 	}
 	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"}, {Name: "user_id"}, {Name: "api_key_id"}, {Name: "ai_model_id"},
 		},
+		// currency 不在累加列里：聚合键已含 ai_model_id，同一行币种唯一，首写即定。
 		DoUpdates: clause.Assignments(map[string]any{
 			"prompt_tokens":             gorm.Expr("prompt_tokens + ?", entry.PromptTokens),
 			"completion_tokens":         gorm.Expr("completion_tokens + ?", entry.CompletionTokens),
@@ -98,6 +116,8 @@ func (s *Store) UpsertDailyUsage(ctx context.Context, entry *LLMUsageLog) error 
 			"prompt_cache_read_tokens":  gorm.Expr("prompt_cache_read_tokens + ?", entry.PromptCacheReadTokens),
 			"prompt_cache_write_tokens": gorm.Expr("prompt_cache_write_tokens + ?", entry.PromptCacheWriteTokens),
 			"request_count":             gorm.Expr("request_count + 1"),
+			"cost_vendor_micros":        gorm.Expr("cost_vendor_micros + ?", entry.CostVendorMicros),
+			"cost_platform_micros":      gorm.Expr("cost_platform_micros + ?", entry.CostPlatformMicros),
 		}),
 	}).Create(&row).Error
 	if err != nil {
@@ -185,6 +205,21 @@ func (s *Store) SumModelDailyTokens(ctx context.Context, aiModelID uint) (int64,
 	return total, nil
 }
 
+// SumUsageCostMicrosInWindow 统计过滤条件命中的用量明细在 [from, to) 的平台结算币种金额（微元）。
+// 明细表的金额列即记账时刻定死的值，配额路径据此与 cost 限额比较。
+func (s *Store) SumUsageCostMicrosInWindow(ctx context.Context, f UsageFilter, from time.Time, to *time.Time) (int64, error) {
+	q := s.applyUsageFilter(s.db.WithContext(ctx).Model(&LLMUsageLog{}), f, "created_at").
+		Where("created_at >= ?", from)
+	if to != nil {
+		q = q.Where("created_at < ?", *to)
+	}
+	var total int64
+	if err := q.Select("COALESCE(SUM(cost_platform_micros), 0)").Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum usage cost micros: %w", err)
+	}
+	return total, nil
+}
+
 // ---- 用量查询（管理面 / 用户面） ----
 
 // UsageFilter 用量查询过滤条件；日期为业务时区日期标签（含首含尾）。
@@ -210,6 +245,10 @@ type UsageSummaryRow struct {
 	PromptCacheReadTokens  int64      `json:"prompt_cache_read_tokens"`
 	PromptCacheWriteTokens int64      `json:"prompt_cache_write_tokens"`
 	RequestCount           int64      `json:"request_count"`
+	// Currency 仅在 group_by=model 时唯一有意义；跨模型聚合时可能混合，由上层标记。
+	Currency           string `json:"currency,omitempty"`
+	CostVendorMicros   int64  `json:"cost_vendor_micros"`
+	CostPlatformMicros int64  `json:"cost_platform_micros"`
 }
 
 const usageSumSelect = "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
@@ -217,7 +256,10 @@ const usageSumSelect = "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
 	"COALESCE(SUM(total_tokens), 0) AS total_tokens, " +
 	"COALESCE(SUM(prompt_cache_read_tokens), 0) AS prompt_cache_read_tokens, " +
 	"COALESCE(SUM(prompt_cache_write_tokens), 0) AS prompt_cache_write_tokens, " +
-	"COALESCE(SUM(request_count), 0) AS request_count"
+	"COALESCE(SUM(request_count), 0) AS request_count, " +
+	"COALESCE(SUM(cost_vendor_micros), 0) AS cost_vendor_micros, " +
+	"COALESCE(SUM(cost_platform_micros), 0) AS cost_platform_micros, " +
+	"COALESCE(MAX(currency), '') AS currency"
 
 // QueryUsageSummary 按 groupBy（date | model | key | user）聚合日用量表；groupBy 非法时按 date。
 func (s *Store) QueryUsageSummary(ctx context.Context, f UsageFilter, groupBy string) ([]UsageSummaryRow, error) {

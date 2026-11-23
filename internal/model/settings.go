@@ -45,12 +45,16 @@ type Setting struct {
 	DefaultTokenQuotaRules string    `gorm:"type:text;not null"` // 全局默认用户配额规则（M2）
 	GlobalTokenQuotaRules  string    `gorm:"type:text;not null"` // 全站/按组全局配额规则（M2）
 	GlobalQuotaScope       string    `gorm:"size:16;not null;default:'site'"`
-	UserKeyLimit           int       `gorm:"not null;default:5"` // 普通用户可创建的密钥数上限；0 = 不限
+	UserKeyLimit           int       `gorm:"not null;default:5"`            // 普通用户可创建的密钥数上限；0 = 不限
+	PlatformCurrency       string    `gorm:"size:3;not null;default:'CNY'"` // 平台结算币种（ISO 4217），全局唯一
 	UpdatedAt              time.Time `gorm:"not null"`
 }
 
 // 用户密钥数上限默认值（0 表示不限）。
 const DefaultUserKeyLimit = 5
+
+// DefaultPlatformCurrency 平台结算币种默认值（人民币）。
+const DefaultPlatformCurrency = "CNY"
 
 // GetSettings 读取全局设置（不存在时以默认值创建；并发首建冲突时回读）。
 func (s *Store) GetSettings(ctx context.Context) (*Setting, error) {
@@ -68,6 +72,7 @@ func (s *Store) GetSettings(ctx context.Context) (*Setting, error) {
 		GlobalTokenQuotaRules:  "[]",
 		GlobalQuotaScope:       "site",
 		UserKeyLimit:           DefaultUserKeyLimit,
+		PlatformCurrency:       DefaultPlatformCurrency,
 	}
 	if err := s.db.WithContext(ctx).Create(&st).Error; err != nil {
 		// 两个请求同时未命中时会并发首建，其中一个撞主键冲突：回读一次即成功。

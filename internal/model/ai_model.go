@@ -69,7 +69,13 @@ type AIModel struct {
 	//   - false：使用模型共享密钥（credential 引用或 api_key），绑定行密钥被忽略；
 	//   - true：不保存共享密钥，转发密钥只取密钥绑定行（api_key_models.api_key），缺则不可解析。
 	// 创建时确定，不允许变更。
-	UserKeyRequired bool      `gorm:"not null;default:false"`
+	UserKeyRequired bool `gorm:"not null;default:false"`
+	// Currency 模型计价币种（ISO 4217 三位大写）；空串表示未配置，不参与金额记账。
+	Currency string `gorm:"size:3;not null;default:''"`
+	// EnablePeakPricing 是否启用峰谷定价；关闭时所有请求都按 offpeak_* 三列计价。
+	EnablePeakPricing bool `gorm:"not null;default:false"`
+	// UseUpstreamCost 是否优先采信上游自报的 usage.cost（>0 时直接采信，不再自算）。
+	UseUpstreamCost bool      `gorm:"not null;default:true"`
 	CreatedAt       time.Time `gorm:"not null"`
 	UpdatedAt       time.Time `gorm:"not null"`
 }
@@ -154,7 +160,7 @@ func (s *Store) UpdateAIModel(ctx context.Context, id uint, fields map[string]an
 	return s.GetAIModel(ctx, id)
 }
 
-// DeleteAIModel 删除模型并清理其密钥绑定（单事务）。
+// DeleteAIModel 删除模型并清理其密钥绑定与价目快照（单事务）。
 // 与来源仓库语义一致：若被删模型是某密钥的 primary 且该密钥仍绑定其他模型，
 // 先把剩余绑定中 sort_order 最小（并列取 id 最小）者提升为 primary，再清理绑定。
 func (s *Store) DeleteAIModel(ctx context.Context, id uint) error {
@@ -164,6 +170,10 @@ func (s *Store) DeleteAIModel(ctx context.Context, id uint) error {
 		}
 		if err := tx.Where("ai_model_id = ?", id).Delete(&APIKeyModel{}).Error; err != nil {
 			return fmt.Errorf("delete model bindings: %w", err)
+		}
+		// 价目快照随模型一起删除，避免留下无人引用、也不会再被计价读取的历史行。
+		if err := tx.Where("ai_model_id = ?", id).Delete(&AIModelPrice{}).Error; err != nil {
+			return fmt.Errorf("delete model prices: %w", err)
 		}
 		if err := tx.Delete(&AIModel{}, id).Error; err != nil {
 			return fmt.Errorf("delete ai model: %w", err)
