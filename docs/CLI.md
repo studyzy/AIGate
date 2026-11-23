@@ -2,8 +2,8 @@
 
 [English](CLI.md) | [简体中文](CLI.zh-CN.md)
 
-`aigatectl` is the AIGate management CLI. It turns the **53 endpoints** of the admin
-plane (`/admin/*`), the user plane (`/api/user/*`), `GET /healthz` and `GET /version` into 53 stable
+`aigatectl` is the AIGate management CLI. It turns the **62 endpoints** of the admin
+plane (`/admin/*`), the user plane (`/api/user/*`), `GET /healthz` and `GET /version` into 62 stable
 commands: one command per endpoint, no workflow orchestration, and no wrapping of the
 data-plane `/v1/*` inference endpoints. Response bodies are written to stdout verbatim,
 diagnostics go only to stderr, and exit codes are fixed so shell scripts, `make`, and CI
@@ -45,7 +45,7 @@ URL is rejected locally with exit code 2.
 | `--url <url>` | `AIGATE_URL` | `http://127.0.0.1:8080` | Gateway root address |
 | `--timeout <duration>` | — | `30s` | Whole-request timeout (`time.Duration` text); raise it for `usage export` and `models connectivity` |
 | `--data <json\|@file\|->` | — | (none) | Request body; see §6 |
-| `--id <positive int>` | — | (none) | Path parameter; must be a positive integer |
+| `--id <positive int>` | — | (none) | Path parameter; must be a positive integer except on `calendar delete`, where it is the `YYYY-MM-DD` date |
 
 **Credentials are read only from the environment.** The CLI offers no `--token`-style
 flag, and tokens never enter argv, `ps` output, or logs.
@@ -75,11 +75,11 @@ aigatectl self keys --help             # subgroup: list/get/create/update/delete
 more action token, so those command names have three tokens (e.g. `self usage summary`,
 `self keys list`).
 
-## 3. Command reference (53 commands)
+## 3. Command reference (62 commands)
 
 Each row gives two equivalent notations: a backticked `METHOD /path` endpoint token, and —
 after the arrow — the equivalent request-line form with the method plus a backticked path.
-The command table is kept in sync with the 53 endpoints of `docs/openapi.yaml` (no `/v1/*`).
+The command table is kept in sync with the 62 endpoints of `docs/openapi.yaml` (no `/v1/*`).
 There is no `GET /admin/users/{id}`, so no `users get` command exists.
 
 | # | Command | Method · path | Example |
@@ -123,28 +123,37 @@ There is no `GET /admin/users/{id}`, so no `users get` command exists.
 | 37 | `webhooks delete` | `DELETE /admin/webhooks/{id}` → DELETE `/admin/webhooks/{id}` | `aigatectl webhooks delete --id 1` |
 | 38 | `webhooks deliveries` | `GET /admin/webhooks/{id}/deliveries` → GET `/admin/webhooks/{id}/deliveries` | `aigatectl webhooks deliveries --id 1 --page 1` |
 | 39 | `import run` | `POST /admin/import` → POST `/admin/import` | `aigatectl import run --data @import.json` |
-| 40 | `self me` | `GET /api/user/me` → GET `/api/user/me` | `aigatectl self me` |
-| 41 | `self quota` | `GET /api/user/quota` → GET `/api/user/quota` | `aigatectl self quota` |
-| 42 | `self usage summary` | `GET /api/user/usage/summary` → GET `/api/user/usage/summary` | `aigatectl self usage summary` |
-| 43 | `self usage logs` | `GET /api/user/usage/logs` → GET `/api/user/usage/logs` | `aigatectl self usage logs` |
-| 44 | `self usage by-model` | `GET /api/user/usage/by-model` → GET `/api/user/usage/by-model` | `aigatectl self usage by-model` |
-| 45 | `self keys list` | `GET /api/user/keys` → GET `/api/user/keys` | `aigatectl self keys list` |
-| 46 | `self keys get` | `GET /api/user/keys/{id}` → GET `/api/user/keys/{id}` | `aigatectl self keys get --id 1` |
-| 47 | `self keys create` | `POST /api/user/keys` → POST `/api/user/keys` | `aigatectl self keys create --data @key.json` |
-| 48 | `self keys update` | `PUT /api/user/keys/{id}` → PUT `/api/user/keys/{id}` | `aigatectl self keys update --id 1 --data @key.json` |
-| 49 | `self keys delete` | `DELETE /api/user/keys/{id}` → DELETE `/api/user/keys/{id}` | `aigatectl self keys delete --id 1` |
-| 50 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
-| 51 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
-| 52 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
-| 53 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
+| 40 | `prices list` | `GET /admin/models/{id}/prices` → GET `/admin/models/{id}/prices` | `aigatectl prices list --id 1` |
+| 41 | `prices create` | `POST /admin/models/{id}/prices` → POST `/admin/models/{id}/prices` | `aigatectl prices create --id 1 --data @price.json` |
+| 42 | `prices delete` | `DELETE /admin/model-prices/{id}` → DELETE `/admin/model-prices/{id}` | `aigatectl prices delete --id 7` |
+| 43 | `calendar list` | `GET /admin/billing-calendar` → GET `/admin/billing-calendar` | `aigatectl calendar list --year 2026` |
+| 44 | `calendar set` | `PUT /admin/billing-calendar` → PUT `/admin/billing-calendar` | `aigatectl calendar set --data @days.json` |
+| 45 | `calendar delete` | `DELETE /admin/billing-calendar/{date}` → DELETE `/admin/billing-calendar/{date}` | `aigatectl calendar delete --id 2026-10-01` |
+| 46 | `rates list` | `GET /admin/currency-rates` → GET `/admin/currency-rates` | `aigatectl rates list --from USD --to CNY` |
+| 47 | `rates create` | `POST /admin/currency-rates` → POST `/admin/currency-rates` | `aigatectl rates create --data @rate.json` |
+| 48 | `rates delete` | `DELETE /admin/currency-rates/{id}` → DELETE `/admin/currency-rates/{id}` | `aigatectl rates delete --id 3` |
+| 49 | `self me` | `GET /api/user/me` → GET `/api/user/me` | `aigatectl self me` |
+| 50 | `self quota` | `GET /api/user/quota` → GET `/api/user/quota` | `aigatectl self quota` |
+| 51 | `self usage summary` | `GET /api/user/usage/summary` → GET `/api/user/usage/summary` | `aigatectl self usage summary` |
+| 52 | `self usage logs` | `GET /api/user/usage/logs` → GET `/api/user/usage/logs` | `aigatectl self usage logs` |
+| 53 | `self usage by-model` | `GET /api/user/usage/by-model` → GET `/api/user/usage/by-model` | `aigatectl self usage by-model` |
+| 54 | `self keys list` | `GET /api/user/keys` → GET `/api/user/keys` | `aigatectl self keys list` |
+| 55 | `self keys get` | `GET /api/user/keys/{id}` → GET `/api/user/keys/{id}` | `aigatectl self keys get --id 1` |
+| 56 | `self keys create` | `POST /api/user/keys` → POST `/api/user/keys` | `aigatectl self keys create --data @key.json` |
+| 57 | `self keys update` | `PUT /api/user/keys/{id}` → PUT `/api/user/keys/{id}` | `aigatectl self keys update --id 1 --data @key.json` |
+| 58 | `self keys delete` | `DELETE /api/user/keys/{id}` → DELETE `/api/user/keys/{id}` | `aigatectl self keys delete --id 1` |
+| 59 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
+| 60 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
+| 61 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
+| 62 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
 
 `health` is a single-token command (`aigatectl health`) and needs no credentials; every
 other command uses two tokens `<resource> <command>` (three for `self` subgroups). The
-local commands `version` and `--help` are not counted among these 53 HTTP commands.
+local commands `version` and `--help` are not counted among these 62 HTTP commands.
 
 ## 4. Query flags
 
-Only the following 15 commands accept query flags; parameters not declared in the contract
+Only the following 17 commands accept query flags; parameters not declared in the contract
 are never exposed. Flag names use hyphens and are converted to underscores when sent
 (e.g. `--group-by` → `group_by`); values are passed through without business validation.
 
@@ -154,6 +163,8 @@ are never exposed. Flag names use hyphens and are converted to underscores when 
 | `usage logs` | `GET /admin/usage/logs` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id`, `--page`, `--page-size` |
 | `usage summary` | `GET /admin/usage/summary` | `--group-by`, `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id` |
 | `webhooks deliveries` | `GET /admin/webhooks/{id}/deliveries` | `--page`, `--page-size` |
+| `calendar list` | `GET /admin/billing-calendar` | `--year` |
+| `rates list` | `GET /admin/currency-rates` | `--from`, `--to` |
 | `self quota` | `GET /api/user/quota` | `--user-id` |
 | `self usage by-model` | `GET /api/user/usage/by-model` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id` |
 | `self usage logs` | `GET /api/user/usage/logs` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id`, `--page`, `--page-size` |
@@ -172,6 +183,9 @@ Key points:
 - `--page` / `--page-size` appear only on `usage logs`, `self usage logs`, and
   `webhooks deliveries`.
 - `--format` appears only on `usage export`.
+- `--year` (a 4-digit year; omitted means the current business year) appears only on
+  `calendar list`; `--from` / `--to` (ISO 4217 codes) appear only on `rates list` and are
+  required by the server — omitting one is reported by the gateway as a 400.
 - Every `self keys *` command accepts `--user-id`; `self keys usage` accepts only
   `--start` / `--end` / `--user-id` in addition, and does not expose `--group-id`,
   `--api-key-id`, or `--ai-model-id`.
@@ -183,7 +197,7 @@ Key points:
 | Code | Meaning | Trigger |
 |---|---|---|
 | `0` | Success | HTTP 2xx (including `models connectivity` with `ok:false` and a partial `import run` failure); `--help` and `version` also return 0 |
-| `2` | Usage / local error | Flag parse failure, unknown command, invalid `--id` / `--url`, missing token, `--data` file-read or JSON parse failure |
+| `2` | Usage / local error | Flag parse failure, unknown command, invalid `--id` / `--url`, missing token, `--data` file-read or JSON parse failure; `calendar delete` rejects an empty `--id`, one containing `/`, `?`, `#`, or the segments `.` / `..` |
 | `3` | Authentication / authorization failure | Remote 401 / 403 |
 | `4` | Remote business error | Any other non-2xx (400/404/409/413/429/5xx, etc.) |
 | `5` | Transport error | DNS / connect / TLS / timeout / response-body read failure |
@@ -236,5 +250,12 @@ cat credential.json | aigatectl credentials create --data -     # or read from s
   unreachable or returns non-2xx, stdout stays empty (or carries only the verbatim error
   body rules above) and the failure is reported on stderr, so piping to `jq` never sees a
   stray header line.
+- `prices list` / `prices create` take the **model** id, while `prices delete` takes the
+  **price-row** id (`/admin/model-prices/{id}`); the two are not interchangeable.
+- `calendar delete --id` is the only command whose `--id` is not a positive integer: it is
+  a `YYYY-MM-DD` date string sent verbatim as a single path segment. Every other command
+  still rejects a non-integer `--id` locally before dispatch.
+- `rates list` requires both `--from` and `--to`; the CLI forwards whatever is given and
+  the gateway validates the currency codes (`400` on a missing or malformed pair).
 - 2xx response bodies are written to stdout verbatim (no parsing, reordering, or
   decoration); diagnostics for non-2xx go only to stderr.

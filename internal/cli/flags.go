@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path"
 	"strings"
 
 	"aigate/internal/client"
@@ -59,14 +60,44 @@ func execRequest(ctx *Context, argv []string, req client.Request, names ...strin
 	return Exec(ctx, req)
 }
 
-// requireID 校验 --id 是否已显式给出。未给出时写英文诊断并返回 false，调用方
-// 据此返回退出码 2，避免把零值 0 拼进资源路径造成 /.../0 的伪请求。
+// requireID 校验 --id 是否已显式给出且为正整数。未给出或解析失败时写英文诊断
+// 并返回 false，调用方据此返回退出码 2，避免把零值 0 拼进资源路径造成 /.../0 的偽请求。
 func requireID(ctx *Context) bool {
-	if ctx.IDSet {
-		return true
+	if !ctx.IDSet {
+		localError(ctx.Stderr, errors.New("missing required --id (see --help)"))
+		return false
 	}
-	localError(ctx.Stderr, errors.New("missing required --id (see --help)"))
-	return false
+	if ctx.IDErr != nil {
+		localError(ctx.Stderr, ctx.IDErr)
+		return false
+	}
+	return true
+}
+
+// execPathRequest 供路径段是字符串（而非正整数 id）的命令使用，如按 YYYY-MM-DD
+// 删除计息日历某天。prefix 是域名之后的固定路径前缀，--id 原样拼在其后作为唯一的
+// 末段；为避免越出单段路径，值不得为空、不得含 '/'、不能是 '..'（会被解析成上级
+// 目录），也不接受 query/fragment 起始字符。不合法时写英文诊断并返回 2 且不发请求；
+// 合法值时沿用与 execIDRequest 相同的 flag 解析与 Exec 编排。
+func execPathRequest(ctx *Context, argv []string, prefix string, req client.Request, names ...string) int {
+	if !ctx.IDSet {
+		return localError(ctx.Stderr, errors.New("missing required --id (see --help)"))
+	}
+	seg := ctx.IDRaw
+	if !validPathSegment(seg) {
+		return localError(ctx.Stderr, fmt.Errorf("invalid --id %q: must be a single path segment", seg))
+	}
+	req.Path = prefix + seg
+	return execRequest(ctx, argv, req, names...)
+}
+
+// validPathSegment 判断 s 能否作为 URL 路径的单个段原样发送：非空、不是 "." 或
+// ".."（会被解析成当前/上级目录）、不含 '/?#'，且经 path.Clean 后仍等于自身。
+func validPathSegment(s string) bool {
+	if s == "" || strings.ContainsAny(s, "/?#") {
+		return false
+	}
+	return s != "." && s != ".." && path.Clean(s) == s
 }
 
 // execIDRequest 供带 id 的命令使用：先经 requireID 校验 --id，再走 execRequest

@@ -3,7 +3,7 @@
 [English](CLI.md) | [简体中文](CLI.zh-CN.md)
 
 `aigatectl` 是 AIGate 的管控命令行工具。它把管理面 `/admin/*`、用户面 `/api/user/*`
-与 `GET /healthz`、`GET /version` 共 **53 个端点** 变成 53 条稳定命令：命令与端点 1:1，不做工作流编排，
+与 `GET /healthz`、`GET /version` 共 **62 个端点** 变成 62 条稳定命令：命令与端点 1:1，不做工作流编排，
 也不封装数据面 `/v1/*` 推理入口。响应体原样写到 stdout，诊断信息只写 stderr，退出码固定，
 便于 shell 脚本、`make` 与 CI 直接调用。服务端一行未改：AIGate 仍是纯 API 服务。
 
@@ -42,7 +42,7 @@ aigatectl [global flags] <resource> <command> [flags]
 | `--url <url>` | `AIGATE_URL` | `http://127.0.0.1:8080` | 网关根地址 |
 | `--timeout <duration>` | — | `30s` | 整请求超时（`time.Duration` 文本）；`usage export`、`models connectivity` 可调大 |
 | `--data <json\|@file\|->` | — | （无） | 请求体，见 §6 |
-| `--id <positive int>` | — | （无） | 路径参数，必须为正整数 |
+| `--id <positive int>` | — | （无） | 路径参数，必须为正整数；唯一例外是 `calendar delete`，其 `--id` 是 `YYYY-MM-DD` 日期 |
 
 **凭据只从环境变量读取**：CLI 不提供 `--token` 之类的 flag，token 绝不进入 argv、
 `ps` 输出或日志。
@@ -70,10 +70,10 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 `--help` 可写为 `-h`。`self` 的两个子组 `usage`、`keys` 需要再取一级动作，因此命令名是
 三个 token（如 `self usage summary`、`self keys list`）。
 
-## 3. 命令总表（53 条）
+## 3. 命令总表（62 条）
 
 每行给出两种等价写法：反引号包裹的 `METHOD /path` 端点标记，以及箭头后「方法 +
-反引号路径」的请求行写法；命令表与 `docs/openapi.yaml` 的 53 个端点（不含 `/v1/*`）保持一致。
+反引号路径」的请求行写法；命令表与 `docs/openapi.yaml` 的 62 个端点（不含 `/v1/*`）保持一致。
 管理面没有 `GET /admin/users/{id}`，因此不提供 `users get`。
 
 | # | 命令 | 方法 · 路径 | 示例 |
@@ -117,28 +117,37 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 | 37 | `webhooks delete` | `DELETE /admin/webhooks/{id}` → DELETE `/admin/webhooks/{id}` | `aigatectl webhooks delete --id 1` |
 | 38 | `webhooks deliveries` | `GET /admin/webhooks/{id}/deliveries` → GET `/admin/webhooks/{id}/deliveries` | `aigatectl webhooks deliveries --id 1 --page 1` |
 | 39 | `import run` | `POST /admin/import` → POST `/admin/import` | `aigatectl import run --data @import.json` |
-| 40 | `self me` | `GET /api/user/me` → GET `/api/user/me` | `aigatectl self me` |
-| 41 | `self quota` | `GET /api/user/quota` → GET `/api/user/quota` | `aigatectl self quota` |
-| 42 | `self usage summary` | `GET /api/user/usage/summary` → GET `/api/user/usage/summary` | `aigatectl self usage summary` |
-| 43 | `self usage logs` | `GET /api/user/usage/logs` → GET `/api/user/usage/logs` | `aigatectl self usage logs` |
-| 44 | `self usage by-model` | `GET /api/user/usage/by-model` → GET `/api/user/usage/by-model` | `aigatectl self usage by-model` |
-| 45 | `self keys list` | `GET /api/user/keys` → GET `/api/user/keys` | `aigatectl self keys list` |
-| 46 | `self keys get` | `GET /api/user/keys/{id}` → GET `/api/user/keys/{id}` | `aigatectl self keys get --id 1` |
-| 47 | `self keys create` | `POST /api/user/keys` → POST `/api/user/keys` | `aigatectl self keys create --data @key.json` |
-| 48 | `self keys update` | `PUT /api/user/keys/{id}` → PUT `/api/user/keys/{id}` | `aigatectl self keys update --id 1 --data @key.json` |
-| 49 | `self keys delete` | `DELETE /api/user/keys/{id}` → DELETE `/api/user/keys/{id}` | `aigatectl self keys delete --id 1` |
-| 50 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
-| 51 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
-| 52 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
-| 53 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
+| 40 | `prices list` | `GET /admin/models/{id}/prices` → GET `/admin/models/{id}/prices` | `aigatectl prices list --id 1` |
+| 41 | `prices create` | `POST /admin/models/{id}/prices` → POST `/admin/models/{id}/prices` | `aigatectl prices create --id 1 --data @price.json` |
+| 42 | `prices delete` | `DELETE /admin/model-prices/{id}` → DELETE `/admin/model-prices/{id}` | `aigatectl prices delete --id 7` |
+| 43 | `calendar list` | `GET /admin/billing-calendar` → GET `/admin/billing-calendar` | `aigatectl calendar list --year 2026` |
+| 44 | `calendar set` | `PUT /admin/billing-calendar` → PUT `/admin/billing-calendar` | `aigatectl calendar set --data @days.json` |
+| 45 | `calendar delete` | `DELETE /admin/billing-calendar/{date}` → DELETE `/admin/billing-calendar/{date}` | `aigatectl calendar delete --id 2026-10-01` |
+| 46 | `rates list` | `GET /admin/currency-rates` → GET `/admin/currency-rates` | `aigatectl rates list --from USD --to CNY` |
+| 47 | `rates create` | `POST /admin/currency-rates` → POST `/admin/currency-rates` | `aigatectl rates create --data @rate.json` |
+| 48 | `rates delete` | `DELETE /admin/currency-rates/{id}` → DELETE `/admin/currency-rates/{id}` | `aigatectl rates delete --id 3` |
+| 49 | `self me` | `GET /api/user/me` → GET `/api/user/me` | `aigatectl self me` |
+| 50 | `self quota` | `GET /api/user/quota` → GET `/api/user/quota` | `aigatectl self quota` |
+| 51 | `self usage summary` | `GET /api/user/usage/summary` → GET `/api/user/usage/summary` | `aigatectl self usage summary` |
+| 52 | `self usage logs` | `GET /api/user/usage/logs` → GET `/api/user/usage/logs` | `aigatectl self usage logs` |
+| 53 | `self usage by-model` | `GET /api/user/usage/by-model` → GET `/api/user/usage/by-model` | `aigatectl self usage by-model` |
+| 54 | `self keys list` | `GET /api/user/keys` → GET `/api/user/keys` | `aigatectl self keys list` |
+| 55 | `self keys get` | `GET /api/user/keys/{id}` → GET `/api/user/keys/{id}` | `aigatectl self keys get --id 1` |
+| 56 | `self keys create` | `POST /api/user/keys` → POST `/api/user/keys` | `aigatectl self keys create --data @key.json` |
+| 57 | `self keys update` | `PUT /api/user/keys/{id}` → PUT `/api/user/keys/{id}` | `aigatectl self keys update --id 1 --data @key.json` |
+| 58 | `self keys delete` | `DELETE /api/user/keys/{id}` → DELETE `/api/user/keys/{id}` | `aigatectl self keys delete --id 1` |
+| 59 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
+| 60 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
+| 61 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
+| 62 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
 
 `health` 是单 token 命令（`aigatectl health`），不需要任何凭据；其余命令为
 `<resource> <command>` 两级（`self` 子组为三级）。本地命令 `version` 与 `--help`
-不计入这 53 条 HTTP 命令。
+不计入这 62 条 HTTP 命令。
 
 ## 4. 查询参数（query flag）
 
-只有下列 15 条命令接受查询 flag；契约未声明的参数一律不暴露。flag 名用连字符，
+只有下列 17 条命令接受查询 flag；契约未声明的参数一律不暴露。flag 名用连字符，
 发送时转换为下划线形式（如 `--group-by` → `group_by`）；值不做业务校验，交给服务端。
 
 | CLI 命令 | 方法 · 路径 | 允许的 query flag |
@@ -147,6 +156,8 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 | `usage logs` | `GET /admin/usage/logs` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id`, `--page`, `--page-size` |
 | `usage summary` | `GET /admin/usage/summary` | `--group-by`, `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id` |
 | `webhooks deliveries` | `GET /admin/webhooks/{id}/deliveries` | `--page`, `--page-size` |
+| `calendar list` | `GET /admin/billing-calendar` | `--year` |
+| `rates list` | `GET /admin/currency-rates` | `--from`, `--to` |
 | `self quota` | `GET /api/user/quota` | `--user-id` |
 | `self usage by-model` | `GET /api/user/usage/by-model` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id` |
 | `self usage logs` | `GET /api/user/usage/logs` | `--start`, `--end`, `--user-id`, `--group-id`, `--api-key-id`, `--ai-model-id`, `--page`, `--page-size` |
@@ -164,6 +175,9 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 - `--group-by` 只出现在 `usage summary` 与 `self usage summary` 两条命令上。
 - `--page` / `--page-size` 只出现在 `usage logs`、`self usage logs`、`webhooks deliveries` 上。
 - `--format` 只出现在 `usage export` 上。
+- `--year`（4 位年份，缺省按当前业务年度）只出现在 `calendar list` 上；
+  `--from` / `--to`（ISO 4217 币种）只出现在 `rates list` 上，二者服务端均为必填，
+  缺一个由网关返回 400。
 - `self keys *` 全部接受 `--user-id`；其中 `self keys usage` 只额外接受
   `--start` / `--end` / `--user-id`，不暴露 `--group-id` / `--api-key-id` / `--ai-model-id`。
 - 其余命令不接受任何 query flag，其 argv 只允许为空或仅含命令自身的参数。
@@ -173,7 +187,7 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 | 码 | 含义 | 触发 |
 |---|---|---|
 | `0` | 成功 | HTTP 2xx（含 `models connectivity` 的 `ok:false` 与 `import run` 的部分失败）；`--help`、`version` 也为 0 |
-| `2` | 用法/本地错误 | flag 解析失败、未知命令、非法 `--id` / `--url`、缺少 token、`--data` 读文件/JSON 解析失败 |
+| `2` | 用法/本地错误 | flag 解析失败、未知命令、非法 `--id` / `--url`、缺少 token、`--data` 读文件/JSON 解析失败；`calendar delete` 额外拒绝空 `--id`、含 `/`、`?`、`#` 的值，以及 `.` / `..` 路径段 |
 | `3` | 鉴权/授权失败 | 远端 401 / 403 |
 | `4` | 远端业务错误 | 其它非 2xx（400/404/409/413/429/5xx 等） |
 | `5` | 传输错误 | DNS / 连接 / TLS / 超时 / 响应体读取失败 |
@@ -216,4 +230,10 @@ cat credential.json | aigatectl credentials create --data -     # 或从 stdin �
   请求与 JSON 输出完全相同，只是先加一行标明本地二进制版本与所查询的网关地址，
   避免把两个二进制的版本混为一谈。这一行只在请求成功后写 stdout；网关不可达或返回
   非 2xx 时 stdout 保持为空，失败信息只进 stderr，因此 `| jq` 不会读到多余的一行。
+- `prices list` / `prices create` 的 `--id` 是**模型** id，而 `prices delete` 的 `--id`
+  是**价目行** id（`/admin/model-prices/{id}`），两者不可混用。
+- `calendar delete --id` 是唯一 `--id` 不是正整数的命令：它是 `YYYY-MM-DD` 日期字符串，
+  原样作为单个路径段发送；其余命令仍在分发前本地拒绝非整数 `--id`。
+- `rates list` 必须同时给出 `--from` 与 `--to`；CLI 原样转发，币种合法性由网关校验
+  （缺失或格式错误返回 400）。
 - 2xx 响应体原样写 stdout（不解析、不重排、不加装饰）；非 2xx 的诊断信息只写 stderr。

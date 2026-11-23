@@ -61,6 +61,8 @@ type Context struct {
 	Data           []byte // --data 解析后的请求体；nil 表示无 body
 	ID             uint64 // --id 解析后的正整数；0 表示命令未用
 	IDSet          bool   // --id 是否被显式给出；带 id 命令据此拒绝 /.../0 伪请求
+	IDRaw          string // --id 的原始文本；仅供路径段为字符串的命令（如日历日期）使用
+	IDErr          error  // --id 不是正整数时的解析错误；带 id 命令据此本地报错
 }
 
 // Command 描述一条子命令：Usage 为用法说明，Run 自行解析 argv 中的查询 flag
@@ -72,6 +74,24 @@ type Command struct {
 
 // registry 是 resource → command → Command 的全局注册表，由各资源文件 init() 填充。
 var registry = map[string]map[string]Command{}
+
+// pathIDRegistry 记录 --id 作为字符串路径段的命令（resource → command），由
+// RegisterPathID 填充；Run 据此放行「非整数 --id」，其余命令仍在分发前拒绝。
+var pathIDRegistry = map[string]map[string]bool{}
+
+// RegisterPathID 声明某条命令的 --id 是字符串路径段而非正整数（如日历日期），
+// 由该资源文件的 init() 在 Register 之后调用；只有这些命令接受非整数 --id。
+func RegisterPathID(resource, command string) {
+	if pathIDRegistry[resource] == nil {
+		pathIDRegistry[resource] = make(map[string]bool, 1)
+	}
+	pathIDRegistry[resource][command] = true
+}
+
+// acceptsPathID 报告 resource command 是否声明了字符串 --id 路径段。
+func acceptsPathID(resource, command string) bool {
+	return pathIDRegistry[resource][command]
+}
 
 // Register 把某资源的命令表并入注册表；由各资源文件的 init() 调用。
 func Register(resource string, cmds map[string]Command) {
@@ -211,12 +231,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 			return localError(stderr, err)
 		}
 	}
+	// --id 为整数是全局契约：非正整数在任何命令上都本地报错（分发前即返回 2）。
+	// 唯一例外是路径段为字符串的命令（calendar delete --id 2026-10-01），它的
+	// --id 本就不是整数；解析错误随 Context 下发，待分发到该命令后才被忽略。
 	var id uint64
+	var idErr error
 	if g.idSet {
-		id, err = ParseID(g.id)
-		if err != nil {
-			return localError(stderr, err)
-		}
+		id, idErr = ParseID(g.id)
 	}
 
 	// 单 token 默认 action 约定：resource 含同名 action 时（如 health），
@@ -241,6 +262,11 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 	if !ok {
 		return localError(stderr, fmt.Errorf("unknown command %q %q (see --help)", resource, name))
 	}
+	// --id 不是正整数时，只有声明了字符串路径段的命令可以继续（由 execPathRequest
+	// 校验原始文本），其余命令保持「分发前拒绝」的既有契约。
+	if idErr != nil && !acceptsPathID(resource, name) {
+		return localError(stderr, idErr)
+	}
 
 	// header 只属于 version --remote：先本地解析 flag，非法参数仍退出 2 且不发请求；
 	// 仅当请求成功时把 header 与响应体按顺序写入 stdout，失败时 stdout 保持为空。
@@ -250,7 +276,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		}
 		var buf bytes.Buffer
 		code := cmd.Run(&Context{
-			Client: c, Stdin: stdin, Stdout: &buf, Stderr: stderr, Data: data, ID: id, IDSet: g.idSet,
+			Client: c, Stdin: stdin, Stdout: &buf, Stderr: stderr, Data: data,
+			ID: id, IDSet: g.idSet, IDRaw: g.id, IDErr: idErr,
 		}, argv[2:])
 		if code == 0 {
 			_, _ = io.WriteString(stdout, header)
@@ -267,6 +294,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		Data:   data,
 		ID:     id,
 		IDSet:  g.idSet,
+		IDRaw:  g.id,
+		IDErr:  idErr,
 	}
 	return cmd.Run(ctx, argv[2:])
 }
