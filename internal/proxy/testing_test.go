@@ -283,7 +283,7 @@ func newEnv(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) 
 	store, dsn := newTestStore(t)
 	upstream, rec := startUpstream(t, respond)
 
-	usage := proxy.NewUsageWriter(store, 0)
+	usage := proxy.NewUsageWriter(store, 0, nil)
 	usage.Start()
 
 	mux := http.NewServeMux()

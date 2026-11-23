@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"aigate/internal/admin"
+	"aigate/internal/billing"
 	"aigate/internal/config"
 	"aigate/internal/crypto"
 	"aigate/internal/event"
@@ -126,7 +127,10 @@ func run() error {
 		return err
 	}
 
-	usage := proxy.NewUsageWriter(store, cfg.UsageBuffer)
+	// 计价数据源：数据面与计费写操作共用同一个实例，管理面写入后经它失效进程内缓存。
+	billingSource := billing.NewStoreSource(store)
+	// 计价只在异步消费侧进行（队列满即丢，绝不阻塞数据面）。
+	usage := proxy.NewUsageWriter(store, cfg.UsageBuffer, billing.NewEngine(billingSource, loc))
 	usage.Start()
 
 	// 事件出口：装配进程内默认投递器（埋点方只调 event.Emit，未装配时为 no-op）。
@@ -156,7 +160,7 @@ func run() error {
 	proxyHandler.StartResponseRetention(time.Duration(cfg.ResponseRetentionDays) * 24 * time.Hour)
 	defer proxyHandler.StopResponseRetention()
 	proxyHandler.Register(mux)
-	admin.Register(mux, store)
+	admin.Register(mux, store, billingSource)
 	userapi.Register(mux, store)
 
 	// 管控 WebUI：静态资源挂在 /ui/，根路径跳转过去；其余未匹配路径保持 404。

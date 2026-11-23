@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -183,6 +184,12 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		// 错误细节只进日志，不回显给调用方（避免泄漏内网地址/拓扑）。
 		slog.Error("upstream request error", "error", err, "model", resolved.ModelID)
+		// 记账完整性：上游已回包但响应体读取中断（截断）时，这次请求确实被消耗掉了，必须落库。
+		// provider 在该情形返回 result=nil、状态码 0、token 数不可得，故金额为 0，但行不能丢。
+		// 完全无响应（连接/DNS 失败）没有任何计费依据，不记。
+		if isUpstreamBodyReadError(err) {
+			h.logUsage(key, resolved, nil, http.StatusInternalServerError, start)
+		}
 		httpx.WriteError(w, http.StatusBadGateway, msgUpstreamConnect)
 		return
 	}
@@ -190,6 +197,13 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(result.Body)
 	h.logUsage(key, resolved, result.Usage, statusCode, start)
+}
+
+// isUpstreamBodyReadError 判断错误是否来自「上游已回包、但响应体读取中断」。
+// provider 对读体失败统一用 richErrorf 包装底层错误（如 io.ErrUnexpectedEOF），errors.Is 可穿透；
+// 连接/拨号阶段的失败发生在拿到响应头之前，不会被判为 true。
+func isUpstreamBodyReadError(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // prepareForward 完成「模型解析 → 配额检查 → max_tokens 强制 → body 重写」；
@@ -410,6 +424,8 @@ func (h *Handler) logUsage(
 		entry.TotalTokens = usage.TotalTokens
 		entry.PromptCacheReadTokens = usage.PromptCacheReadTokens
 		entry.PromptCacheWriteTokens = usage.PromptCacheWriteTokens
+		// 上游自报成本只做传输：由 UsageWriter 消费时按 use_upstream_cost 决定是否采信，不落库。
+		entry.ReportedCost = usage.ReportedCost
 	}
 	h.usage.Submit(entry)
 

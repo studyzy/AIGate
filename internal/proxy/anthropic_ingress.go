@@ -430,12 +430,16 @@ func (h *Handler) forwardViaOpenAIConversion(
 		if err != nil {
 			// 错误细节只进日志，不回显给调用方（避免泄漏内网地址/拓扑）。
 			slog.Error("upstream stream error", "error", err, "model", resolved.ModelID)
-			// 未写出任何数据（如连接失败）：返回 502，与非流式语义一致。
+			// 未写出任何数据（如连接失败）：返回 502，与非流式语义一致；
+			// 此时没有计费依据，不记。
 			if !tw.Wrote() {
 				writeAnthropicError(w, http.StatusBadGateway, kindAPIError, msgUpstreamConnect)
 				return
 			}
 			// 已写出部分事件后中断：不补发收尾事件，让客户端感知到流不完整。
+			// 记账完整性：上游已开始回包、客户端已收到一半内容，这次请求就是被消耗掉的，
+			// 必须落库（金额按已抓到的 usage 计算；未收到 usage 帧时为 0，但行不能丢）。
+			h.logUsage(key, resolved, streamResultUsage(result), http.StatusBadGateway, start)
 			return
 		}
 		if statusCode >= http.StatusBadRequest && !tw.Wrote() {

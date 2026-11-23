@@ -927,7 +927,7 @@ func TestResponseBackground_PreflightRejectionHasNoRow(t *testing.T) {
 // 未超过后台超时的在途行与已完成的旧行都不受影响。
 func TestResponseBackground_StaleInProgressMarkedFailed(t *testing.T) {
 	store, _ := newTestStore(t)
-	usage := proxy.NewUsageWriter(store, 0)
+	usage := proxy.NewUsageWriter(store, 0, nil)
 	usage.Start()
 	t.Cleanup(func() { usage.Stop(t.Context()) })
 

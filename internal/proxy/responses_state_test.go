@@ -460,7 +460,7 @@ func TestResponseState_ExpiredIs404(t *testing.T) {
 // 且保留期 ≤ 0 时不启动（= 永不清理）。
 func TestResponseState_RetentionLoopPrunes(t *testing.T) {
 	store, _ := newTestStore(t)
-	usage := proxy.NewUsageWriter(store, 0)
+	usage := proxy.NewUsageWriter(store, 0, nil)
 	usage.Start()
 	t.Cleanup(func() { usage.Stop(context.Background()) })
 
@@ -488,7 +488,7 @@ func TestResponseState_RetentionLoopPrunes(t *testing.T) {
 	t.Run("zero retention keeps rows", func(t *testing.T) {
 		// 独立 store：零保留期的语义要在干净库上验证，不与前一个子用例的行/循环相互影响。
 		zeroStore, _ := newTestStore(t)
-		zeroUsage := proxy.NewUsageWriter(zeroStore, 0)
+		zeroUsage := proxy.NewUsageWriter(zeroStore, 0, nil)
 		zeroUsage.Start()
 		t.Cleanup(func() { zeroUsage.Stop(context.Background()) })
 		old := time.Now().UTC().Add(-30 * 24 * time.Hour)
