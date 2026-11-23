@@ -18,22 +18,18 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	_ "github.com/go-sql-driver/mysql"
 )
 
-// envCLIBinKey 由 test/e2e/run.sh 导出，指向构建出的 bin/aigatectl。
+// CLI 用例：驱动真实的 bin/aigatectl 二进制，断言退出码、stdout/stderr 与响应体字节。
+// 公共调用原语（runCLI / cliOK / cliFailure / cliDataFile）也在这里，供其他用例复用。
+
 const envCLIBinKey = "AIGATE_E2E_CLI_BIN"
 
 // cliEnv 是一次 CLI 调用注入的凭据：token 只经 cmd.Env 传递，绝不进 argv。
@@ -42,92 +38,6 @@ type cliEnv struct {
 	adminToken string
 	userToken  string
 	secrets    []string
-}
-
-// runCLI 用真实二进制执行一次命令，分开捕获 stdout/stderr，返回退出码与两段输出。
-// 凭据只从环境变量注入；每次调用前断言 argv 中不含任何已知 token。
-func runCLI(t *testing.T, cliBin, baseURL string, creds cliEnv, args ...string) (int, []byte, []byte) {
-	t.Helper()
-
-	if creds.adminToken == "" {
-		t.Fatal("runCLI: adminToken must not be empty (credentials come only from the environment)")
-	}
-	tokens := append([]string{creds.adminToken, creds.userToken}, creds.secrets...)
-	for _, tok := range tokens {
-		if tok == "" {
-			continue
-		}
-		for _, a := range args {
-			if strings.Contains(a, tok) {
-				t.Fatalf("token leaked into CLI argv: %q appears in %v", tok, args)
-			}
-		}
-	}
-
-	cmd := exec.Command(cliBin, args...)
-	cmd.Env = append(os.Environ(),
-		"AIGATE_URL="+baseURL,
-		"AIGATE_ADMIN_TOKEN="+creds.adminToken,
-		"AIGATE_USER_TOKEN="+creds.userToken,
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			t.Fatalf("failed to run %s %v: %v", cliBin, args, err)
-		}
-		code = exitErr.ExitCode()
-	}
-	return code, stdout.Bytes(), stderr.Bytes()
-}
-
-// cliOK 断言一次 CLI 调用成功：退出码 0、stderr 为空、stdout 为合法 JSON；
-// dst 非 nil 时顺带把 stdout 反序列化进去。
-func cliOK(t *testing.T, desc string, code int, stdout, stderr []byte, dst any) {
-	t.Helper()
-	if code != 0 {
-		t.Fatalf("%s: exit code expected 0, got %d (stderr=%q, stdout=%q)", desc, code, stderr, stdout)
-	}
-	if len(stderr) != 0 {
-		t.Fatalf("%s: stderr expected empty, got %q", desc, stderr)
-	}
-	if !json.Valid(stdout) {
-		t.Fatalf("%s: stdout is not valid JSON: %q", desc, stdout)
-	}
-	if dst != nil {
-		if err := json.Unmarshal(stdout, dst); err != nil {
-			t.Fatalf("%s: failed to decode stdout JSON: %v, body=%q", desc, err, stdout)
-		}
-	}
-}
-
-// cliFailure 断言一次失败调用：退出码匹配、诊断只在 stderr、stdout 为空。
-func cliFailure(t *testing.T, desc string, want, code int, stdout, stderr []byte) {
-	t.Helper()
-	if code != want {
-		t.Fatalf("%s: exit code expected %d, got %d (stderr=%q, stdout=%q)", desc, want, code, stderr, stdout)
-	}
-	if len(stdout) != 0 {
-		t.Errorf("%s: stdout expected empty on failure, got %q", desc, stdout)
-	}
-	if len(stderr) == 0 {
-		t.Errorf("%s: stderr should carry the diagnostic, got nothing", desc)
-	}
-}
-
-// cliDataFile 把请求体写入临时文件，返回供 --data @file 使用的路径。
-// 含敏感字段（api_key / token 等）的请求体一律走文件，绝不进 argv。
-func cliDataFile(t *testing.T, name string, payload any) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, mustJSON(t, payload), 0o600); err != nil {
-		t.Fatalf("failed to write CLI --data file: %v", err)
-	}
-	return path
 }
 
 // deadURL 返回一个当前确认没有进程监听的环回地址，用于触发传输错误（退出码 5）。
@@ -147,7 +57,7 @@ func deadURL(t *testing.T) string {
 }
 
 // ---------------------------------------------------------------------------
-// CLI 闭环：真实 aigatectl 二进制 → 真实网关 → 真实 MySQL → 数据面
+// CLI 闭环：真实 aigatectl 二进制 → 真实网关 → 真实数据库 → 数据面
 // ---------------------------------------------------------------------------
 
 func TestE2E_CLI_ClosedLoop(t *testing.T) {
@@ -159,8 +69,8 @@ func TestE2E_CLI_ClosedLoop(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	gw := startGateway(t, bin, dsn)
-	db := openMySQL(t, dsn)
-	waitFor(t, "MySQL reachable", usagePollTimeout, db.Ping)
+	db := openE2EDB(t, dsn)
+	waitFor(t, "database reachable", usagePollTimeout, db.Ping)
 
 	creds := cliEnv{adminToken: adminToken}
 	const cliModelID = "cli-mock-gpt"
@@ -188,7 +98,7 @@ func TestE2E_CLI_ClosedLoop(t *testing.T) {
 		}
 	})
 
-	// 2. models create --data @file：解析 id，并直连 MySQL 断言 ai_models 落库。
+	// 2. models create --data @file：解析 id，并直连数据库断言 ai_models 落库。
 	t.Run("2. models create and the row exists in ai_models", func(t *testing.T) {
 		file := cliDataFile(t, "model.json", map[string]any{
 			"provider":   "mock",

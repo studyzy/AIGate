@@ -3,7 +3,7 @@ PNPM ?= pnpm
 BIN := bin/aigate
 CLI_BIN := bin/aigatectl
 
-.PHONY: build build-cli build-webui run test test-webui test-e2e test-e2e-webui vet fmt tidy clean
+.PHONY: build build-cli build-webui run test test-webui test-e2e test-e2e-sqlite test-e2e-mysql test-e2e-webui vet fmt tidy clean
 
 # 先构建前端再编译二进制：go:embed 打包的是 internal/webui/dist 里的真实产物。
 build: build-webui
@@ -25,8 +25,15 @@ test:
 test-webui:
 	$(PNPM) --dir webui test
 
-test-e2e:
-	bash test/e2e/run.sh
+# 集成测试默认走 SQLite：临时库 + 网关 AutoMigrate 建表，无需外部依赖，跑完即弃。
+test-e2e: test-e2e-sqlite
+
+test-e2e-sqlite:
+	AIGATE_E2E_DB_TYPE=sqlite bash test/e2e/run.sh
+
+# 需要本地 MySQL（root 免密）与 mysql 客户端：每次重置 aigate_e2e 库并导入 sql/init.sql。
+test-e2e-mysql:
+	AIGATE_E2E_DB_TYPE=mysql bash test/e2e/run.sh
 
 # 浏览器 e2e：临时 SQLite + 内置 mock 上游，跑完自动清理进程与端口。
 test-e2e-webui:

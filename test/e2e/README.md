@@ -1,53 +1,113 @@
 # Tencent Cloud AIGate end-to-end smoke test
 
-`test/e2e/` is an end-to-end smoke suite that is independent from the unit tests: it drives the
-**real gateway binary** and the **real `aigatectl` CLI binary** as black boxes, starts in-process mock
-upstreams (both the OpenAI and the Anthropic protocol), covers the independent scenario groups below
-(M1 forwarding smoke, M2 quota & usage, M3 Anthropic ingress, M3b gateway ops, M4 webhooks,
-and the aigatectl CLI groups) over real HTTP, and connects directly to MySQL to
-assert that usage is persisted. It **does not import the `internal` package**, so it can be
-maintained independently while the gateway internals evolve in parallel.
+`test/e2e/` is an end-to-end smoke suite independent from the unit tests: it drives the **real gateway
+binary** and the **real `aigatectl` CLI binary** as black boxes, starts in-process mock upstreams
+(OpenAI and Anthropic protocols), and connects directly to the database (MySQL or SQLite) to assert
+that usage is persisted. It **does not import the `internal` package**.
+
+## Entry points (read this before editing a test)
+
+| Surface | How the suite drives it | Why |
+|---------|-------------------------|-----|
+| Admin `/admin/*` writes | `aigatectl` (`adminCLI`, `createModel`, `createKey`, `createUser`, …) | every test also exercises the CLI that operators use |
+| User `/api/user/*` writes | `aigatectl self` (`userCLI`, `m3bCreateSelfKey`) | same reason, user token plane |
+| Data plane `/v1/*` | raw HTTP (`doRequest`, `postChatCompletion`, `postAnthropicMessage`) | no CLI command exists; this is the gateway's own forwarding surface |
+| Queries and deliberate failures | raw HTTP | `aigatectl` only surfaces an exit code (0/3/4/5), which would lose the status code and error body the assertion is about |
+
+Anything that needs a CLI-only assertion uses `cliOK` / `cliFailure` (exit code + stdout/stderr).
+The exit-code contract is `0` = 2xx, `3` = 401/403, `4` = any other remote error, `5` = transport
+error; see `cliExitOK` … `cliExitTransport` in `helpers_test.go`.
+
+## Layout
+
+| File | Contents |
+|------|----------|
+| `main_test.go` | `TestMain`: removes the SQLite test database after the run |
+| `run.sh` | environment lifecycle (database, binaries, cleanup) |
+| `helpers_test.go` | shared constants, HTTP primitives, CLI primitives, DB assertions |
+| `gateway_test.go` | starts/stops the real gateway process on a random port |
+| `upstream_test.go` | OpenAI / Anthropic mock upstreams and their fixed bodies |
+| `admin_test.go` | `TestE2E_Admin_*` — models, credentials, import, key TTL, quotas |
+| `user_test.go` | `TestE2E_User_*` — self-service keys, BYOK |
+| `dataplane_test.go` | `TestE2E_DataPlane_*` — forwarding, streaming, Anthropic ingress |
+| `webhook_test.go` | `TestE2E_Webhook_*` — subscriptions, signed delivery, events |
+| `webui_test.go` | `TestE2E_WebUI_*` — static hosting contract for `/ui/` |
+| `cli_test.go` | `TestE2E_CLI_*` — CLI closed loop and exit-code contract |
 
 ## How to run
 
 ```bash
-bash test/e2e/run.sh
+make test-e2e          # same as make test-e2e-sqlite: no external database, no mysql client needed
+make test-e2e-mysql    # starts its own MySQL container (docker + the mysql client required)
 ```
 
-The script performs the following steps in order: reset the test database `aigate_e2e` ->
-import `sql/init.sql` from the repository root -> `go build -o bin/aigate ./cmd/aigate` ->
-`go build -o bin/aigatectl ./cmd/aigatectl` -> export environment variables ->
-`go test -tags e2e -count=1 -v ./test/e2e/`. The script is repeatable: every
-run recreates the database and both binaries.
+Both targets call the script below with `AIGATE_E2E_DB_TYPE` set accordingly; the script can also be
+invoked directly:
+
+```bash
+bash test/e2e/run.sh                            # default: MySQL
+AIGATE_E2E_DB_TYPE=sqlite bash test/e2e/run.sh
+```
+
+The script owns the whole environment lifecycle, so every run starts clean and leaves nothing behind:
+
+- SQLite: delete and recreate the database file (`./.e2e/aigate_e2e.db` by default) and wait until it
+  is writable. The gateway creates the tables via `AutoMigrate` on startup, so `sql/init.sql` is not
+  involved. The file is deleted again after the run.
+- MySQL: remove any leftover container with the same name, start a fresh container
+  (`mysql:8.0` by default, `AIGATE_E2E_MYSQL_CONTAINER` / `AIGATE_E2E_MYSQL_IMAGE`), wait until it
+  accepts connections (up to 180s), then reset the database `aigate_e2e` and import `sql/init.sql`.
+  The container is force-removed (with its data) when the run ends, whether it passed or failed.
+  The root password is never empty: it defaults to `AIGate-e2e` and can be overridden with
+  `AIGATE_E2E_MYSQL_PASSWORD`. The script passes it via `MYSQL_PWD` and the DSN, so it never shows up
+  in command-line arguments; the logged DSN shows only the user.
+
+Then, for both: `go build -o bin/aigate ./cmd/aigate` -> `go build -o bin/aigatectl ./cmd/aigatectl`
+-> export environment variables -> `go test -tags e2e -count=1 -v ./test/e2e/`.
+
+**Gateway ports.** Every test case starts its gateway on a random free port taken from the pool
+`20000-60999` (`-addr` plus an `AIGATE_ADDR` env override, so an exported `AIGATE_ADDR` cannot pull it
+back to a default port). The default `:8080` is never used, so a locally running AIGate service does
+not interfere.
+
+**Process cleanup.** Each test case stops its own gateway in `t.Cleanup` (SIGTERM, then SIGKILL after
+10s, with a further 5s cap on `Wait`). As a backstop, the script's exit trap SIGTERMs any leftover
+`bin/aigate` process whose environment carries the test DSN in `AIGATE_DB_DSN` — it matches on that
+marker, so an unrelated gateway (e.g. the local systemd service) is never touched.
 
 To only re-run the test cases (database and binaries already in place):
 
 ```bash
 AIGATE_E2E_BIN="$(pwd)/bin/aigate" \
 AIGATE_E2E_CLI_BIN="$(pwd)/bin/aigatectl" \
-AIGATE_E2E_DSN='root@tcp(127.0.0.1:3306)/aigate_e2e?charset=utf8mb4&parseTime=True&loc=Local' \
+AIGATE_E2E_DB_TYPE=mysql \
+AIGATE_E2E_DSN='root:AIGate-e2e@tcp(127.0.0.1:3306)/aigate_e2e?charset=utf8mb4&parseTime=True&loc=Local' \
 go test -tags e2e -count=1 -v ./test/e2e/
 ```
 
-Three environment variables point the suite at the built artifacts:
+Four environment variables point the suite at the built artifacts and the database:
 
 | Variable | Meaning |
 |----------|---------|
 | `AIGATE_E2E_BIN` | Path to the gateway binary (`bin/aigate`) |
 | `AIGATE_E2E_CLI_BIN` | Path to the management CLI binary (`bin/aigatectl`), used by `cli_test.go` |
-| `AIGATE_E2E_DSN` | MySQL DSN of the `aigate_e2e` database |
+| `AIGATE_E2E_DSN` | DSN of the test database (MySQL DSN, or a SQLite file path) |
+| `AIGATE_E2E_DB_TYPE` | `mysql` (default when unset) or `sqlite`; passed to the gateway as `-db-type` |
 
 By convention, if any of `AIGATE_E2E_BIN`, `AIGATE_E2E_CLI_BIN` or `AIGATE_E2E_DSN` is missing,
 the test cases call `t.Skip` (they do not fail), so the suite also compiles and runs cleanly in an
-environment without MySQL. The CLI group additionally checks `AIGATE_E2E_CLI_BIN` via `requireEnv`.
+environment without a database. Any test that drives the CLI checks `AIGATE_E2E_CLI_BIN` via `requireEnv`.
 
 ## Prerequisites
 
-- A local MySQL is running and `root` can log in without a password (default `127.0.0.1:3306`;
-  override with `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_ARGS`).
-- The `mysql` command-line client is available (the script uses it to create the database and to
-  import the schema).
-- `sql/init.sql` exists at the repository root (the source of truth for the schema).
+- MySQL mode: `docker` is available and the `mysql` client image is pullable (the script starts the
+  container itself). The host port defaults to `127.0.0.1:3306` and must be free; override with
+  `MYSQL_HOST` / `MYSQL_PORT`, or `AIGATE_E2E_MYSQL_CONTAINER` /
+  `AIGATE_E2E_MYSQL_IMAGE` / `AIGATE_E2E_MYSQL_PASSWORD`.
+- MySQL mode: nothing else — the image's own `mysql` client inside the container creates the database
+  and imports the schema via `docker exec`; nothing is installed on the host.
+- MySQL mode: `sql/init.sql` exists at the repository root (the source of truth for the schema).
+- SQLite mode: only the Go toolchain — the database file is created by the script itself.
 - The Go toolchain is available (used to build the binary and to run the tests).
 
 ## Covered groups
@@ -64,7 +124,7 @@ process against the shared test database; `cli_test.go` additionally drives the 
 | `TestE2E_M3_AnthropicIngress` | `/v1/messages` conversion (Anthropic to/from OpenAI) and native passthrough | Stream and non-stream event sequences; `cache_control` preserved on the passthrough path; persisted usage |
 | `TestE2E_M3b_GatewayOps` | Credentials (ciphertext at rest), import dry-run/idempotency, connectivity probes, self-service keys, key TTL lifecycle, model-deletion fallback promotion | `enc:v1:` ciphertext in the database; idempotent import; an expired key is rejected and records `expired_at`; the promoted fallback binding serves the next request |
 | `TestE2E_M4_Webhooks` | Subscription CRUD, signed delivery, event coverage, delivery records | The HMAC signature verifies; `request.completed` / `quota.exceeded` / `key.disabled` / `key.expired` are delivered; `key.expired` fires once per validity window; `GET .../deliveries` paginates |
-| `TestE2E_CLI_ClosedLoop` (`cli_test.go`) | Drive the real `aigatectl` binary through the 8-step closed loop: `health` → `models create` → `models list`/`get` → `users create` → `keys create` → data-plane forwarding → `self me`/`self keys list` → `keys rotate` | Every step exits 0 with JSON on stdout and empty stderr; the created model row exists in `ai_models` (direct MySQL query); the `sk-` token issued by the CLI really drives `/v1/chat/completions` and its usage lands in `llm_usage_logs`; the rotated-away token is rejected with 401 |
+| `TestE2E_CLI_ClosedLoop` (`cli_test.go`) | Drive the real `aigatectl` binary through the 8-step closed loop: `health` → `models create` → `models list`/`get` → `users create` → `keys create` → data-plane forwarding → `self me`/`self keys list` → `keys rotate` | Every step exits 0 with JSON on stdout and empty stderr; the created model row exists in `ai_models` (direct database query); the `sk-` token issued by the CLI really drives `/v1/chat/completions` and its usage lands in `llm_usage_logs`; the rotated-away token is rejected with 401 |
 | `TestE2E_CLI_ExitCodes` (`cli_test.go`) | One case per CLI exit code: 0 / 2 / 3 / 4 / 5 | Errors appear only on stderr and stdout is empty |
 | `TestE2E_CLI_SpecialSemantics` (`cli_test.go`) | `models connectivity` (`ok:false` but HTTP 200), `import run` (partial failure but HTTP 200), `usage export --format csv` | All still exit 0 with the body verbatim; CSV is raw text and is never JSON-decoded |
 
@@ -74,10 +134,10 @@ process against the shared test database; `cli_test.go` additionally drives the 
   the test at runtime, it is never hard-coded; if the process under test leaves something behind,
   clean up the leftover `gateway` process and re-run. The subprocess receives `SIGTERM` in
   `t.Cleanup` and exits gracefully.
-- **MySQL not running / cannot connect**: make sure a local MySQL is running, `root` can connect
-  without a password, and the test database exists (prefer running `run.sh` directly, it recreates
-  the database). When step 9 fails, the error message reports the wait timeout and the last query
-  error.
+- **MySQL not running / cannot connect**: run `make test-e2e-mysql` (or `run.sh` directly) rather than
+  `go test` on its own — the script starts the container, waits for readiness and recreates the
+  database. If the container never becomes ready the script prints its status and the last 50 log
+  lines. A port conflict on `MYSQL_PORT` (3306 by default) is the most common cause.
 - **healthz timeout**: the test case prints the gateway subprocess stdout/stderr as well, so check
   that log first:
   - invalid configuration (e.g. a wrong DSN / timezone) is rejected at startup and makes the process exit;
@@ -92,8 +152,8 @@ process against the shared test database; `cli_test.go` additionally drives the 
 
 ## Notes
 
-- This suite is a black-box smoke test: the M1–M4 groups exercise the gateway over real HTTP, and
-  the CLI groups drive the real `aigatectl` binary against that same gateway.
+- This suite is a black-box smoke test: the data-plane groups exercise the gateway over real HTTP,
+  and every admin/user write goes through the real `aigatectl` binary against that same gateway.
 - The contract is defined by the interface frozen by the main owner; when you find a deviation
   between the implementation and the contract, flag it in `test/e2e/` first and sync with the main
   owner.
