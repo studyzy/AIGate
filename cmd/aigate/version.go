@@ -13,12 +13,13 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
 
-// Version 是网关版本号：能力变更时与 CHANGELOG.md 同步递增。
-const Version = "0.1.0"
+	"aigate/internal/version"
+)
 
-// printVersion 输出版本行（`-version` 的唯一输出，随后退出）。
+// printVersion 输出版本、commit 与构建信息（`-version` 的唯一输出，随后退出）。
 func printVersion() {
-	fmt.Printf("Tencent Cloud AIGate %s\n", Version)
+	fmt.Println(version.Get().String())
 }

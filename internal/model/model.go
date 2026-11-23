@@ -93,21 +93,25 @@ func sqliteDSNWithPragmas(dsn string) string {
 	return dsn + sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
+// autoMigrateModels 是需要建表的全部 GORM 模型，顺序即建表顺序。
+// 独立成变量是给 schema 一致性测试用的：它与 sql/init.sql 必须一一对应。
+var autoMigrateModels = []any{
+	&User{},
+	&AIModel{},
+	&APIKey{},
+	&APIKeyModel{},
+	&LLMUsageLog{},
+	&DailyUsageSummary{},
+	&Group{},
+	&Setting{},
+	&Credential{},
+	&Webhook{},
+	&WebhookDelivery{},
+}
+
 // AutoMigrate 建表（仅用于 SQLite 本地开发；MySQL 生产使用 sql/init.sql）。
 func (s *Store) AutoMigrate() error {
-	return s.db.AutoMigrate(
-		&User{},
-		&AIModel{},
-		&APIKey{},
-		&APIKeyModel{},
-		&LLMUsageLog{},
-		&DailyUsageSummary{},
-		&Group{},
-		&Setting{},
-		&Credential{},
-		&Webhook{},
-		&WebhookDelivery{},
-	)
+	return s.db.AutoMigrate(autoMigrateModels...)
 }
 
 // Ping 检查数据库连通性。

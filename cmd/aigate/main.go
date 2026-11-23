@@ -35,6 +35,7 @@ import (
 	"aigate/internal/provider"
 	"aigate/internal/proxy"
 	"aigate/internal/userapi"
+	"aigate/internal/version"
 	"aigate/internal/webui"
 )
 
@@ -56,6 +57,8 @@ func hasVersionFlag(args []string) bool {
 }
 
 func run() error {
+	version.Start()
+
 	if hasVersionFlag(os.Args[1:]) {
 		printVersion()
 		return nil
@@ -136,6 +139,10 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	// 构建信息：免鉴权公开，供运维脚本与镜像核对；不含配置、依赖或内部端点。
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, version.Get())
 	})
 	proxy.NewHandler(store, usage, cfg.QuotaExceededStatus).Register(mux)
 	admin.Register(mux, store)

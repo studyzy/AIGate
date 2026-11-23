@@ -248,8 +248,9 @@ Docker 说明与上游 SSRF 策略见 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.m
 | `-master-key` | `AIGATE_MASTER_KEY` | （空） | AES-256-GCM 主密钥（64 hex 或 base64 的 32 字节）；空 = 明文 + 告警 |
 | `-migrate-encrypt` | — | `false` | 一次性开关：加密存量明文密钥行后退出（需主密钥） |
 
-非法配置会在启动阶段被直接拒绝，而不是静默兜底。`-version` 打印
-`Tencent Cloud AIGate 0.1.0` 后退出。权威配置表见 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.md)。
+非法配置会在启动阶段被直接拒绝，而不是静默兜底。`-version` 打印版本号、commit、
+构建时间与 Go 版本后退出；同样的数据在运行时由 `GET /version` 提供。权威配置表见
+[docs/deploy.zh-CN.md](docs/deploy.zh-CN.md)。
 
 ## 文档索引
 

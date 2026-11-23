@@ -20,6 +20,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"aigate/internal/client"
+	"aigate/internal/version"
 )
 
 // 本地错误与传输错误的退出码（其余 0/3/4 由 client.ExitCode 给出）。
@@ -47,9 +49,9 @@ const defaultTimeout = 30 * time.Second
 // 与服务端默认监听地址（:8080）及 docs/CLI.md 声明的默认值一致。
 const DefaultBaseURL = "http://127.0.0.1:8080"
 
-// Version 是 CLI 版本号，与 cmd/aigate 的 Version 保持一致；
+// Version 是 CLI 版本号，复用 internal/version 作为单一事实源；
 // 供 cmd/aigatectl 复用，避免两处硬编码。
-const Version = "0.1.0"
+var Version = version.Version
 
 // Context 携带一次命令执行所需的客户端、IO 与已解析的全局参数。
 type Context struct {
@@ -163,9 +165,25 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return localError(stderr, err)
 	}
 
+	var header string
 	if len(argv) > 0 && argv[0] == "version" {
-		fmt.Fprintf(stdout, "aigatectl %s\n", Version)
-		return 0
+		if len(argv) > 1 && argv[1] == "--remote" {
+			extra := argv[2:]
+			for _, a := range extra {
+				// `--remote` 是它的唯一 flag；`--` 与其后的位置参数不是 flag，
+				// 一并本地报错，不转交给 build-info（那里 `--` 之后会被当成参数）。
+				if a == "--" || !strings.HasPrefix(a, "-") {
+					return localError(stderr, fmt.Errorf("unexpected argument %q (see --help)", a))
+				}
+			}
+			// header 留到请求成功后再写：失败时 stdout 必须为空，诊断只进 stderr。
+			header = fmt.Sprintf("%s (local binary; querying gateway at %s)\n",
+				Version, ResolveBaseURL(getenv, g.url, g.urlSet))
+			argv = append([]string{"build-info", "build-info"}, extra...)
+		} else {
+			fmt.Fprintf(stdout, "aigatectl %s (local binary)\n", Version)
+			return 0
+		}
 	}
 
 	cfg := client.Config{
@@ -224,6 +242,23 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return localError(stderr, fmt.Errorf("unknown command %q %q (see --help)", resource, name))
 	}
 
+	// header 只属于 version --remote：先本地解析 flag，非法参数仍退出 2 且不发请求；
+	// 仅当请求成功时把 header 与响应体按顺序写入 stdout，失败时 stdout 保持为空。
+	if header != "" {
+		if _, err := queryValues(argv[2:]); err != nil {
+			return localError(stderr, err)
+		}
+		var buf bytes.Buffer
+		code := cmd.Run(&Context{
+			Client: c, Stdin: stdin, Stdout: &buf, Stderr: stderr, Data: data, ID: id, IDSet: g.idSet,
+		}, argv[2:])
+		if code == 0 {
+			_, _ = io.WriteString(stdout, header)
+			_, _ = stdout.Write(buf.Bytes())
+		}
+		return code
+	}
+
 	ctx := &Context{
 		Client: c,
 		Stdin:  stdin,
@@ -265,6 +300,10 @@ func extractGlobals(args []string) (globals, []string, error) {
 	for i := 0; i < len(args); i++ {
 		name, val, inline := splitFlag(args[i])
 		switch name {
+		case "--":
+			// `--` 之后的位置参数不再参与全局 flag 抽取，避免把用户数据
+			// （例如紧跟其后的 --url）误当成全局 flag 吞掉。
+			return g, append(rest, args[i+1:]...), nil
 		case "--url", "--timeout", "--data", "--id":
 			if !inline {
 				if i+1 >= len(args) {
@@ -335,7 +374,8 @@ func printHelpForPath(stdout, stderr io.Writer, path []string) {
 	if len(path) > 0 {
 		switch path[0] {
 		case "version":
-			fmt.Fprintln(stdout, "aigatectl version - print the aigatectl version (local command)")
+			fmt.Fprintln(stdout, "aigatectl version - print this aigatectl binary's version (local command, no request)")
+			fmt.Fprintln(stdout, "aigatectl version --remote - print the *gateway* build info via GET /version (same output as `build-info`)")
 			return
 		case "health":
 			fmt.Fprintln(stdout, "aigatectl health - check gateway health via GET /healthz (no token required)")
@@ -395,7 +435,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --data <json|@file|-> request body (validated as JSON, forwarded verbatim)")
 	fmt.Fprintln(w, "  --id <positive int>   resource id")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Local commands: version, --help, -h")
+	fmt.Fprintln(w, "Local commands: version (aigatectl binary itself), --help, -h")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Credentials come only from the environment:")
 	fmt.Fprintln(w, "  AIGATE_URL, AIGATE_ADMIN_TOKEN, AIGATE_USER_TOKEN")

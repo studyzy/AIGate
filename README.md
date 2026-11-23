@@ -283,7 +283,8 @@ precedence over the default.
 | `-migrate-encrypt` | — | `false` | One-off: encrypt existing plaintext secret rows, then exit (requires a master key) |
 
 Invalid configuration is rejected at startup rather than silently defaulted.
-`-version` prints `Tencent Cloud AIGate 0.1.0` and exits. The authoritative table lives in
+`-version` prints the version, commit, build time and Go version and exits; the same
+data is served at runtime by `GET /version`. The authoritative table lives in
 [docs/deploy.md](docs/deploy.md).
 
 ## Documentation

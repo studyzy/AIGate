@@ -2,8 +2,8 @@
 
 [English](CLI.md) | [简体中文](CLI.zh-CN.md)
 
-`aigatectl` is the AIGate management CLI. It turns the **52 endpoints** of the admin
-plane (`/admin/*`), the user plane (`/api/user/*`), and `GET /healthz` into 52 stable
+`aigatectl` is the AIGate management CLI. It turns the **53 endpoints** of the admin
+plane (`/admin/*`), the user plane (`/api/user/*`), `GET /healthz` and `GET /version` into 53 stable
 commands: one command per endpoint, no workflow orchestration, and no wrapping of the
 data-plane `/v1/*` inference endpoints. Response bodies are written to stdout verbatim,
 diagnostics go only to stderr, and exit codes are fixed so shell scripts, `make`, and CI
@@ -24,7 +24,15 @@ aigatectl [global flags] <resource> <command> [flags]
 ```
 
 `--help` / `-h` and `version` are local commands that issue no HTTP request;
-`aigatectl version` prints `aigatectl 0.1.0` and exits 0.
+`aigatectl version` prints `aigatectl <version> (local binary)` and exits 0.
+
+`aigatectl` is a **separate binary** from the gateway, so the two versions are distinct:
+
+| You want | Command | Reports |
+|---|---|---|
+| The CLI binary's own version | `aigatectl version` | This `aigatectl` binary (local, `(local binary)` marker) |
+| The gateway's version / commit | `aigatectl build-info` | The running gateway via `GET /version` |
+| The gateway's version / commit | `aigatectl version --remote` | Same request and output as `build-info`, prefixed with one line naming this local binary and the gateway URL it queried (the header goes to stdout only when the request succeeds; a failure leaves stdout empty and reports on stderr with exit code 5) |
 
 ## 2. Configuration and credentials
 
@@ -47,6 +55,7 @@ flag, and tokens never enter argv, `ps` output, or logs.
 | `AIGATE_ADMIN_TOKEN` | `/admin/*` | Admin access token for the admin plane |
 | `AIGATE_USER_TOKEN` | `/api/user/*` | User-plane access token; falls back to `AIGATE_ADMIN_TOKEN` when unset |
 | (none) | `/healthz` | The health check needs no credentials |
+| (none) | `/version` | Build info needs no credentials either |
 
 The token is selected automatically from the command's resource group — the user does not
 switch it. If the required token is missing, local validation fails with exit code 2 and
@@ -66,11 +75,11 @@ aigatectl self keys --help             # subgroup: list/get/create/update/delete
 more action token, so those command names have three tokens (e.g. `self usage summary`,
 `self keys list`).
 
-## 3. Command reference (52 commands)
+## 3. Command reference (53 commands)
 
 Each row gives two equivalent notations: a backticked `METHOD /path` endpoint token, and —
 after the arrow — the equivalent request-line form with the method plus a backticked path.
-The command table is kept in sync with the 52 endpoints of `docs/openapi.yaml` (no `/v1/*`).
+The command table is kept in sync with the 53 endpoints of `docs/openapi.yaml` (no `/v1/*`).
 There is no `GET /admin/users/{id}`, so no `users get` command exists.
 
 | # | Command | Method · path | Example |
@@ -127,10 +136,11 @@ There is no `GET /admin/users/{id}`, so no `users get` command exists.
 | 50 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
 | 51 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
 | 52 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
+| 53 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
 
 `health` is a single-token command (`aigatectl health`) and needs no credentials; every
 other command uses two tokens `<resource> <command>` (three for `self` subgroups). The
-local commands `version` and `--help` are not counted among these 52 HTTP commands.
+local commands `version` and `--help` are not counted among these 53 HTTP commands.
 
 ## 4. Query flags
 
@@ -217,5 +227,14 @@ cat credential.json | aigatectl credentials create --data -     # or read from s
 - There is no `GET /admin/users/{id}`, so no `users get` command is provided.
 - `health` maps to `GET /healthz` and needs no credentials; `version` is a local command
   that issues no request.
+- `build-info` maps to `GET /version` and needs no credentials. It prints the **gateway's**
+  build info (`version`, `commit`, `build_time`, `dirty`, `go_version`,
+  `started_at`) verbatim, so `aigatectl build-info | jq .commit` works in scripts.
+  `version --remote` is an alias: same request and same JSON, preceded by one stdout line
+  naming this local binary and the gateway URL, so the two binaries are never confused.
+  That header is written only after a successful response — when the gateway is
+  unreachable or returns non-2xx, stdout stays empty (or carries only the verbatim error
+  body rules above) and the failure is reported on stderr, so piping to `jq` never sees a
+  stray header line.
 - 2xx response bodies are written to stdout verbatim (no parsing, reordering, or
   decoration); diagnostics for non-2xx go only to stderr.

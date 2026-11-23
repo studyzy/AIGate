@@ -16,6 +16,7 @@ Tencent Cloud AIGate 是自托管的 LLM API 网关：**纯 API 服务**（无�
 | 管理面 | `/admin/*` | `Authorization: Bearer <token>` | `role=admin` 用户的访问 token（`gk-…`） |
 | 用户面 | `/api/user/*` | `Authorization: Bearer <token>` | 任意启用用户的访问 token（`gk-…`） |
 | 健康检查 | `/healthz` | 无 | — |
+| 构建信息 | `/version` | 无 | — |
 
 `Authorization` 头的值必须以 `Bearer ` 开头（管理面对 scheme 大小写不敏感；数据面要求精确的 `Bearer ` 前缀）。token 两端的空白会被去除。不接受来自查询串或其他头的 token。`/v1/messages` 上若同时携带 `x-api-key` 与 `Authorization`，以 `x-api-key` 为准。
 
@@ -1372,7 +1373,36 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 {"status": "ok"}
 ```
 
-## 6. 附录
+## 6. 构建信息
+
+### GET /version
+
+无需鉴权。返回当前运行二进制的构建与启动身份，供运维核对一次部署实际服务的是哪份代码、哪个 commit。
+响应只含构建元数据，不含任何配置、依赖或内部端点信息。
+
+响应 `200 OK`：
+
+```json
+{
+  "version": "v0.1.0",
+  "commit": "b5744933e2f316b6d50f780ed7f7c7fb1cb87dcc",
+  "build_time": "2026-11-23T03:49:23Z",
+  "dirty": true,
+  "go_version": "go1.24.12",
+  "started_at": "2026-11-23T05:56:29Z"
+}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `version` | 构建期注入的字符串（`-ldflags`），未注入时回落到编译内置默认值。`make build` 注入的是 `git describe --tags --always --dirty`（例如 `v0.1.0-59-g6d75021-dirty`），**不是**严格 SemVer，不要按 SemVer 解析。 |
+| `commit` | 完整 git commit；优先取注入值，其次取 Go 工具链写入的 VCS 元数据，都没有时为 `unknown`。 |
+| `build_time` | 构建（即 commit）时间，RFC3339 UTC；不可得时为 `unknown`。 |
+| `dirty` | 构建时工作区是否有未提交改动；为 `true` 说明该二进制不对应任何 git commit。只对直接在工作区构建出的二进制有意义：Docker 与 CI 构建复制的是干净树，恒为 `false`。 |
+| `go_version` | 编译所用的 Go 工具链版本。 |
+| `started_at` | 进程启动时间，RFC3339 UTC；未记录时为 `unknown`。 |
+
+## 7. 附录
 
 ### 状态码汇总
 

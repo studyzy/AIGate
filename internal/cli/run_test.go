@@ -25,6 +25,7 @@ import (
 
 	"aigate/internal/cli"
 	"aigate/internal/client"
+	"aigate/internal/version"
 )
 
 // TestReadData 覆盖四种输入：字面量、@文件、- 标准输入均原样返回；
@@ -419,11 +420,11 @@ func TestRunHelpAndVersion(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("version 退出码 = %d, 期望 0 (stderr=%q)", got.code, got.stderr)
 	}
-	if cli.Version != "0.1.0" {
-		t.Fatalf("cli.Version = %q, 期望 0.1.0", cli.Version)
+	if cli.Version != version.Version {
+		t.Fatalf("cli.Version = %q, 期望与 internal/version 一致（%q）", cli.Version, version.Version)
 	}
-	if !strings.Contains(got.stdout, "0.1.0") {
-		t.Fatalf("version stdout = %q, 期望含版本字符串 0.1.0", got.stdout)
+	if !strings.Contains(got.stdout, version.Version) {
+		t.Fatalf("version stdout = %q, 期望含版本字符串 %s", got.stdout, version.Version)
 	}
 }
 

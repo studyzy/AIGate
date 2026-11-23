@@ -237,4 +237,11 @@ export const zhCN: Record<MessageKey, string> = {
   "quota.start": "锚点",
   "quota.end": "硬截止",
   "quota.empty": "没有规则表示不限",
+  "version.label": "版本",
+  "version.commit": "Commit",
+  "version.dirty": "构建时工作区有未提交改动",
+  "version.buildTime": "构建时间",
+  "version.startedAt": "启动时间",
+  "version.goVersion": "Go 版本",
+  "version.unknown": "未知",
 };

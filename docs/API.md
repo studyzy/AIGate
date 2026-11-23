@@ -16,6 +16,7 @@ All examples below use the base URL `http://127.0.0.1:8080`.
 | Admin plane | `/admin/*` | `Authorization: Bearer <token>` | Access token of a user with `role=admin` (`gk-…`) |
 | User plane | `/api/user/*` | `Authorization: Bearer <token>` | Access token of any enabled user (`gk-…`) |
 | Health check | `/healthz` | none | — |
+| Build info | `/version` | none | — |
 
 The `Authorization` header value must start with `Bearer ` (case-insensitive scheme match on the admin plane; the data plane requires the exact `Bearer ` prefix). The token is trimmed of surrounding whitespace. Tokens are never accepted from query strings or other headers. On `/v1/messages`, an `x-api-key` header takes precedence over `Authorization` when both are present.
 
@@ -1340,7 +1341,37 @@ Response `200 OK`:
 {"status": "ok"}
 ```
 
-## 6. Appendix
+## 6. Build info
+
+### GET /version
+
+No authentication. Returns the build and startup identity of the running binary, so an
+operator can confirm which code and commit a deployment actually serves. It carries no
+configuration, dependency or endpoint information.
+
+Response `200 OK`:
+
+```json
+{
+  "version": "v0.1.0",
+  "commit": "b5744933e2f316b6d50f780ed7f7c7fb1cb87dcc",
+  "build_time": "2026-11-23T03:49:23Z",
+  "dirty": true,
+  "go_version": "go1.24.12",
+  "started_at": "2026-11-23T05:56:29Z"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `version` | Build-time string: the injected value (`-ldflags`), falling back to the compiled-in default. `make build` injects `git describe --tags --always --dirty` (e.g. `v0.1.0-59-g6d75021-dirty`), so it is **not** strict SemVer — do not parse it as one. |
+| `commit` | Full git commit; injected value first, otherwise the Go toolchain's VCS stamp. `unknown` when neither is available. |
+| `build_time` | RFC3339 UTC build (commit) time; `unknown` when unavailable. |
+| `dirty` | `true` when the tree had uncommitted changes at build time, i.e. the binary matches no commit exactly. Only meaningful for builds made directly from a working tree: Docker and CI builds copy a clean tree, so it is always `false` there. |
+| `go_version` | Go toolchain that compiled the binary. |
+| `started_at` | RFC3339 UTC process start time; `unknown` if the process did not record it. |
+
+## 7. Appendix
 
 ### Status code summary
 

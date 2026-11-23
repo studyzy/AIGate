@@ -236,6 +236,13 @@ export const en = {
   "quota.start": "Anchor",
   "quota.end": "Hard end",
   "quota.empty": "No rules = unlimited",
+  "version.label": "Version",
+  "version.commit": "Commit",
+  "version.dirty": "Working tree had uncommitted changes",
+  "version.buildTime": "Build time",
+  "version.startedAt": "Started at",
+  "version.goVersion": "Go version",
+  "version.unknown": "unknown",
 } as const;
 
 export type MessageKey = keyof typeof en;

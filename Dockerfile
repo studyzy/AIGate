@@ -28,7 +28,10 @@ RUN go mod download
 
 COPY . .
 COPY --from=webui /src/internal/webui/dist ./internal/webui/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /aigate ./cmd/aigate
+
+# 构建期版本号：由 CI 以 --build-arg VERSION=$(git describe) 传入，缺省退化为 git 状态。
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X 'aigate/internal/version.Version=${VERSION}'" -o /aigate ./cmd/aigate
 
 FROM alpine:3.20
 

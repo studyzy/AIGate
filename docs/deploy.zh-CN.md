@@ -24,7 +24,7 @@ bin/aigate -db-type sqlite -db-dsn aigate.db -init-admin-token dev-admin-token
 
 走 SQLite 时，网关在启动阶段自动建表，无需任何 schema 步骤。`make build` 单独产出
 二进制，`make test` 运行单测。执行 `bin/aigate -version` 会在不触碰数据库的情况下
-打印 `Tencent Cloud AIGate 0.1.0`。
+打印版本号、commit、构建时间与 Go 版本。
 
 ## 生产：MySQL
 
@@ -88,8 +88,20 @@ schema 变更需在 GORM 模型与 `sql/init.sql` 两处同步（`init.sql` 是�
 `-init-admin-token` 只在尚不存在管理员时生效。若管理员已存在，该 flag 被忽略并记
 一条日志。token 以哈希入库，明文不落库。
 
-`-version`（或 `--version`）会在任何配置/数据库动作之前打印 `Tencent Cloud AIGate 0.1.0`
-并退出；它不接受其它 flag。
+`-version`（或 `--version`）会在任何配置/数据库动作之前打印多行构建信息
+（`Tencent Cloud AIGate <版本号>`、`commit`、`dirty`、`build time`、`go version`）并退出；
+它不接受其它 flag。同样的数据在运行时由 `GET /version` 提供（见 `API.zh-CN.md`），
+额外包含 `started_at`。
+
+各字段的取值方式：
+
+- `version` 由构建期注入。`make build` 使用 `git describe --tags --always --dirty`，
+  因此本地构建可能是 `v0.1.0-59-g6d75021-dirty` 而不是裸的 `v0.1.0`；Docker 镜像取
+  `--build-arg VERSION=...`（CI 传 tag 名）。两种形式都不是严格 SemVer，不要按
+  SemVer 解析 `version`；判断工作区是否有未提交改动请看独立的 `dirty` 字段。
+- `commit` / `build_time` 未注入时取自 Go 工具链写入的 VCS 元数据。
+- `dirty` 只对直接在工作区构建出的二进制有意义。Docker 与 CI 构建复制的是干净树，
+  恒为 `false`。
 
 ## 密钥加密
 

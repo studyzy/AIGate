@@ -5,6 +5,7 @@ import { useI18n } from "@/i18n";
 import type { MessageKey } from "@/i18n/en";
 
 import { Brand } from "./Brand";
+import { BuildInfoBadge } from "./BuildInfoBadge";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { useModalA11y } from "./ui/useModalA11y";
 import { LangSwitch } from "./LangSwitch";
@@ -134,6 +135,7 @@ export function AppLayout() {
             <Brand name={t("app.name")} />
           </div>
           <SidebarNavLinks />
+          <BuildInfoBadge />
         </aside>
       )}
 
@@ -151,6 +153,7 @@ export function AppLayout() {
               <Brand name={t("app.name")} />
             </div>
             <SidebarNavLinks onNavigate={closeMobile} />
+            <BuildInfoBadge />
           </aside>
           <div
             aria-hidden="true"

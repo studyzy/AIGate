@@ -33,6 +33,7 @@ error; see `cliExitOK` … `cliExitTransport` in `helpers_test.go`.
 | `webhook_test.go` | `TestE2E_Webhook_*` — subscriptions, signed delivery, events |
 | `webui_test.go` | `TestE2E_WebUI_*` — static hosting contract for `/ui/` |
 | `cli_test.go` | `TestE2E_CLI_*` — CLI closed loop and exit-code contract |
+| `version_test.go` | `TestE2E_Version` / `TestE2E_CLI_VersionCommands` — public `GET /version` and the gateway-vs-CLI version distinction |
 
 ## How to run
 
@@ -61,6 +62,15 @@ The script owns the whole environment lifecycle, so every run starts clean and l
   The root password is never empty: it defaults to `AIGate-e2e` and can be overridden with
   `AIGATE_E2E_MYSQL_PASSWORD`. The script passes it via `MYSQL_PWD` and the DSN, so it never shows up
   in command-line arguments; the logged DSN shows only the user.
+  Set `AIGATE_E2E_MYSQL_USE_EXISTING=1` to connect to an already running container instead of
+  starting one — e.g. a GitHub Actions `services` container, or a MySQL you already have. The
+  script then only creates and imports the database and never stops or removes the container.
+
+Two MySQL paths are covered: `run.sh` imports `sql/init.sql` into a freshly reset `aigate_e2e`,
+and `mysql_fresh_init_test.go` then creates a *separate* empty database, applies `sql/init.sql`
+to it and drives real traffic through the gateway, so a fresh install (the only path production
+uses — MySQL never auto-migrates) is verified end to end. `schema_parity_internal_test.go` in
+`internal/model` guards the model/`init.sql` column lists at unit-test time.
 
 Then, for both: `go build -o bin/aigate ./cmd/aigate` -> `go build -o bin/aigatectl ./cmd/aigatectl`
 -> export environment variables -> `go test -tags e2e -count=1 -v ./test/e2e/`.
@@ -104,6 +114,8 @@ environment without a database. Any test that drives the CLI checks `AIGATE_E2E_
   container itself). The host port defaults to `127.0.0.1:3306` and must be free; override with
   `MYSQL_HOST` / `MYSQL_PORT`, or `AIGATE_E2E_MYSQL_CONTAINER` /
   `AIGATE_E2E_MYSQL_IMAGE` / `AIGATE_E2E_MYSQL_PASSWORD`.
+  With `AIGATE_E2E_MYSQL_USE_EXISTING=1` a `docker` CLI on the host is still required (the script
+  reaches the database through `docker exec`), but no container is created or removed.
 - MySQL mode: nothing else — the image's own `mysql` client inside the container creates the database
   and imports the schema via `docker exec`; nothing is installed on the host.
 - MySQL mode: `sql/init.sql` exists at the repository root (the source of truth for the schema).

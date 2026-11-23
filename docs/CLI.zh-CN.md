@@ -3,7 +3,7 @@
 [English](CLI.md) | [简体中文](CLI.zh-CN.md)
 
 `aigatectl` 是 AIGate 的管控命令行工具。它把管理面 `/admin/*`、用户面 `/api/user/*`
-与 `GET /healthz` 共 **52 个端点** 变成 52 条稳定命令：命令与端点 1:1，不做工作流编排，
+与 `GET /healthz`、`GET /version` 共 **53 个端点** 变成 53 条稳定命令：命令与端点 1:1，不做工作流编排，
 也不封装数据面 `/v1/*` 推理入口。响应体原样写到 stdout，诊断信息只写 stderr，退出码固定，
 便于 shell 脚本、`make` 与 CI 直接调用。服务端一行未改：AIGate 仍是纯 API 服务。
 
@@ -22,7 +22,15 @@ aigatectl [global flags] <resource> <command> [flags]
 ```
 
 `--help` / `-h` 与 `version` 是本地命令，不发 HTTP 请求；`aigatectl version` 打印
-`aigatectl 0.1.0` 后退出 0。
+`aigatectl <版本> (local binary)` 后退出 0。
+
+`aigatectl` 与网关是**两个不同的二进制**，两边的版本必须区分：
+
+| 想查什么 | 命令 | 报告的是 |
+|---|---|---|
+| CLI 二进制自身的版本 | `aigatectl version` | 本机 `aigatectl`（带 `(local binary)` 标识） |
+| 后端服务的版本 / commit | `aigatectl build-info` | 远端网关，经 `GET /version` |
+| 后端服务的版本 / commit | `aigatectl version --remote` | 请求与输出同 `build-info`，但先打一行标明本地二进制版本与所查询的网关地址（该行只在请求成功后写 stdout；失败时 stdout 为空、诊断写 stderr、退出码 5） |
 
 ## 2. 配置与凭据
 
@@ -44,6 +52,7 @@ aigatectl [global flags] <resource> <command> [flags]
 | `AIGATE_ADMIN_TOKEN` | `/admin/*` | 管理面 admin 访问 token |
 | `AIGATE_USER_TOKEN` | `/api/user/*` | 用户面访问 token；未设置时回退 `AIGATE_ADMIN_TOKEN` |
 | （无） | `/healthz` | 健康检查不需要凭据 |
+| （无） | `/version` | 构建信息同样不需要凭据 |
 
 按命令所属资源组自动选择 token，无需用户切换；所需 token 缺失时本地校验失败、退出 2，
 且不发出请求。
@@ -61,10 +70,10 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 `--help` 可写为 `-h`。`self` 的两个子组 `usage`、`keys` 需要再取一级动作，因此命令名是
 三个 token（如 `self usage summary`、`self keys list`）。
 
-## 3. 命令总表（52 条）
+## 3. 命令总表（53 条）
 
 每行给出两种等价写法：反引号包裹的 `METHOD /path` 端点标记，以及箭头后「方法 +
-反引号路径」的请求行写法；命令表与 `docs/openapi.yaml` 的 52 个端点（不含 `/v1/*`）保持一致。
+反引号路径」的请求行写法；命令表与 `docs/openapi.yaml` 的 53 个端点（不含 `/v1/*`）保持一致。
 管理面没有 `GET /admin/users/{id}`，因此不提供 `users get`。
 
 | # | 命令 | 方法 · 路径 | 示例 |
@@ -121,10 +130,11 @@ aigatectl self keys --help             # 子组：list/get/create/update/delete/
 | 50 | `self keys rotate` | `POST /api/user/keys/{id}/rotate` → POST `/api/user/keys/{id}/rotate` | `aigatectl self keys rotate --id 1` |
 | 51 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
 | 52 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
+| 53 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
 
 `health` 是单 token 命令（`aigatectl health`），不需要任何凭据；其余命令为
 `<resource> <command>` 两级（`self` 子组为三级）。本地命令 `version` 与 `--help`
-不计入这 52 条 HTTP 命令。
+不计入这 53 条 HTTP 命令。
 
 ## 4. 查询参数（query flag）
 
@@ -198,5 +208,12 @@ cat credential.json | aigatectl credentials create --data -     # 或从 stdin �
 - `create` / `rotate` 类命令响应里的 `token` 是一次性明文，只经 stdout 出现一次，
   不写日志、不缓存、不落盘；之后任何列表/详情接口都不再回显。
 - 管理面没有 `GET /admin/users/{id}`，故不提供 `users get`。
-- `health` 对应 `GET /healthz`，不需要任何凭据；`version` 是本地命令，不发请求。
+- `health` 对应 `GET /healthz`，不需要任何凭据；`version` 是本地命令，报告的是
+  **aigatectl 二进制自身**，不发请求。
+- `build-info` 对应 `GET /version`，不需要凭据，原样打印**网关**的构建信息
+  （`version`、`commit`、`build_time`、`dirty`、`go_version`、`started_at`），
+  可直接 `aigatectl build-info | jq .commit`。`version --remote` 是它的别名：
+  请求与 JSON 输出完全相同，只是先加一行标明本地二进制版本与所查询的网关地址，
+  避免把两个二进制的版本混为一谈。这一行只在请求成功后写 stdout；网关不可达或返回
+  非 2xx 时 stdout 保持为空，失败信息只进 stderr，因此 `| jq` 不会读到多余的一行。
 - 2xx 响应体原样写 stdout（不解析、不重排、不加装饰）；非 2xx 的诊断信息只写 stderr。

@@ -9,9 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Build info everywhere** — a public, unauthenticated `GET /version` returns the running
+  binary's `version`, `commit`, `build_time`, `dirty`, `go_version` and `started_at`, so an
+  operator can confirm which code and commit a deployment actually serves. The value is
+  assembled by the new `internal/version` package: `version` is injected at build time via
+  `-ldflags` (Makefile and Docker `--build-arg VERSION`; the Makefile default is
+  `git describe --tags --always --dirty`, so it is not strict SemVer), while `commit`/`build_time`
+  fall back to the VCS metadata the Go toolchain stamps automatically, so even a bare
+  `go build` reports a real commit. `dirty` is only meaningful for builds made from a
+  working tree; Docker and CI builds copy a clean tree and always report `false`.
+  `-version` now prints the same information,
+  `aigatectl build-info` (alias `version --remote`, which prefixes a line naming the
+  local binary and the gateway URL, written only after a successful response) queries
+  the gateway, while bare `aigatectl version`
+  keeps reporting the CLI binary itself, and the admin
+  console shows the version and short commit at the bottom of the sidebar with the full
+  details on hover. `/healthz` is unchanged.
+
 - **`aigatectl` management CLI** — a second binary (`make build-cli` → `bin/aigatectl`)
-  that exposes all 52 non-`/v1/*` endpoints (39 `/admin/*` + 12 `/api/user/*` +
-  `GET /healthz`) as discoverable commands, built on a reusable `internal/client` HTTP
+  that exposes all 53 non-`/v1/*` endpoints (39 `/admin/*` + 12 `/api/user/*` +
+  `GET /healthz` + `GET /version`) as discoverable commands, built on a reusable `internal/client` HTTP
   client and covered by end-to-end tests. Credentials are read only from the environment;
   see [docs/CLI.md](docs/CLI.md).
 - **Model discovery** — `POST /admin/models/discover` lists the model ids an

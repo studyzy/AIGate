@@ -28,8 +28,8 @@ bin/aigate -db-type sqlite -db-dsn aigate.db -init-admin-token dev-admin-token
 
 On SQLite the gateway creates its tables automatically at startup, so there is
 no schema step. `make build` produces the binary on its own, and `make test`
-runs the unit tests. Run `bin/aigate -version` to print `Tencent Cloud AIGate 0.1.0`
-without touching the database.
+runs the unit tests. Run `bin/aigate -version` to print the version, commit, build
+time and Go version, without touching the database.
 
 ## Production: MySQL
 
@@ -99,8 +99,21 @@ rather than fall back silently.
 already present the flag is ignored and a log line records that. The token is
 stored as a hash; the plaintext is never persisted.
 
-`-version` (or `--version`) prints `Tencent Cloud AIGate 0.1.0` and exits before any
-configuration or database work; it takes no other flags.
+`-version` (or `--version`) prints the multi-line build info (`Tencent Cloud AIGate
+<version>`, `commit`, `dirty`, `build time`, `go version`) and exits before any
+configuration or database work; it takes no other flags. The same data is served
+at runtime by `GET /version` (see `API.md`), where `started_at` is also included.
+
+How the fields are filled:
+
+- `version` is injected at build time. `make build` uses `git describe --tags
+  --always --dirty`, so a local build may read `v0.1.0-59-g6d75021-dirty` rather
+  than a bare `v0.1.0`. The Docker image takes `--build-arg VERSION=...` (CI passes
+  the tag name). Neither form is strict SemVer — do not parse `version` as one;
+  use the separate `dirty` field to detect an uncommitted tree.
+- `commit` / `build_time` come from the Go toolchain's VCS stamp unless injected.
+- `dirty` is only meaningful for builds made directly from a working tree. Docker
+  and CI builds copy a clean tree, so it is always `false` there.
 
 ## Secret encryption
 

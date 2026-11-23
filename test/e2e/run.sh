@@ -22,6 +22,8 @@
 #   MYSQL_HOST (default 127.0.0.1), MYSQL_PORT (default 3306), MYSQL_USER (default root)
 #   AIGATE_E2E_MYSQL_IMAGE (default mysql:8.0), AIGATE_E2E_MYSQL_CONTAINER (default aigate-e2e-mysql),
 #   AIGATE_E2E_MYSQL_PASSWORD (default AIGate-e2e; the container root password, never empty)
+#   AIGATE_E2E_MYSQL_USE_EXISTING (default 0; set 1 to connect to an already running container
+#                                  instead of starting one, e.g. a GitHub Actions services container)
 #   AIGATE_E2E_SQLITE_DSN (sqlite only, default ./.e2e/aigate_e2e.db; deleted and recreated on every run)
 set -euo pipefail
 
@@ -37,6 +39,8 @@ MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_USER="${MYSQL_USER:-root}"
 MYSQL_IMAGE="${AIGATE_E2E_MYSQL_IMAGE:-mysql:8.0}"
 MYSQL_CONTAINER="${AIGATE_E2E_MYSQL_CONTAINER:-aigate-e2e-mysql}"
+# 为 1 时假定容器已在运行（CI services 场景），不自行 docker run，退出时也不 docker rm。
+USE_EXISTING_MYSQL="${AIGATE_E2E_MYSQL_USE_EXISTING:-0}"
 # 容器 root 密码：不用空密码/弱密码。可用 AIGATE_E2E_MYSQL_PASSWORD 覆盖，避免明文出现在 ps 输出里。
 MYSQL_PASSWORD="${AIGATE_E2E_MYSQL_PASSWORD:-AIGate-e2e}"
 SQLITE_DSN="${AIGATE_E2E_SQLITE_DSN:-${REPO_ROOT}/.e2e/aigate_e2e.db}"
@@ -96,22 +100,27 @@ if [[ "${DB_TYPE}" == "mysql" ]]; then
   fi
 
   if ! command -v docker >/dev/null 2>&1; then
-    log "docker not found, a MySQL container is required to run the MySQL e2e."
+    log "docker not found, a MySQL container (or AIGATE_E2E_MYSQL_CONTAINER) is required to run the MySQL e2e."
     exit 1
   fi
 
-  # 每次都新起容器：先清掉同名旧容器，保证不残留上一次的数据卷/进程。
-  if docker ps -a --format '{{.Names}}' | grep -qx "${MYSQL_CONTAINER}"; then
-    log "Removing the leftover container ${MYSQL_CONTAINER} ..."
-    docker rm -f "${MYSQL_CONTAINER}" >/dev/null
-  fi
+  # 复用已在运行的容器（如 CI 的 services 容器）：只连进去建库导入，退出时不停不删。
+  if [[ "${USE_EXISTING_MYSQL}" == "1" ]]; then
+    log "Reusing the running MySQL container ${MYSQL_CONTAINER} on ${MYSQL_HOST}:${MYSQL_PORT} ..."
+  else
+    # 每次都新起容器：先清掉同名旧容器，保证不残留上一次的数据卷/进程。
+    if docker ps -a --format '{{.Names}}' | grep -qx "${MYSQL_CONTAINER}"; then
+      log "Removing the leftover container ${MYSQL_CONTAINER} ..."
+      docker rm -f "${MYSQL_CONTAINER}" >/dev/null
+    fi
 
-  log "Starting MySQL container ${MYSQL_CONTAINER} (${MYSQL_IMAGE}) on ${MYSQL_HOST}:${MYSQL_PORT} ..."
-  docker run -d --name "${MYSQL_CONTAINER}" \
-    -e MYSQL_ROOT_PASSWORD="${MYSQL_PASSWORD}" \
-    -p "${MYSQL_PORT}:3306" \
-    "${MYSQL_IMAGE}" >/dev/null
-  container_started=1
+    log "Starting MySQL container ${MYSQL_CONTAINER} (${MYSQL_IMAGE}) on ${MYSQL_HOST}:${MYSQL_PORT} ..."
+    docker run -d --name "${MYSQL_CONTAINER}" \
+      -e MYSQL_ROOT_PASSWORD="${MYSQL_PASSWORD}" \
+      -p "${MYSQL_PORT}:3306" \
+      "${MYSQL_IMAGE}" >/dev/null
+    container_started=1
+  fi
 
   # 建库与导入全部用镜像自带的 mysql 客户端经 docker exec 完成，宿主机无需安装任何 MySQL 工具。
   # 密码经 -e MYSQL_PWD 注入容器内进程，不落在命令行参数里。

@@ -11,6 +11,7 @@ info:
     - **管理面** `/admin/*`：以 `role=admin` 用户的访问 token（`gk-…`）经 `Authorization: Bearer` 鉴权。
     - **用户面** `/api/user/*`：任意启用用户（`user` / `admin`）的访问 token 均可访问，`user` 角色强制行级隔离到本人。
     - **健康检查** `/healthz`：无需鉴权。
+    - **构建信息** `/version`：无需鉴权，返回版本号、commit、构建时间与进程启动时间。
 
     约定：
 
@@ -49,6 +50,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+
+  /version:
+    get:
+      tags: [health]
+      summary: 构建信息
+      description: |
+        无需鉴权。返回当前运行二进制的版本号、commit、构建时间与进程启动时间，
+        供运维核对部署实际服务的代码版本；不含配置、依赖或内部端点信息。
+      security: []
+      responses:
+        '200':
+          description: 构建与启动信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildInfo'
 
   /v1/chat/completions:
     post:
@@ -1775,6 +1792,38 @@ components:
           type: string
           example: ok
       required: [status]
+
+    BuildInfo:
+      type: object
+      description: |
+        构建与启动信息。`commit` / `build_time` 优先取链接器注入值，其次取 Go 工具链写入的
+        VCS 元数据；两者都不可得时为 `unknown`。`dirty=true` 表示构建时工作区有未提交改动，
+        该字段只对直接在工作区构建出的二进制有意义（Docker / CI 构建恒为 `false`）。
+        `version` 取自 `git describe`（例如 `v0.1.0-59-g6d75021-dirty`），不是严格 SemVer。
+      properties:
+        version:
+          type: string
+          description: 构建期注入的版本串（`git describe` 形式），不是严格 SemVer
+          example: v0.1.0
+        commit:
+          type: string
+          description: 完整 git commit，或 unknown
+          example: b5744933e2f316b6d50f780ed7f7c7fb1cb87dcc
+        build_time:
+          type: string
+          description: 构建（commit）时间，RFC3339 UTC，或 unknown
+          example: "2026-11-23T03:49:23Z"
+        dirty:
+          type: boolean
+          example: false
+        go_version:
+          type: string
+          example: go1.24.12
+        started_at:
+          type: string
+          description: 进程启动时间，RFC3339 UTC，或 unknown
+          example: "2026-11-23T05:56:29Z"
+      required: [version, commit, build_time, dirty, go_version, started_at]
 
     Ok:
       type: object

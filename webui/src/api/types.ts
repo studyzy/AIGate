@@ -246,3 +246,13 @@ export interface QuotaRule {
   end?: number;
   refresh?: "daily" | "monthly" | "yearly" | "none";
 }
+
+/** 网关构建信息，对齐 GET /version（公开端点，无需鉴权）。 */
+export interface BuildInfo {
+  version: string;
+  commit: string;
+  build_time: string;
+  dirty: boolean;
+  go_version: string;
+  started_at: string;
+}

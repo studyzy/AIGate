@@ -39,3 +39,7 @@ coverage.out
 # WebUI 浏览器 e2e 产物
 /webui/test-results/
 /webui/playwright-report/
+
+# scripts/check.sh 的本地构建缓存与 e2e 临时库
+/.cache/
+/.e2e/

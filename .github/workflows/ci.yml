@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# 同一分支/PR 只保留最新一次运行，旧 run 直接取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go:
     runs-on: ubuntu-latest
@@ -24,6 +29,8 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l cmd internal test)"
 
+      # 只校验能否编译：internal/webui/dist 里只有 .gitkeep（go:embed all: 匹配点文件），
+      # 这里产出的不是可用的发行二进制，带前端的构建见 Makefile / Dockerfile。
       - name: Build
         run: go build ./...
 
@@ -32,6 +39,44 @@ jobs:
 
       - name: Test
         run: go test -race ./... -count=1
+
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, mysql]
+    services:
+      mysql:
+        # sqlite 矩阵不实际使用；为让矩阵两种取值共用同一份 job 定义而始终声明。
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: AIGate-e2e
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pAIGate-e2e"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # mysql：连 services 容器建库并导入 sql/init.sql，覆盖生产 schema。
+      # sqlite：网关启动时 AutoMigrate 建表，覆盖本地开发路径。
+      - name: E2E (${{ matrix.db }})
+        env:
+          AIGATE_E2E_DB_TYPE: ${{ matrix.db }}
+          AIGATE_E2E_MYSQL_PASSWORD: AIGate-e2e
+          AIGATE_E2E_MYSQL_USE_EXISTING: "1"
+        run: bash test/e2e/run.sh
 
   webui:
     runs-on: ubuntu-latest
@@ -64,6 +109,7 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # 类型检查已包含在 pnpm build（tsc -b 后 vite build）里，单测单独一步。
       - name: Typecheck and build
         run: pnpm build
 

@@ -3,14 +3,19 @@ PNPM ?= pnpm
 BIN := bin/aigate
 CLI_BIN := bin/aigatectl
 
+# 构建期信息：版本号默认取 git tag（无 tag 时退化为 v0.0.0），由链接器注入；
+# commit 与构建时间由 Go 工具链自动写入 VCS 元数据，无需额外传参。
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0)
+LDFLAGS := -X 'aigate/internal/version.Version=$(VERSION)'
+
 .PHONY: build build-cli build-webui run test test-webui test-e2e test-e2e-sqlite test-e2e-mysql test-e2e-webui vet fmt tidy clean
 
 # 先构建前端再编译二进制：go:embed 打包的是 internal/webui/dist 里的真实产物。
 build: build-webui
-	$(GO) build -o $(BIN) ./cmd/aigate
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/aigate
 
 build-cli:
-	$(GO) build -o $(CLI_BIN) ./cmd/aigatectl
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(CLI_BIN) ./cmd/aigatectl
 
 build-webui:
 	$(PNPM) --dir webui install --frozen-lockfile
