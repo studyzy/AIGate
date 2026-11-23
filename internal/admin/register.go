@@ -23,20 +23,37 @@ import (
 	"net/http"
 
 	"aigate/internal/auth"
+	"aigate/internal/billing"
 	"aigate/internal/model"
 )
 
 // Register 在 mux 上注册全部管理面路由。
-func Register(mux *http.ServeMux, store *model.Store) {
+//
+// src 是数据面共用的同一个 billing.StoreSource 实例：价目、日历、汇率与结算币种的写入
+// 必须经它失效进程内缓存（缓存没有自动失效钩子）。传入 nil 时写操作照常落库、只是不失效
+// 缓存——仅供未装配数据面的纯 HTTP 测试使用；生产装配必须传入真实实例。
+func Register(mux *http.ServeMux, store *model.Store, src *billing.StoreSource) {
 	m := http.NewServeMux()
 
-	m.HandleFunc("POST /admin/models", handleCreateModel(store))
+	m.HandleFunc("POST /admin/models", handleCreateModel(store, src))
 	m.HandleFunc("GET /admin/models", handleListModels(store))
 	m.HandleFunc("GET /admin/models/{id}", handleGetModel(store))
-	m.HandleFunc("PUT /admin/models/{id}", handleUpdateModel(store))
+	m.HandleFunc("PUT /admin/models/{id}", handleUpdateModel(store, src))
 	m.HandleFunc("DELETE /admin/models/{id}", handleDeleteModel(store))
 	m.HandleFunc("POST /admin/models/{id}/connectivity", handleModelConnectivity(store))
 	m.HandleFunc("POST /admin/models/discover", handleDiscoverModels(store))
+
+	m.HandleFunc("GET /admin/models/{id}/prices", handleListModelPrices(store))
+	m.HandleFunc("POST /admin/models/{id}/prices", handleCreateModelPrice(store, src))
+	m.HandleFunc("DELETE /admin/model-prices/{id}", handleDeleteModelPrice(store, src))
+
+	m.HandleFunc("GET /admin/billing-calendar", handleListBillingCalendar(store))
+	m.HandleFunc("PUT /admin/billing-calendar", handleUpsertBillingCalendar(store, src))
+	m.HandleFunc("DELETE /admin/billing-calendar/{date}", handleDeleteBillingCalendarDay(store, src))
+
+	m.HandleFunc("GET /admin/currency-rates", handleListCurrencyRates(store))
+	m.HandleFunc("POST /admin/currency-rates", handleCreateCurrencyRate(store, src))
+	m.HandleFunc("DELETE /admin/currency-rates/{id}", handleDeleteCurrencyRate(store, src))
 
 	m.HandleFunc("POST /admin/credentials", handleCreateCredential(store))
 	m.HandleFunc("GET /admin/credentials", handleListCredentials(store))
@@ -68,7 +85,7 @@ func Register(mux *http.ServeMux, store *model.Store) {
 	m.HandleFunc("GET /admin/usage/logs", handleUsageLogs(store))
 
 	m.HandleFunc("GET /admin/settings", handleGetSettings(store))
-	m.HandleFunc("PUT /admin/settings", handleUpdateSettings(store))
+	m.HandleFunc("PUT /admin/settings", handleUpdateSettings(store, src))
 
 	m.HandleFunc("POST /admin/webhooks", handleCreateWebhook(store))
 	m.HandleFunc("GET /admin/webhooks", handleListWebhooks(store))

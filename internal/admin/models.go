@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"aigate/internal/billing"
 	"aigate/internal/httpx"
 	"aigate/internal/model"
 )
@@ -38,12 +39,21 @@ type modelResponse struct {
 	QuotaDay          int               `json:"quota_day"`
 	Enabled           bool              `json:"enabled"`
 	// UserKeyRequired 用户自备 Key 模式：不保存共享密钥，转发密钥只取密钥绑定行；创建后不可变更。
-	UserKeyRequired bool      `json:"user_key_required"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	UserKeyRequired bool `json:"user_key_required"`
+	// Currency 模型计价币种（ISO 4217）；空串表示未配置，不参与金额记账。
+	Currency string `json:"currency"`
+	// EnablePeakPricing 是否启用峰谷定价（时段配置在价目快照里）。
+	EnablePeakPricing bool `json:"enable_peak_pricing"`
+	// UseUpstreamCost 是否优先采信上游自报的 usage.cost。
+	UseUpstreamCost bool `json:"use_upstream_cost"`
+	// CurrentPrice 当前生效的价目快照；无价目时为 null。
+	CurrentPrice *priceResponse `json:"current_price"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 // modelCreateRequest 是创建请求；quota_day / enabled 缺省时分别取 -1 / true。
+// use_upstream_cost 缺省为 true（与列默认值一致），enable_peak_pricing 缺省为 false。
 type modelCreateRequest struct {
 	Provider          string           `json:"provider"`
 	ModelID           string           `json:"model_id"`
@@ -57,6 +67,9 @@ type modelCreateRequest struct {
 	QuotaDay          *int             `json:"quota_day"`
 	Enabled           *bool            `json:"enabled"`
 	UserKeyRequired   *bool            `json:"user_key_required"`
+	Currency          string           `json:"currency"`
+	EnablePeakPricing *bool            `json:"enable_peak_pricing"`
+	UseUpstreamCost   *bool            `json:"use_upstream_cost"`
 }
 
 // modelUpdateRequest 是局部更新请求：指针字段用于区分「未传」与「零值」。
@@ -73,9 +86,13 @@ type modelUpdateRequest struct {
 	QuotaDay          *int             `json:"quota_day"`
 	Enabled           *bool            `json:"enabled"`
 	UserKeyRequired   *bool            `json:"user_key_required"`
+	Currency          *string          `json:"currency"`
+	EnablePeakPricing *bool            `json:"enable_peak_pricing"`
+	UseUpstreamCost   *bool            `json:"use_upstream_cost"`
 }
 
-func handleCreateModel(store *model.Store) http.HandlerFunc {
+// handleCreateModel 创建模型；成功后失效该模型的计价缓存（币种/开关即刻对数据面生效）。
+func handleCreateModel(store *model.Store, src *billing.StoreSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req modelCreateRequest
 		if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -105,6 +122,12 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 		// 自备 Key 模式标记（入参校验见 validateModelCreate）。
 		userKeyRequired := req.UserKeyRequired != nil && *req.UserKeyRequired
 
+		currency, ok := normalizeCurrency(req.Currency)
+		if !ok {
+			httpx.WriteError(w, http.StatusBadRequest, "currency must be a 3-letter ISO 4217 code")
+			return
+		}
+
 		billingMode, msg := resolveBillingMode(req.ModelType, req.BillingMode)
 		if msg != "" {
 			httpx.WriteError(w, http.StatusBadRequest, msg)
@@ -121,6 +144,10 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 			CustomHTTPHeaders: headers,
 			QuotaDay:          -1,
 			Enabled:           true,
+			Currency:          currency,
+			// 缺省与列默认值一致：采信上游自报成本，不启用峰谷定价。
+			UseUpstreamCost:   req.UseUpstreamCost == nil || *req.UseUpstreamCost,
+			EnablePeakPricing: req.EnablePeakPricing != nil && *req.EnablePeakPricing,
 		}
 		if req.CredentialID != nil {
 			m.CredentialID = *req.CredentialID
@@ -136,8 +163,8 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 			writeInternalError(w, err)
 			return
 		}
-		// 带 default 标签的零值字段在 INSERT 时会被 GORM 跳过（enabled=false / quota_day=0），
-		// 请求显式给出这些零值时补一次定向更新，避免落成库默认值。
+		// 带 default 标签的零值字段在 INSERT 时会被 GORM 跳过（enabled=false / quota_day=0）：
+		// 显式给出这些零值的请求补一次定向更新，避免落成库默认值（use_upstream_cost=false 同理）。
 		if patch := modelZeroValuePatch(req); len(patch) > 0 {
 			updated, err := store.UpdateAIModel(r.Context(), m.ID, patch)
 			if err != nil {
@@ -146,6 +173,8 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 			}
 			m = updated
 		}
+		// 新模型的计价配置即刻对数据面生效（没有自动失效钩子）。
+		invalidateModel(src, m.ID)
 		httpx.WriteJSON(w, http.StatusCreated, toModelResponse(m))
 	}
 }
@@ -177,11 +206,17 @@ func handleGetModel(store *model.Store) http.HandlerFunc {
 			writeLookupError(w, err, "model")
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, toModelResponse(m))
+		resp, err := toModelResponseWithPrice(r, store, m)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, resp)
 	}
 }
 
-func handleUpdateModel(store *model.Store) http.HandlerFunc {
+// handleUpdateModel 局部更新模型；改动计价相关字段（currency / 两个开关）后失效该模型的计价缓存。
+func handleUpdateModel(store *model.Store, src *billing.StoreSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := httpx.ParseUintID(r, "id")
 		if !ok {
@@ -250,7 +285,14 @@ func handleUpdateModel(store *model.Store) http.HandlerFunc {
 			writeLookupError(w, err, "model")
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, toModelResponse(m))
+		// 任何字段变更都失效该模型的计价缓存（幂等：未改计价字段时只是多读一次库）。
+		invalidateModel(src, id)
+		resp, err := toModelResponseWithPrice(r, store, m)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -288,9 +330,23 @@ func toModelResponse(m *model.AIModel) modelResponse {
 		QuotaDay:          m.QuotaDay,
 		Enabled:           m.Enabled,
 		UserKeyRequired:   m.UserKeyRequired,
+		Currency:          m.Currency,
+		EnablePeakPricing: m.EnablePeakPricing,
+		UseUpstreamCost:   m.UseUpstreamCost,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}
+}
+
+// toModelResponseWithPrice 在模型对外表示上附带当前生效价目（无价目为 null）。
+func toModelResponseWithPrice(r *http.Request, store *model.Store, m *model.AIModel) (modelResponse, error) {
+	resp := toModelResponse(m)
+	price, err := currentPrice(r, store, m.ID)
+	if err != nil {
+		return modelResponse{}, err
+	}
+	resp.CurrentPrice = price
+	return resp, nil
 }
 
 // validateModelCreate 校验模型创建请求的纯字段约束，返回错误消息（空串表示通过）。
@@ -380,6 +436,19 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 	if req.Enabled != nil {
 		fields["enabled"] = *req.Enabled
 	}
+	if req.Currency != nil {
+		currency, ok := normalizeCurrency(*req.Currency)
+		if !ok {
+			return nil, "currency must be a 3-letter ISO 4217 code"
+		}
+		fields["currency"] = currency
+	}
+	if req.EnablePeakPricing != nil {
+		fields["enable_peak_pricing"] = *req.EnablePeakPricing
+	}
+	if req.UseUpstreamCost != nil {
+		fields["use_upstream_cost"] = *req.UseUpstreamCost
+	}
 	return fields, ""
 }
 
@@ -438,6 +507,10 @@ func modelZeroValuePatch(req modelCreateRequest) map[string]any {
 	}
 	if req.QuotaDay != nil && *req.QuotaDay == 0 {
 		patch["quota_day"] = 0
+	}
+	// use_upstream_cost 列默认 true：显式传 false 时 Create 会跳过零值，需补写。
+	if req.UseUpstreamCost != nil && !*req.UseUpstreamCost {
+		patch["use_upstream_cost"] = false
 	}
 	return patch
 }

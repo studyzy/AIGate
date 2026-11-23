@@ -27,6 +27,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"aigate/internal/admin"
+	"aigate/internal/billing"
 	"aigate/internal/crypto"
 	"aigate/internal/model"
 )
@@ -46,7 +47,7 @@ func credServer(t *testing.T) (*httptest.Server, *model.Store, string, string) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	mux := http.NewServeMux()
-	admin.Register(mux, store)
+	admin.Register(mux, store, billing.NewStoreSource(store))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

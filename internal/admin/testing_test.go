@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"aigate/internal/admin"
+	"aigate/internal/billing"
 	"aigate/internal/httpx"
 	"aigate/internal/model"
 )
@@ -51,15 +52,24 @@ func newTestStore(t *testing.T) *model.Store {
 	return store
 }
 
-// newTestServer 建库并装配真实 HTTP 服务。
+// newTestServer 建库并装配真实 HTTP 服务（计价数据源由 newTestBillingServer 覆盖）。
 func newTestServer(t *testing.T) (*httptest.Server, *model.Store) {
 	t.Helper()
+	srv, store, _ := newTestBillingServer(t)
+	return srv, store
+}
+
+// newTestBillingServer 建库并装配管理面 HTTP 服务，额外返回数据面共用的同一个
+// billing.StoreSource —— 计费写操作写完后必须通过它读回，才能证明缓存失效生效。
+func newTestBillingServer(t *testing.T) (*httptest.Server, *model.Store, *billing.StoreSource) {
+	t.Helper()
 	store := newTestStore(t)
+	src := billing.NewStoreSource(store)
 	mux := http.NewServeMux()
-	admin.Register(mux, store)
+	admin.Register(mux, store, src)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, store
+	return srv, store, src
 }
 
 // newAdminServer 在测试服务中预置一个管理员用户，返回其明文 token。

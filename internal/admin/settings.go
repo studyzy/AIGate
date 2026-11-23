@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"aigate/internal/billing"
 	"aigate/internal/httpx"
 	"aigate/internal/model"
 	"aigate/internal/quota"
@@ -35,6 +36,8 @@ type settingsResponse struct {
 	GlobalTokenQuotaRules  string `json:"global_token_quota_rules"`
 	GlobalQuotaScope       string `json:"global_quota_scope"`
 	UserKeyLimit           int    `json:"user_key_limit"`
+	// PlatformCurrency 平台结算币种（ISO 4217 三位大写，全局唯一）。
+	PlatformCurrency string `json:"platform_currency"`
 }
 
 // settingsUpdateRequest 是局部更新请求：指针字段用于区分「未传」与「零值」。
@@ -43,6 +46,7 @@ type settingsUpdateRequest struct {
 	GlobalTokenQuotaRules  *string `json:"global_token_quota_rules"`
 	GlobalQuotaScope       *string `json:"global_quota_scope"`
 	UserKeyLimit           *int    `json:"user_key_limit"`
+	PlatformCurrency       *string `json:"platform_currency"`
 }
 
 func handleGetSettings(store *model.Store) http.HandlerFunc {
@@ -56,7 +60,8 @@ func handleGetSettings(store *model.Store) http.HandlerFunc {
 	}
 }
 
-func handleUpdateSettings(store *model.Store) http.HandlerFunc {
+// handleUpdateSettings 局部更新全局设置；改动平台结算币种后失效数据面的结算币种缓存。
+func handleUpdateSettings(store *model.Store, src *billing.StoreSource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req settingsUpdateRequest
 		if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -95,6 +100,15 @@ func handleUpdateSettings(store *model.Store) http.HandlerFunc {
 			}
 			fields["user_key_limit"] = *req.UserKeyLimit
 		}
+		// 结算币种必须显式给出（空串不是「未配置」，而是非法值）。
+		if req.PlatformCurrency != nil {
+			currency, ok := normalizeCurrency(*req.PlatformCurrency)
+			if !ok || currency == "" {
+				httpx.WriteError(w, http.StatusBadRequest, "platform_currency must be a 3-letter ISO 4217 code")
+				return
+			}
+			fields["platform_currency"] = currency
+		}
 
 		// 先确保单例设置行存在（model 层的更新不做 upsert，否则首次 PUT 会静默丢弃）。
 		if _, err := store.GetSettings(r.Context()); err != nil {
@@ -106,6 +120,10 @@ func handleUpdateSettings(store *model.Store) http.HandlerFunc {
 			writeInternalError(w, err)
 			return
 		}
+		// 结算币种是独立缓存的；其余字段变更时该失效是无害的幂等操作。
+		if req.PlatformCurrency != nil {
+			invalidatePlatformCurrency(src)
+		}
 		httpx.WriteJSON(w, http.StatusOK, toSettingsResponse(st))
 	}
 }
@@ -116,6 +134,7 @@ func toSettingsResponse(st *model.Setting) settingsResponse {
 		GlobalTokenQuotaRules:  st.GlobalTokenQuotaRules,
 		GlobalQuotaScope:       st.GlobalQuotaScope,
 		UserKeyLimit:           st.UserKeyLimit,
+		PlatformCurrency:       st.PlatformCurrency,
 	}
 }
 
