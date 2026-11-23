@@ -72,9 +72,14 @@ func handleUsageLogs(store *model.Store) http.HandlerFunc {
 			writeInternalError(w, err)
 			return
 		}
+		settings, err := store.GetSettings(r.Context())
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		rows := make([]usageLogRow, 0, len(logs))
 		for i := range logs {
-			rows = append(rows, queryparams.ToUsageLogRow(&logs[i]))
+			rows = append(rows, queryparams.ToUsageLogRow(&logs[i], settings.PlatformCurrency))
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"logs":      rows,

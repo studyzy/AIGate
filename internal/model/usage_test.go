@@ -206,3 +206,84 @@ func TestUpsertDailyUsage_DateUsesBusinessTimezone(t *testing.T) {
 		t.Fatalf("Date zone offset = %d, want 0 (date-only label stored in UTC)", offset)
 	}
 }
+
+// 聚合查询的金额口径：
+//   - group_by=model 时行内币种唯一，cost_vendor_micros 有意义且保留；
+//   - 其余维度可能跨币种，cost_vendor_micros 一律置 0 并由 MixedCurrency 提示；
+//   - cost_platform_micros 已统一到结算币种，任何维度都可相加。
+func TestQueryUsageSummary_CostColumnsAndMixedCurrency(t *testing.T) {
+	store, _ := newTestStoreAt(t)
+	ctx := testCtx()
+
+	seed := []*model.LLMUsageLog{
+		{UserID: 1, AIModelID: 1, TotalTokens: 10, Currency: "CNY", CostVendorMicros: 500_000, CostPlatformMicros: 500_000},
+		{UserID: 1, AIModelID: 2, TotalTokens: 10, Currency: "USD", CostVendorMicros: 100_000, CostPlatformMicros: 710_000},
+	}
+	for i, e := range seed {
+		if err := store.UpsertDailyUsage(ctx, e); err != nil {
+			t.Fatalf("upsert seed[%d]: %v", i, err)
+		}
+	}
+
+	t.Run("group_by_model_keeps_vendor_cost_per_currency", func(t *testing.T) {
+		rows, err := store.QueryUsageSummary(ctx, model.UsageFilter{}, "model")
+		if err != nil {
+			t.Fatalf("QueryUsageSummary: %v", err)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("rows = %d, want 2 (%+v)", len(rows), rows)
+		}
+		want := map[uint]struct {
+			currency     string
+			vendor, plat int64
+		}{
+			1: {"CNY", 500_000, 500_000},
+			2: {"USD", 100_000, 710_000},
+		}
+		for _, row := range rows {
+			w := want[row.AIModelID]
+			if row.Currency != w.currency || row.CostVendorMicros != w.vendor ||
+				row.CostPlatformMicros != w.plat || row.MixedCurrency {
+				t.Fatalf("model %d row = %+v, want %+v with mixed_currency=false", row.AIModelID, row, w)
+			}
+		}
+	})
+
+	t.Run("other_dimensions_zero_vendor_cost_and_flag_mixed", func(t *testing.T) {
+		for _, groupBy := range []string{"date", "user", "key", "group"} {
+			rows, err := store.QueryUsageSummary(ctx, model.UsageFilter{}, groupBy)
+			if err != nil {
+				t.Fatalf("QueryUsageSummary(%s): %v", groupBy, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("%s rows empty", groupBy)
+			}
+			for _, row := range rows {
+				if row.CostVendorMicros != 0 {
+					t.Fatalf("%s row vendor cost = %d, want 0", groupBy, row.CostVendorMicros)
+				}
+				if !row.MixedCurrency {
+					t.Fatalf("%s row mixed_currency = false, want true (%+v)", groupBy, row)
+				}
+			}
+		}
+		rows, err := store.QueryUsageSummary(ctx, model.UsageFilter{}, "user")
+		if err != nil {
+			t.Fatalf("QueryUsageSummary(user): %v", err)
+		}
+		if rows[0].CostPlatformMicros != 1_210_000 {
+			t.Fatalf("platform cost = %d, want 1210000", rows[0].CostPlatformMicros)
+		}
+	})
+
+	t.Run("single_currency_group_is_not_mixed", func(t *testing.T) {
+		f := model.UsageFilter{AIModelID: 2}
+		rows, err := store.QueryUsageSummary(ctx, f, "date")
+		if err != nil {
+			t.Fatalf("QueryUsageSummary: %v", err)
+		}
+		if len(rows) != 1 || rows[0].MixedCurrency || rows[0].CostPlatformMicros != 710_000 {
+			t.Fatalf("rows = %+v, want one non-mixed CNY row", rows)
+		}
+	})
+}

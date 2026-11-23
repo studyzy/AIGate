@@ -39,21 +39,29 @@ const (
 
 // UsageLogRow 是用量明细的对外表示（显式 JSON 字段名，不含任何内部/敏感列）。
 type UsageLogRow struct {
-	ID                     uint      `json:"id"`
-	APIKeyID               uint      `json:"api_key_id"`
-	UserID                 uint      `json:"user_id"`
-	GroupID                uint      `json:"group_id"`
-	AIModelID              uint      `json:"ai_model_id"`
-	Model                  string    `json:"model"`
-	Provider               string    `json:"provider"`
-	PromptTokens           int       `json:"prompt_tokens"`
-	CompletionTokens       int       `json:"completion_tokens"`
-	TotalTokens            int       `json:"total_tokens"`
-	PromptCacheReadTokens  int       `json:"prompt_cache_read_tokens"`
-	PromptCacheWriteTokens int       `json:"prompt_cache_write_tokens"`
-	StatusCode             int       `json:"status_code"`
-	Latency                int       `json:"latency"`
-	CreatedAt              time.Time `json:"created_at"`
+	ID                     uint   `json:"id"`
+	APIKeyID               uint   `json:"api_key_id"`
+	UserID                 uint   `json:"user_id"`
+	GroupID                uint   `json:"group_id"`
+	AIModelID              uint   `json:"ai_model_id"`
+	Model                  string `json:"model"`
+	Provider               string `json:"provider"`
+	PromptTokens           int    `json:"prompt_tokens"`
+	CompletionTokens       int    `json:"completion_tokens"`
+	TotalTokens            int    `json:"total_tokens"`
+	PromptCacheReadTokens  int    `json:"prompt_cache_read_tokens"`
+	PromptCacheWriteTokens int    `json:"prompt_cache_write_tokens"`
+	StatusCode             int    `json:"status_code"`
+	Latency                int    `json:"latency"`
+	// Currency 为本行金额的计价币种，取平台结算币种：明细表不冗余币种，
+	// 而两列金额中 cost_platform_micros 已按记账时刻汇率统一到结算币种、恒可相加，
+	// 故这里报告结算币种而非模型币种（后者需 join ai_models，且与结算金额不同币种）。
+	Currency string `json:"currency"`
+	// CostVendorMicros 记账时的模型币种金额（微元）；币种见 ai_models.currency，本行 Currency 不适用于它。
+	CostVendorMicros int64 `json:"cost_vendor_micros"`
+	// CostPlatformMicros 记账时的平台结算币种金额（微元）；与 Currency 同币种。
+	CostPlatformMicros int64     `json:"cost_platform_micros"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // ValidGroupBy 校验聚合维度取值。
@@ -145,7 +153,11 @@ func parseUintQuery(raw, name string) (uint, error) {
 }
 
 // ToUsageLogRow 将用量日志实体转为对外表示。
-func ToUsageLogRow(l *model.LLMUsageLog) UsageLogRow {
+// platformCurrency 为平台结算币种（取自设置），作为行级金额币种；空串时退回 model.DefaultPlatformCurrency。
+func ToUsageLogRow(l *model.LLMUsageLog, platformCurrency string) UsageLogRow {
+	if platformCurrency == "" {
+		platformCurrency = model.DefaultPlatformCurrency
+	}
 	return UsageLogRow{
 		ID:                     l.ID,
 		APIKeyID:               l.APIKeyID,
@@ -161,6 +173,9 @@ func ToUsageLogRow(l *model.LLMUsageLog) UsageLogRow {
 		PromptCacheWriteTokens: l.PromptCacheWriteTokens,
 		StatusCode:             l.StatusCode,
 		Latency:                l.Latency,
+		Currency:               platformCurrency,
+		CostVendorMicros:       l.CostVendorMicros,
+		CostPlatformMicros:     l.CostPlatformMicros,
 		CreatedAt:              l.CreatedAt,
 	}
 }

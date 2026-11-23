@@ -245,10 +245,15 @@ type UsageSummaryRow struct {
 	PromptCacheReadTokens  int64      `json:"prompt_cache_read_tokens"`
 	PromptCacheWriteTokens int64      `json:"prompt_cache_write_tokens"`
 	RequestCount           int64      `json:"request_count"`
-	// Currency 仅在 group_by=model 时唯一有意义；跨模型聚合时可能混合，由上层标记。
-	Currency           string `json:"currency,omitempty"`
-	CostVendorMicros   int64  `json:"cost_vendor_micros"`
-	CostPlatformMicros int64  `json:"cost_platform_micros"`
+	// Currency 仅在 group_by=model 时唯一有意义；跨模型聚合时币种可能混合（见 MixedCurrency）。
+	Currency string `json:"currency,omitempty"`
+	// CostVendorMicros 模型币种金额（微元）：仅 group_by=model 时有意义，
+	// 其余维度币种可能混合、不可相加，恒为 0。
+	CostVendorMicros int64 `json:"cost_vendor_micros"`
+	// CostPlatformMicros 平台结算币种金额（微元）：记账时刻已统一到结算币种，任何维度都可相加。
+	CostPlatformMicros int64 `json:"cost_platform_micros"`
+	// MixedCurrency 标识本聚合行跨越了多个计价币种（MAX(currency) <> MIN(currency)）。
+	MixedCurrency bool `json:"mixed_currency,omitempty"`
 }
 
 const usageSumSelect = "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
@@ -259,7 +264,8 @@ const usageSumSelect = "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, " +
 	"COALESCE(SUM(request_count), 0) AS request_count, " +
 	"COALESCE(SUM(cost_vendor_micros), 0) AS cost_vendor_micros, " +
 	"COALESCE(SUM(cost_platform_micros), 0) AS cost_platform_micros, " +
-	"COALESCE(MAX(currency), '') AS currency"
+	"COALESCE(MAX(currency), '') AS currency, " +
+	"CASE WHEN MAX(currency) <> MIN(currency) THEN 1 ELSE 0 END AS mixed_currency"
 
 // QueryUsageSummary 按 groupBy（date | model | key | user）聚合日用量表；groupBy 非法时按 date。
 func (s *Store) QueryUsageSummary(ctx context.Context, f UsageFilter, groupBy string) ([]UsageSummaryRow, error) {
@@ -279,6 +285,13 @@ func (s *Store) QueryUsageSummary(ctx context.Context, f UsageFilter, groupBy st
 	err := q.Select(col + ", " + usageSumSelect).Group(col).Order(col + " ASC").Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("query usage summary: %w", err)
+	}
+	// 非 model 维度可能跨币种：模型币种金额不可相加，置 0 并由 mixed_currency 提示，
+	// 只有结算币种金额（cost_platform_micros）在这些维度上仍有意义。
+	if groupBy != "model" {
+		for i := range rows {
+			rows[i].CostVendorMicros = 0
+		}
 	}
 	return rows, nil
 }

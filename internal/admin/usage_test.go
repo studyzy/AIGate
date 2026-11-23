@@ -16,6 +16,7 @@ package admin_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,6 +245,135 @@ func TestUsageLogs_PaginationAndOrder(t *testing.T) {
 			if status != http.StatusBadRequest {
 				t.Errorf("%s want 400, got %d, body: %s", q, status, body)
 			}
+		}
+	})
+}
+
+// seedCostUsage 写入一条带金额的用量并同步日聚合：日聚合按聚合键去重累计，
+// 故不同模型（AIModelID）才能形成跨币种的两行。
+func seedCostUsage(t *testing.T, store *model.Store, modelID uint, currency string, vendor, platform int64) {
+	t.Helper()
+	entry := &model.LLMUsageLog{
+		UserID:             1,
+		APIKeyID:           1,
+		AIModelID:          modelID,
+		Model:              "cost-model",
+		Provider:           "mock",
+		TotalTokens:        10,
+		StatusCode:         http.StatusOK,
+		Currency:           currency,
+		CostVendorMicros:   vendor,
+		CostPlatformMicros: platform,
+	}
+	if err := store.UpsertDailyUsage(context.Background(), entry); err != nil {
+		t.Fatalf("upsert daily usage: %v", err)
+	}
+	if err := store.InsertUsageLog(context.Background(), entry); err != nil {
+		t.Fatalf("insert usage log: %v", err)
+	}
+}
+
+// 聚合响应顶层带结算金额合计与结算币种。
+func TestUsageSummary_IncludesCostTotals(t *testing.T) {
+	srv, store, adminToken := newAdminServer(t)
+	seedCostUsage(t, store, 1, "CNY", 500_000, 500_000)
+	seedCostUsage(t, store, 2, "USD", 100_000, 710_000)
+
+	for _, groupBy := range []string{"date", "user", "group"} {
+		status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/summary?group_by="+groupBy, adminToken, nil)
+		assertStatus(t, status, http.StatusOK, body)
+		got := mustDecode[usageSummaryResp](t, body)
+		if got.TotalCostPlatformMicros != 1_210_000 || got.PlatformCurrency != "CNY" {
+			t.Fatalf("group_by=%s summary = %+v", groupBy, got)
+		}
+	}
+
+	// 过滤后合计只覆盖命中行。
+	status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/summary?ai_model_id=2", adminToken, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	if got := mustDecode[usageSummaryResp](t, body); got.TotalCostPlatformMicros != 710_000 {
+		t.Fatalf("filtered total = %d, want 710000", got.TotalCostPlatformMicros)
+	}
+}
+
+// 非 model 维度跨币种时 cost_vendor_micros 置 0 且 mixed_currency=true；
+// group_by=model 时行币种唯一，模型币种金额保留。
+func TestUsageSummary_MixedCurrencyFlag(t *testing.T) {
+	srv, store, adminToken := newAdminServer(t)
+	seedCostUsage(t, store, 1, "CNY", 500_000, 500_000)
+	seedCostUsage(t, store, 2, "USD", 100_000, 710_000)
+
+	status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/summary?group_by=date", adminToken, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	rows := mustDecode[usageSummaryResp](t, body).Rows
+	if len(rows) != 1 || !rows[0].MixedCurrency {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].CostVendorMicros != 0 || rows[0].CostPlatformMicros != 1_210_000 {
+		t.Fatalf("mixed row costs = %d/%d, want 0/1210000", rows[0].CostVendorMicros, rows[0].CostPlatformMicros)
+	}
+
+	status, body = doRequest(t, srv, http.MethodGet, "/admin/usage/summary?group_by=model", adminToken, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	byModel := make(map[uint]usageSummaryRowResp)
+	for _, row := range mustDecode[usageSummaryResp](t, body).Rows {
+		byModel[row.AIModelID] = row
+	}
+	if r := byModel[1]; r.Currency != "CNY" || r.CostVendorMicros != 500_000 || r.MixedCurrency {
+		t.Errorf("model 1 row = %+v", r)
+	}
+	if r := byModel[2]; r.Currency != "USD" || r.CostVendorMicros != 100_000 || r.MixedCurrency {
+		t.Errorf("model 2 row = %+v", r)
+	}
+}
+
+// 明细行带两列金额，币种取平台结算币种（明细表不冗余币种）。
+func TestUsageLogs_IncludesCostColumns(t *testing.T) {
+	srv, store, adminToken := newAdminServer(t)
+	seedCostUsage(t, store, 1, "USD", 100_000, 710_000)
+
+	status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/logs", adminToken, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	logs := mustDecode[usageLogsResp](t, body).Logs
+	if len(logs) != 1 {
+		t.Fatalf("logs = %d, want 1", len(logs))
+	}
+	row := logs[0]
+	if row.Currency != "CNY" || row.CostVendorMicros != 100_000 || row.CostPlatformMicros != 710_000 {
+		t.Fatalf("log row = %+v", row)
+	}
+}
+
+// CSV 表头与管理面明细 JSON 字段一一对应，金额列在 created_at 之前。
+func TestUsageExport_HeaderHasCostColumns(t *testing.T) {
+	srv, store, adminToken := newAdminServer(t)
+	seedCostUsage(t, store, 1, "USD", 100_000, 710_000)
+
+	status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/export?format=csv", adminToken, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	want := "status_code,latency,cost_vendor_micros,cost_platform_micros,created_at"
+	if !strings.HasSuffix(lines[0], want) {
+		t.Fatalf("csv header = %s, want suffix %s", lines[0], want)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("csv rows = %q, want header + 1 record", lines)
+	}
+	if !strings.Contains(lines[1], ",100000,710000,") {
+		t.Fatalf("csv data row lacks cost columns: %s", lines[1])
+	}
+
+	t.Run("json export mirrors cost columns", func(t *testing.T) {
+		status, body := doRequest(t, srv, http.MethodGet, "/admin/usage/export?format=json", adminToken, nil)
+		assertStatus(t, status, http.StatusOK, body)
+		got := mustDecode[struct {
+			Logs []usageLogResp `json:"logs"`
+		}](t, body)
+		if len(got.Logs) != 1 {
+			t.Fatalf("json export logs = %d, want 1", len(got.Logs))
+		}
+		if row := got.Logs[0]; row.CostPlatformMicros != 710_000 || row.Currency != "CNY" {
+			t.Fatalf("json export row = %+v", row)
 		}
 	})
 }

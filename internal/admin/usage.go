@@ -55,7 +55,23 @@ func handleUsageSummary(store *model.Store) http.HandlerFunc {
 		if rows == nil {
 			rows = []model.UsageSummaryRow{}
 		}
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"group_by": groupBy, "rows": rows})
+		settings, err := store.GetSettings(r.Context())
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		// cost_platform_micros 在记账时刻已统一到结算币种，跨行求和有意义，
+		// 顶层合计即当前返回（已过滤）行的结算金额之和；币种取设置中的结算币种。
+		var totalCostPlatformMicros int64
+		for i := range rows {
+			totalCostPlatformMicros += rows[i].CostPlatformMicros
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"group_by":                   groupBy,
+			"rows":                       rows,
+			"total_cost_platform_micros": totalCostPlatformMicros,
+			"platform_currency":          settings.PlatformCurrency,
+		})
 	}
 }
 
@@ -77,9 +93,14 @@ func handleUsageLogs(store *model.Store) http.HandlerFunc {
 			writeInternalError(w, err)
 			return
 		}
+		settings, err := store.GetSettings(r.Context())
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		rows := make([]usageLogRow, 0, len(logs))
 		for i := range logs {
-			rows = append(rows, queryparams.ToUsageLogRow(&logs[i]))
+			rows = append(rows, queryparams.ToUsageLogRow(&logs[i], settings.PlatformCurrency))
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"logs":      rows,
@@ -109,11 +130,17 @@ func handleUsageExport(store *model.Store) http.HandlerFunc {
 		if format == "" {
 			format = "csv"
 		}
+		// 行级金额币种取平台结算币种，CSV 与 JSON 两条导出路径同源。
+		settings, err := store.GetSettings(r.Context())
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		switch format {
 		case "csv":
 			exportUsageCSV(w, r, store, f)
 		case "json":
-			exportUsageJSON(w, r, store, f)
+			exportUsageJSON(w, r, store, f, settings.PlatformCurrency)
 		default:
 			httpx.WriteError(w, http.StatusBadRequest, "format must be csv or json")
 		}
@@ -125,7 +152,7 @@ var usageExportCSVColumns = []string{
 	"id", "api_key_id", "user_id", "group_id", "ai_model_id", "model", "provider",
 	"prompt_tokens", "completion_tokens", "total_tokens",
 	"prompt_cache_read_tokens", "prompt_cache_write_tokens",
-	"status_code", "latency", "created_at",
+	"status_code", "latency", "cost_vendor_micros", "cost_platform_micros", "created_at",
 }
 
 func exportUsageCSV(w http.ResponseWriter, r *http.Request, store *model.Store, f model.UsageFilter) {
@@ -149,6 +176,7 @@ func exportUsageCSV(w http.ResponseWriter, r *http.Request, store *model.Store, 
 				strconv.Itoa(row.PromptTokens), strconv.Itoa(row.CompletionTokens), strconv.Itoa(row.TotalTokens),
 				strconv.Itoa(row.PromptCacheReadTokens), strconv.Itoa(row.PromptCacheWriteTokens),
 				strconv.Itoa(row.StatusCode), strconv.Itoa(row.Latency),
+				strconv.FormatInt(row.CostVendorMicros, 10), strconv.FormatInt(row.CostPlatformMicros, 10),
 				row.CreatedAt.UTC().Format(time.RFC3339),
 			}
 			if err := cw.Write(record); err != nil {
@@ -165,7 +193,13 @@ func exportUsageCSV(w http.ResponseWriter, r *http.Request, store *model.Store, 
 	cw.Flush()
 }
 
-func exportUsageJSON(w http.ResponseWriter, r *http.Request, store *model.Store, f model.UsageFilter) {
+func exportUsageJSON(
+	w http.ResponseWriter,
+	r *http.Request,
+	store *model.Store,
+	f model.UsageFilter,
+	platformCurrency string,
+) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", `attachment; filename="usage-export.json"`)
 	if _, err := io.WriteString(w, `{"logs":[`); err != nil {
@@ -174,7 +208,7 @@ func exportUsageJSON(w http.ResponseWriter, r *http.Request, store *model.Store,
 	first := true
 	err := store.ExportUsageLogs(r.Context(), f, usageExportBatch, func(rows []model.LLMUsageLog) error {
 		for i := range rows {
-			payload, err := json.Marshal(queryparams.ToUsageLogRow(&rows[i]))
+			payload, err := json.Marshal(queryparams.ToUsageLogRow(&rows[i], platformCurrency))
 			if err != nil {
 				return err
 			}

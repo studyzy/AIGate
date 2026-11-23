@@ -288,11 +288,17 @@ type usageSummaryRowResp struct {
 	PromptCacheReadTokens  int64  `json:"prompt_cache_read_tokens"`
 	PromptCacheWriteTokens int64  `json:"prompt_cache_write_tokens"`
 	RequestCount           int64  `json:"request_count"`
+	Currency               string `json:"currency"`
+	CostVendorMicros       int64  `json:"cost_vendor_micros"`
+	CostPlatformMicros     int64  `json:"cost_platform_micros"`
+	MixedCurrency          bool   `json:"mixed_currency"`
 }
 
 type usageSummaryResp struct {
-	GroupBy string                `json:"group_by"`
-	Rows    []usageSummaryRowResp `json:"rows"`
+	GroupBy                 string                `json:"group_by"`
+	Rows                    []usageSummaryRowResp `json:"rows"`
+	TotalCostPlatformMicros int64                 `json:"total_cost_platform_micros"`
+	PlatformCurrency        string                `json:"platform_currency"`
 }
 
 type usageLogResp struct {
@@ -310,6 +316,9 @@ type usageLogResp struct {
 	PromptCacheWriteTokens int    `json:"prompt_cache_write_tokens"`
 	StatusCode             int    `json:"status_code"`
 	Latency                int    `json:"latency"`
+	Currency               string `json:"currency"`
+	CostVendorMicros       int64  `json:"cost_vendor_micros"`
+	CostPlatformMicros     int64  `json:"cost_platform_micros"`
 	CreatedAt              string `json:"created_at"`
 }
 
