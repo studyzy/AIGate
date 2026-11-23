@@ -38,6 +38,8 @@ Every error response — on all planes — uses a single shape, with `code` equa
 
 The one exception is the data plane's `/v1/messages`, which uses the Anthropic error envelope (see that endpoint).
 
+Optionally, an error body may carry extra keys next to the mandatory three. Quota rejections add `unit` (`token` or `cost`) and, for cost rules, `currency` — see §3.10.
+
 ### Admin token bootstrap
 
 On startup the gateway ensures that at least one `role=admin` user exists:
@@ -168,7 +170,7 @@ The response uses `Content-Type: text/event-stream` with `Cache-Control: no-cach
 | 400 | `invalid json body` | The body is not a JSON object. |
 | 400 | `requested model is not bound to this key` | An explicit `model` did not match any enabled binding. |
 | 400 | `no available model for this key` | No `model` supplied and no enabled `primary` binding exists. |
-| 429 / 403 | `Global token quota exceeded` / `Model daily token quota exceeded` / `User token quota exceeded` / `Key token quota exceeded` | A quota check rejected the request. The status is `-quota-exceeded-status` (default `429`) and a `Retry-After` header is set. |
+| 429 / 403 | `Global token quota exceeded` / `Model daily token quota exceeded` / `User token quota exceeded` / `Key token quota exceeded` | A quota check rejected the request. The status is `-quota-exceeded-status` (default `429`) and a `Retry-After` header is set. The body also names the measurement: `unit` (`token` or `cost`) and, for cost rules, `currency` — see §3.10. |
 | 500 | `internal server error` | Failed to resolve the model (database error). |
 | 500 | `streaming not supported by server` | `stream: true` but the server cannot flush the response. |
 | 502 | `failed to connect to LLM backend` | Non-streaming: DNS/connect/TLS/timeout failure reaching the upstream. Details (including upstream addresses) are logged server-side only. |
@@ -702,6 +704,10 @@ Model objects returned by the API:
 | `custom_http_headers` | object \| null | Allowed headers for passthrough (string values). |
 | `quota_day` | integer | Model-level daily token quota; `-1` means unlimited. |
 | `enabled` | bool | Disabled models are immediately unroutable. |
+| `currency` | string | Pricing currency (ISO 4217). `""` = unconfigured, and the model does not participate in cost accounting (see "Cost billing" in §3.10). |
+| `enable_peak_pricing` | bool | Peak/off-peak pricing switch (default `false`). When off, requests are always billed at the **off-peak** columns. |
+| `use_upstream_cost` | bool | Trust the upstream-reported `usage.cost` (default `true`). When on and the upstream reports `cost > 0`, that value is used instead of computing from the price table. |
+| `current_price` | object \| null | The currently effective price snapshot (the newest one whose `effective_at` is not in the future); `null` when the model has no price yet. Same shape as a price row (see §3.10). |
 | `created_at` / `updated_at` | string | RFC 3339 timestamps. |
 
 `api_key` is **never** present in any response.
@@ -722,6 +728,9 @@ Model objects returned by the API:
 | `quota_day` | integer | no | `-1` | |
 | `enabled` | bool | no | `true` | |
 | `user_key_required` | bool | no | `false` | BYOK mode: the model stores **no** shared key and the per-binding key is used instead. Rejected with `400` when combined with a non-empty `api_key` or a `credential_id > 0`; the flag cannot be changed after creation. |
+| `currency` | string | no | `""` | Pricing currency, ISO 4217 three letters (case-insensitive, normalised to upper case). Anything else yields `400 currency must be a 3-letter ISO 4217 code`. |
+| `enable_peak_pricing` | bool | no | `false` | |
+| `use_upstream_cost` | bool | no | `true` | |
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/models \
@@ -779,6 +788,9 @@ Partial update. Only the fields present in the body are changed (absent fields a
 | `quota_day` | integer | |
 | `enabled` | bool | |
 | `user_key_required` | bool | Immutable: sending a value that differs from the current one is rejected with `400 user_key_required cannot be changed after creation`. For BYOK models, a non-empty `api_key` or `credential_id > 0` is rejected with `400`. |
+| `currency` | string | ISO 4217 three letters; `""` clears the pricing currency. Changing it invalidates the model's price cache immediately and never rewrites rows already accounted. |
+| `enable_peak_pricing` | bool | |
+| `use_upstream_cost` | bool | |
 
 ```bash
 curl -X PUT http://127.0.0.1:8080/admin/models/1 \
@@ -1294,13 +1306,28 @@ Aggregated token usage. Query parameters:
       "total_tokens": 160,
       "prompt_cache_read_tokens": 0,
       "prompt_cache_write_tokens": 0,
-      "request_count": 3
+      "request_count": 3,
+      "currency": "",
+      "cost_vendor_micros": 0,
+      "cost_platform_micros": 500000
     }
-  ]
+  ],
+  "total_cost_platform_micros": 500000,
+  "platform_currency": "CNY"
 }
 ```
 
 The `date` field is present only when `group_by=date`. `rows` is `[]` when there is no data.
+
+Money fields (details in §3.10):
+
+| Field | Notes |
+|-------|-------|
+| `cost_platform_micros` | Settlement amount in integer micros of `platform_currency`. Already normalised at accounting time, so it adds up across any grouping. |
+| `cost_vendor_micros` | Model-currency amount in integer micros. **Meaningful only when `group_by=model`** — other groupings may span currencies, so it is always `0` there. |
+| `currency` | Currency of the row's amounts. Only unique for `group_by=model`; otherwise it is `MAX(currency)`. |
+| `mixed_currency` | Present as `true` when the row spans several pricing currencies; treat the amounts per model then. |
+| `total_cost_platform_micros` / `platform_currency` | Envelope-level sum of the returned rows, in the platform settlement currency. |
 
 #### GET /admin/usage/logs
 
@@ -1324,6 +1351,9 @@ Per-request usage details, newest first. Accepts the same time-range and id filt
       "prompt_cache_write_tokens": 0,
       "status_code": 200,
       "latency": 512,
+      "currency": "CNY",
+      "cost_vendor_micros": 500000,
+      "cost_platform_micros": 500000,
       "created_at": "2026-09-01T16:00:00Z"
     }
   ],
@@ -1344,8 +1374,10 @@ Streams usage details (the same fields as `/admin/usage/logs`) as a downloadable
 | `format` | string | `csv` (default) or `json`. Anything else returns `400 format must be csv or json`. |
 | `start` / `end` / `user_id` / `group_id` / `api_key_id` / `ai_model_id` | — | Same semantics as `/admin/usage/logs`. |
 
-- `format=csv` → `text/csv` attachment with a header row (`id,api_key_id,user_id,group_id,ai_model_id,model,provider,prompt_tokens,completion_tokens,total_tokens,prompt_cache_read_tokens,prompt_cache_write_tokens,status_code,latency,created_at`).
-- `format=json` → `{"logs": [ … ]}` streamed with the same row objects as `logs`.
+- `format=csv` → `text/csv` attachment with a header row (`id,api_key_id,user_id,group_id,ai_model_id,model,provider,prompt_tokens,completion_tokens,total_tokens,prompt_cache_read_tokens,prompt_cache_write_tokens,status_code,latency,cost_vendor_micros,cost_platform_micros,created_at`).
+- `format=json` → `{"logs": [ … ]}` streamed with the same row objects as `logs` (`cost_vendor_micros`, `cost_platform_micros` and `currency` included).
+
+Money amounts are **integer micros** in both formats — see §3.10 for the unit and the meaning of the two columns.
 
 ```bash
 curl -OJ http://127.0.0.1:8080/admin/usage/export?format=csv&start=2026-09-01   -H "Authorization: Bearer <ADMIN_TOKEN>"
@@ -1361,17 +1393,19 @@ Global settings, stored as a single row.
 | `global_token_quota_rules` | string | JSON text containing a rule array. The global tier. |
 | `global_quota_scope` | string | `site` or `group`. How global usage is counted. |
 | `user_key_limit` | integer | Maximum self-service keys per user; default `5`; `0` = unlimited (see §4.4). |
+| `platform_currency` | string | Platform settlement currency (ISO 4217, upper case); default `CNY`. Every request's `cost_platform_micros` is converted to this currency at accounting time and frozen there. |
 
 #### GET /admin/settings
 
-Returns the current settings, creating the default row on first access. Defaults are `"[]"`, `"[]"`, `site`, `5`.
+Returns the current settings, creating the default row on first access. Defaults are `"[]"`, `"[]"`, `site`, `5`, `CNY`.
 
 ```json
 {
   "default_token_quota_rules": "[]",
   "global_token_quota_rules": "[]",
   "global_quota_scope": "site",
-  "user_key_limit": 5
+  "user_key_limit": 5,
+  "platform_currency": "CNY"
 }
 ```
 
@@ -1385,6 +1419,7 @@ Partial update.
 | `global_token_quota_rules` | string | Must be a valid JSON array. |
 | `global_quota_scope` | string | Must be `site` or `group`. |
 | `user_key_limit` | integer | Must be `>= 0`; `0` means unlimited. |
+| `platform_currency` | string | Must be a 3-letter ISO 4217 code; an empty string is rejected (there is no "unset" settlement currency). Case-insensitive, stored upper case. Changing it only affects requests accounted afterwards. |
 
 ```bash
 curl -X PUT http://127.0.0.1:8080/admin/settings \
@@ -1398,7 +1433,7 @@ Response `200 OK` — the full settings object.
 | Status | Condition |
 |--------|-----------|
 | 200 | Updated. |
-| 400 | Invalid JSON; rules not a JSON array; invalid scope; `user_key_limit < 0`. |
+| 400 | Invalid JSON; rules not a JSON array; invalid scope; `user_key_limit < 0`; invalid `platform_currency`. |
 | 500 | Database error. |
 
 ### 3.8 Webhooks
@@ -1573,6 +1608,170 @@ curl -X POST http://127.0.0.1:8080/admin/import \
   }'
 ```
 
+### 3.10 Cost billing
+
+The gateway can bill by **money** next to tokens: each model carries a price table, every
+request records what it cost, quotas can be limited in money, and the usage reports expose
+the amounts. Nothing here is on by default — a model with no `currency` simply keeps
+recording `0`.
+
+#### Money is integer micros
+
+Every amount in the API is an **integer number of micros**, one micro being `1e-6` of a
+currency unit (`_micros` suffix). One currency unit is `1000000` micros, so four decimal
+places (and two more) are exact: `0.0025` CNY is `2500`. Arithmetic on the server is
+all-integer; clients divide by `1e6` for display.
+
+Price columns are **micros per million tokens**: "1 CNY per million tokens" is `1000000`,
+"0.02 CNY per million" is `20000`.
+
+#### Two money columns, two currencies
+
+Each usage row carries two amounts, both frozen at accounting time:
+
+| Column | Currency | Meaning |
+|--------|----------|---------|
+| `cost_vendor_micros` | `ai_models.currency` of the model at accounting time | What the request cost in the provider's currency. |
+| `cost_platform_micros` | `settings.platform_currency` (default `CNY`) | The same cost converted to the settlement currency, via the FX rate effective at accounting time. |
+
+Both are written once, when the request is accounted. Changing a price, a model currency,
+an FX rate or `platform_currency` later **never rewrites history**: old rows keep the
+amounts they were billed at. Same-currency models need no rate (`platform = vendor`).
+When the model currency differs from the settlement currency and no rate covers the
+accounting instant, the vendor amount is still stored and the platform amount is recorded
+as `0`.
+
+Usage rows do not carry the model currency: join `ai_models.currency` for
+`cost_vendor_micros`. That is why a summary row's `currency` describes only
+`cost_platform_micros` / the `group_by=model` amounts, and why `cost_vendor_micros` is `0`
+outside `group_by=model`.
+
+#### Price snapshots and the six raw columns
+
+Prices live in append-only snapshots, written through the routes below. A snapshot always
+carries six **raw** columns — three peak tiers and three off-peak tiers, never a multiplier:
+
+| Column | Tier |
+|--------|------|
+| `peak_input_hit_micros` / `offpeak_input_hit_micros` | Input, cache hit |
+| `peak_input_miss_micros` / `offpeak_input_miss_micros` | Input, cache miss |
+| `peak_output_micros` / `offpeak_output_micros` | Output |
+
+The cost of a request is `Σ(tokens in tier × that tier's price_micros) / 1000000`, picking
+one tier set per request:
+
+1. **Upstream-reported cost wins.** When `use_upstream_cost` is `true` (the default) and the
+   upstream response carries `usage.cost > 0`, that value (rounded to micros) is stored as
+   `cost_vendor_micros` and no price is consulted.
+2. **Otherwise the gateway computes it**, and `enable_peak_pricing` is the switch:
+   - `enable_peak_pricing = false` (the default) → **always the off-peak columns**, even if
+     `peak_hours` is configured or broken;
+   - `enable_peak_pricing = true` → the peak/off-peak decision below;
+   - when the schedule cannot be evaluated (no `peak_hours`, bad timezone, malformed window,
+     all `days` out of range) the request is billed at **peak** prices — fail closed, never a
+     silent discount. Only models that opted in can take this path.
+
+#### Peak hours and the billing calendar
+
+`peak_hours` is per price snapshot and is passed as a JSON **string**:
+
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "windows": [
+    {"days": [1, 2, 3, 4, 5], "start": "09:00", "end": "12:00"},
+    {"days": [1, 2, 3, 4, 5], "start": "14:00", "end": "18:00"}
+  ]
+}
+```
+
+- `timezone` is an IANA name; `windows` must be non-empty when a timezone is given.
+- `days` uses Go `time.Weekday` numbering (`0` = Sunday … `6` = Saturday) and names the day
+  the window **starts**.
+- `start`/`end` are `HH:MM` (`24:00` is valid). The interval is half-open `[start, end)`;
+  `end <= start` wraps past midnight, and the next day's `[00:00, end)` also counts.
+- `{}` (or an empty string / `null`) means "no schedule".
+- The **billing calendar** overrides the weekday rule: a date registered with
+  `is_workday: false` is never peak (holidays), a date registered `true` stays a working day
+  (make-up working days). Unregistered dates fall back to Monday–Friday = working day.
+- Admin writes reject a `peak_hours` that could not be evaluated (bad timezone, malformed
+  clock, unusable `days`), because such a value would silently bill peak forever.
+
+#### Routes
+
+| Route | Purpose |
+|-------|---------|
+| `GET /admin/models/{id}/prices` | List price snapshots, newest first: `{"prices": [...]}`. |
+| `POST /admin/models/{id}/prices` | Append a snapshot; `201` with the row. `effective_at` (RFC 3339) is required; `currency` defaults to the model's. A duplicate `effective_at` for the same model returns `409`. |
+| `DELETE /admin/model-prices/{id}` | Delete a price row by **price** id: `{"ok": true}`. |
+| `GET /admin/billing-calendar?year=2026[&month=10]` | Registered dates for the year (or month): `{"year": 2026, "days": [...]}`. `year` defaults to the current business-timezone year. |
+| `PUT /admin/billing-calendar` | Upsert by date: `{"days": [{"date": "2026-10-01", "is_workday": false, "note": "国庆"}]}`. Non-empty array, unique dates, `is_workday` required on every entry; responds with the same shape. |
+| `DELETE /admin/billing-calendar/{date}` | Remove the override for a `YYYY-MM-DD` date: `{"ok": true}`. |
+| `GET /admin/currency-rates?from=USD&to=CNY` | Rate snapshots for the pair (both required): `{"from_currency": "USD", "to_currency": "CNY", "rates": [...]}`. |
+| `POST /admin/currency-rates` | Append a rate: `{"from_currency", "to_currency", "effective_at", "rate_micros"}` → `201`. Same currency returns `400`; duplicate `effective_at` returns `409`. |
+| `DELETE /admin/currency-rates/{id}` | Delete a rate row by id: `{"ok": true}`. |
+
+`rate_micros` reads "1 unit of `from_currency` = `rate_micros/1e6` units of `to_currency`"
+(the usual FX quotation, applied as a multiplication). It must be between `1` and
+`1000000000`.
+
+Every successful write invalidates the data plane's in-process cache for that kind of data,
+so the next request already sees the new price, calendar or rate — no restart needed.
+
+```bash
+# Price a model at 1 CNY / 0.3 CNY (cache hit) per million tokens, peak twice the off-peak
+curl -X POST http://127.0.0.1:8080/admin/models/1/prices \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "effective_at": "2026-11-01T00:00:00Z",
+    "peak_hours": "{\"timezone\":\"Asia/Shanghai\",\"windows\":[{\"days\":[1,2,3,4,5],\"start\":\"09:00\",\"end\":\"12:00\"}]}",
+    "offpeak_input_hit_micros": 150000, "offpeak_input_miss_micros": 4500000, "offpeak_output_micros": 13500000,
+    "peak_input_hit_micros": 300000,    "peak_input_miss_micros": 9000000, "peak_output_micros": 27000000
+  }'
+
+# Bill an upstream that prices in USD against a CNY settlement currency
+curl -X POST http://127.0.0.1:8080/admin/currency-rates \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"from_currency": "USD", "to_currency": "CNY", "effective_at": "2026-11-01T00:00:00Z", "rate_micros": 7100000}'
+```
+
+#### Quota rules in money
+
+Quota rules gained an optional `unit`:
+
+| `unit` | Window usage compared with `limit` |
+|--------|------------------------------------|
+| `""` / `"token"` (default) | `SUM(total_tokens)` — unchanged behaviour of every pre-existing rule. |
+| `"cost"` | `SUM(cost_platform_micros)` against `limit × 1_000_000`; `limit` is a **whole-unit** amount of the settlement currency, capped at `9000000000000`. |
+
+Anything else in `unit` is rejected on write. `unit=token` (and the empty string) is
+normalised away, so stored rule JSON for existing rules stays byte-identical. See
+`/api/user/quota` (§4.2) for how the unit surfaces in the per-rule view.
+
+#### Quota rejections carry `unit` and `currency`
+
+A quota rejection still logs `… token quota exceeded` and still returns
+`-quota-exceeded-status` (default `429`) with `Retry-After`, but the error body now names
+the measurement:
+
+```json
+{
+  "error": {
+    "message": "User token quota exceeded",
+    "type": "error",
+    "code": 429,
+    "unit": "cost",
+    "currency": "CNY"
+  }
+}
+```
+
+`unit` is always present (`token` or `cost`; a rule without `unit` reports `token`).
+`currency` is present only for `cost` rules and is the platform settlement currency. On
+`/v1/messages` the envelope stays Anthropic-shaped and carries no extra keys.
+
 ## 4. User plane
 
 Prefix `/api/user/*`. Any enabled user token (`user` or `admin`) may authenticate. A `user`-role token is forced to act on its own data (its `user_id` is ignored); an `admin`-role token may target another user with `?user_id=`.
@@ -1595,8 +1794,9 @@ Per-rule view of the target user's effective quota rules (resolved through the g
 | `usages[]` | array | One entry per effective rule. |
 | `usages[].rule_index` | integer | Rule index within the resolved set. |
 | `usages[].mode` | string | `day`, `month`, `year`, or `custom`. |
-| `usages[].limit` | integer | `-1` means the window is computed but usage is unlimited. |
-| `usages[].used` | integer | Tokens used in the current window. |
+| `usages[].limit` | integer | `-1` means the window is computed but usage is unlimited. With `unit=cost` it is a whole-unit amount of the settlement currency (see §3.10). |
+| `usages[].unit` | string | `token` or `cost`. Always a literal, so a rule written without `unit` reports `token`. |
+| `usages[].used` | integer | Usage in the current window: tokens when `unit=token`, settlement-currency **micros** when `unit=cost`. |
 | `usages[].active` | bool | Whether the rule currently applies. |
 | `usages[].period_start` / `period_end` | integer \| null | Window bounds as Unix seconds; `null` end means open-ended. |
 
@@ -1604,7 +1804,7 @@ Per-rule view of the target user's effective quota rules (resolved through the g
 {
   "user_id": 2,
   "usages": [
-    {"rule_index": 0, "mode": "day", "limit": 1000000, "used": 25310,
+    {"rule_index": 0, "mode": "day", "limit": 1000000, "unit": "token", "used": 25310,
      "active": true, "period_start": 1758038400, "period_end": 1758124800}
   ]
 }
@@ -1768,8 +1968,8 @@ Response `200 OK`:
 | 401 | all planes | Credential missing, malformed, unknown, or disabled. |
 | 403 | admin plane | Credential is valid but the user's role is not `admin`. |
 | 404 | admin / user planes | Target resource does not exist (or is not owned). |
-| 409 | admin plane | Credential is still referenced by a model and cannot be deleted. |
-| 429 / 403 | data plane | Quota exceeded; the exact status is `-quota-exceeded-status` (default `429`) and a `Retry-After` header is set. |
+| 409 | admin plane | Credential is still referenced by a model and cannot be deleted; a price or currency rate already exists at that `effective_at`. |
+| 429 / 403 | data plane | Quota exceeded; the exact status is `-quota-exceeded-status` (default `429`) and a `Retry-After` header is set. The body carries `unit` (`token` / `cost`) and, for cost rules, `currency` (§3.10). |
 | 500 | all planes | Internal error. |
 | 502 | data plane | Upstream connection failure or an untranslatable upstream response. |
 

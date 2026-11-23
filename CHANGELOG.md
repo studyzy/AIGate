@@ -94,6 +94,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `-response-background-timeout` / `AIGATE_RESPONSE_BACKGROUND_TIMEOUT`
   (default `30m`, must be positive).
 
+- **Cost billing** — the gateway can now account requests in **money** next to
+  tokens. Each model carries append-only price snapshots with six raw unit
+  prices (peak/off-peak × cache-hit input / cache-miss input / output, stored as
+  integer micros per million tokens), written through the new
+  `GET|POST /admin/models/{id}/prices` and `DELETE /admin/model-prices/{id}`;
+  `ai_models` gains `currency`, `enable_peak_pricing` (default `false`) and
+  `use_upstream_cost` (default `true`), and model responses echo them plus the
+  currently effective `current_price`. Every usage row records two amounts
+  frozen at accounting time — `cost_vendor_micros` in the model currency and
+  `cost_platform_micros` in the new global `settings.platform_currency`
+  (default `CNY`) — so later price, rate or currency changes never rewrite
+  history; a request billed through a currency pair with no effective rate keeps
+  its vendor amount and records `0` for the platform amount. Peak pricing is
+  data, not code: each snapshot carries a `peak_hours` JSON schedule (IANA
+  timezone, `HH:MM` windows on `time.Weekday` days, half-open,
+  midnight-wrapping) and a new **billing calendar**
+  (`GET|PUT /admin/billing-calendar`, `DELETE /admin/billing-calendar/{date}`)
+  overrides the weekday rule with holidays and make-up working days.
+  Off-peak is billed whenever `enable_peak_pricing` is `false`; an unevaluable
+  schedule bills peak (fail-closed), and the admin plane rejects schedules that
+  cannot be evaluated. FX rates are append-only snapshots too
+  (`GET|POST /admin/currency-rates`, `DELETE /admin/currency-rates/{id}`,
+  `rate_micros` meaning "1 unit `from` = `rate_micros`/1e6 units `to`", bounded
+  to 1..1e9, same-currency pairs refused). Upstream-reported `usage.cost > 0`
+  wins over computed prices when `use_upstream_cost` is on. Quota rules gain an
+  optional `unit` (`token` default, or `cost` compared against settlement-currency
+  micros, `limit` capped at 9e12), and requests that reach the upstream but fail
+  (interrupted streams, upstream error bodies) are billed instead of being
+  dropped. Admin writes invalidate the data plane's in-process caches
+  immediately. The console gains the price editor, model pricing controls,
+  `/billing-calendar`, `/currency-rates`, the settlement-currency setting, cost
+  columns in usage and a spend card on the dashboard; `aigatectl` gains
+  `prices`, `calendar` and `rates`.
+
+### Changed
+
+- **Usage reports carry amounts** — the usage summarize/log/export responses are
+  extended, additively: summary rows gain `currency`, `cost_vendor_micros`,
+  `cost_platform_micros` and, when a row spans currencies, `mixed_currency`
+  (with `cost_vendor_micros` pinned to `0` outside `group_by=model`), the summary
+  envelope gains `total_cost_platform_micros` and `platform_currency`, detail
+  rows gain `currency`, `cost_vendor_micros` and `cost_platform_micros`, and the
+  CSV export gains the two `cost_*_micros` columns before `created_at`. The
+  user-plane `/api/user/quota` view gains `usages[].unit`. Quota rejections keep
+  their status, message and `Retry-After`, but the error body now names the
+  measurement with `unit` (`token` / `cost`) and, for cost rules, `currency`.
+  Existing rows read back as `0`, which matches "billing starts when accounting
+  starts", and rules without `unit` still mean tokens and are stored
+  byte-identically.
+- **Schema upgrade step** — `sql/20261123-cost-billing.sql` adds the three new
+  tables (`ai_model_prices`, `billing_calendar`, `currency_rates`) and the new
+  columns (`ai_models.currency` / `enable_peak_pricing` / `use_upstream_cost`,
+  `llm_usage_logs.cost_vendor_micros` / `cost_platform_micros`,
+  `daily_usage_summaries.cost_vendor_micros` / `cost_platform_micros` /
+  `currency`, `settings.platform_currency`) for an **existing** MySQL database;
+  `sql/init.sql` already contains all of it for fresh installs. The file is
+  deliberately **not** idempotent — MySQL 8 has no `ADD COLUMN IF NOT EXISTS`,
+  so re-running it fails loudly with `Duplicate column name` rather than
+  silently skipping a missed change. SQLite deployments get everything from
+  AutoMigrate at startup. Version bumped to `0.3.0`.
+
 ## [0.1.0] - 2026-10-02
 
 First release: a single-binary, self-hostable LLM gateway with a data plane

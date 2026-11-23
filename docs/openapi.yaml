@@ -652,6 +652,339 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /admin/models/{id}/prices:
+    parameters:
+      - $ref: '#/components/parameters/PathID'
+    get:
+      tags: [admin]
+      summary: 列出模型价目快照
+      description: |
+        按 `effective_at` 倒序列出该模型的全部价目快照（新版本在前）。
+        价目为**追加式快照**：每笔请求取 `effective_at` 不晚于记账时刻的最新一条，
+        改动历史不影响已落库的金额。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 价目列表（无价目时 `prices` 为空数组）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelPriceList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [admin]
+      summary: 追加一份模型价目快照
+      description: |
+        单价一律为**整数微元**，语义是「每百万 token 的微元数」：
+        `1` 元/百万 token 记作 `1000000`，`0.02` 元/百万记作 `20000`。
+        笔算口径为 `Σ(该档 token 数 × 该档单价_micros) / 1000000`，全程整数。
+
+        `peak_hours` 为 JSON **文本**（不是对象），由服务端校验后规范化落库：
+
+        - 空串、`null`、`{}` 表示无时段配置，落 `{}`；
+        - 否则必须形如
+          `{"timezone":"Asia/Shanghai","windows":[{"days":[1,2,3,4,5],"start":"09:00","end":"12:00"}]}`；
+          `timezone` 为 IANA 名称，`windows` 非空；`days` 取 Go `time.Weekday`
+          编号（0=周日 … 6=周六），指窗口**开始**的那一天，每个窗口至少有一个 0..6 的值；
+          `start`/`end` 为 `HH:MM`（`24:00` 合法），半开区间 `[start, end)`，
+          `end <= start` 表示跨午夜。
+
+        写入前即拒掉无法评估的时段：那样的配置在记账时会 fail-closed 取高峰价，
+        等于系统性多收钱。写入成功后立即失效数据面的计价缓存，无需重启。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelPriceCreateRequest'
+      responses:
+        '201':
+          description: 已追加
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelPrice'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 该模型在同一 `effective_at` 已有价目（唯一键 `ai_model_id + effective_at`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/model-prices/{id}:
+    delete:
+      tags: [admin]
+      summary: 删除一份价目快照
+      description: |
+        `{id}` 是**价目行** id（不是模型 id）。删除后立即失效该模型的计价缓存；
+        已按此价目记账的历史金额不受影响。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 价目行 ID（正整数；非数字或 0 返回 400）
+          schema:
+            type: integer
+            format: uint
+            minimum: 1
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/billing-calendar:
+    get:
+      tags: [admin]
+      summary: 读取计费日历
+      description: |
+        计费日历修正峰谷时段的星期匹配：登记为节假日的日期强制判为非高峰（即使
+        落在 `peak_hours` 的窗口内），登记为工作日则照常按窗口判定。
+        **未登记的日期按星期几推断：周一至周五视为工作日。**
+
+        实测口径：`days` 是 `date` 列的 `YYYY-MM-DD` 标签，业务时区日期，
+        与每日用量聚合同口径。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: year
+          in: query
+          required: false
+          description: 4 位年份；缺省取业务时区的当年
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 9999
+        - name: month
+          in: query
+          required: false
+          description: 月份 1..12；给出时只返回该月，缺省返回全年
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 12
+      responses:
+        '200':
+          description: 该年（或该月）已登记的日期（未登记的日期不出现）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingCalendar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [admin]
+      summary: 批量登记计费日历（按日期覆盖写）
+      description: |
+        按日期 upsert：已登记的日期被覆盖，未登记的保持不变。写入成功后立即失效
+        数据面的日历缓存。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingCalendarUpsertRequest'
+      responses:
+        '200':
+          description: 已登记的日期（与请求顺序一致）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingCalendarWriteResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/billing-calendar/{date}:
+    delete:
+      tags: [admin]
+      summary: 删除一天的日历登记
+      description: 删除后该日期回到「按星期几推断」的默认口径。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: 日期标签 `YYYY-MM-DD`（非此格式返回 400）
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+      responses:
+        '200':
+          description: 已删除（该日期原本未登记也返回 200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/currency-rates:
+    get:
+      tags: [admin]
+      summary: 列出某币种对的汇率快照
+      description: |
+        汇率追加式快照：`rate_micros` 的语义是 **1 单位 `from` = `rate_micros/1e6`
+        单位 `to`**（FX 报价惯例，折算直接相乘）。记账时取记账时刻生效的最新一条。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: 源币（ISO 4217 三位字母，大小写不敏感，服务端归一为大写）
+          schema:
+            type: string
+            pattern: '^[A-Za-z]{3}$'
+        - name: to
+          in: query
+          required: true
+          description: 目标币（ISO 4217 三位字母，同上）
+          schema:
+            type: string
+            pattern: '^[A-Za-z]{3}$'
+      responses:
+        '200':
+          description: 该币种对的全部汇率快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrencyRateList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [admin]
+      summary: 追加一条汇率快照
+      description: |
+        同一币种对同一 `effective_at` 重复追加返回 409。同币种折算恒为 1，
+        `from_currency` 与 `to_currency` 相同直接返回 400（不落行）。
+        写入成功后立即失效数据面的汇率缓存。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CurrencyRateCreateRequest'
+      responses:
+        '201':
+          description: 已追加
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrencyRate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 该币种对在同一 `effective_at` 已有汇率
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/currency-rates/{id}:
+    delete:
+      tags: [admin]
+      summary: 删除一条汇率快照
+      description: |
+        删除后立即失效数据面的汇率缓存；已按该汇率记账的历史金额不受影响。
+        （汇率行不存在不报错，删除本身幂等。）
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 汇率行 ID（正整数；非数字或 0 返回 400）
+          schema:
+            type: integer
+            format: uint
+            minimum: 1
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/credentials:
     get:
       tags: [admin]
@@ -1974,7 +2307,12 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     QuotaExceeded:
-      description: 配额超限（状态码可配置为 429 或 403，默认 429），响应带 `Retry-After` 头
+      description: |
+        配额超限（状态码可配置为 429 或 403，默认 429），响应带 `Retry-After` 头。
+
+        错误体在统一三键之外补充两个可选字段：`unit` 告诉你 `used` / `limit` 是 token
+        还是金额（`token` / `cost`；旧规则默认 `token`），`currency` 只在金额口径下给出，
+        为平台结算币种。
       headers:
         Retry-After:
           description: 建议重试等待秒数
@@ -1983,7 +2321,7 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            $ref: '#/components/schemas/QuotaExceededErrorResponse'
     BodyTooLarge:
       description: 请求体超过 1 MiB（直接拒绝、不截断）
       content:
@@ -2512,13 +2850,36 @@ components:
           type: integer
           format: uint
           description: 引用的凭据 ID；`0` 表示未引用（直接使用 `api_key`）
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$|^$'
+          description: |
+            模型计价币种（ISO 4217 三位大写）；空串表示未配置，该模型不参与金额记账。
+            每笔请求的 `cost_vendor_micros` 以此为币种。
+        enable_peak_pricing:
+          type: boolean
+          description: |
+            是否启用峰谷定价（默认 `false`）。关闭时**恒定按空闲价三列**计价；
+            开启后按价目快照里的 `peak_hours` 与计费日历判定，时段无法评估时
+            fail-closed 取高峰价。
+        use_upstream_cost:
+          type: boolean
+          description: |
+            是否优先采信上游自报的 `usage.cost`（默认 `true`）。开启且上游自报
+            `cost > 0` 时直接采用该值，不再按价目自算；未报或 `<= 0` 时回退自算。
+        current_price:
+          allOf:
+            - $ref: '#/components/schemas/ModelPrice'
+          nullable: true
+          readOnly: true
+          description: 当前生效的价目快照（`effective_at` 不晚于当前时刻的最新一条）；无价目时为 `null`。
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
-      required: [id, provider, model_id, model_name, url, model_type, quota_day, enabled, user_key_required, credential_id, created_at, updated_at]
+      required: [id, provider, model_id, model_name, url, model_type, quota_day, enabled, user_key_required, credential_id, currency, enable_peak_pricing, use_upstream_cost, created_at, updated_at]
 
     ModelList:
       type: object
@@ -2565,6 +2926,15 @@ components:
           type: integer
           format: uint
           description: 引用凭据 ID（须存在）
+        currency:
+          type: string
+          description: 模型计价币种（ISO 4217 三位，大小写不敏感，服务端归一为大写）；空串 = 未配置
+        enable_peak_pricing:
+          type: boolean
+          default: false
+        use_upstream_cost:
+          type: boolean
+          default: true
       required: [model_id, url, model_type]
 
     ModelUpdateRequest:
@@ -2597,6 +2967,13 @@ components:
         credential_id:
           type: integer
           format: uint
+        currency:
+          type: string
+          description: 计价币种（ISO 4217 三位）；空串清除币种配置。改动后立即失效该模型的计价缓存。
+        enable_peak_pricing:
+          type: boolean
+        use_upstream_cost:
+          type: boolean
 
     ConnectivityResult:
       type: object
@@ -2964,7 +3341,13 @@ components:
           default: 0
         token_quota_rules:
           type: string
-          description: 密钥级周期配额（规则数组 JSON，会校验与规范化）；空串 = 无密钥级限制
+          description: |
+            密钥级周期配额（规则数组 JSON，会校验与规范化）；空串 = 无密钥级限制。
+
+            规则对象的完整字段：`mode`（`day` / `month` / `year` / `custom`）、`limit`
+            （`-1` = 参与窗口计算但不限用量）、`unit`（**`token` 缺省 | `cost`**，见
+            `Group.token_quota_rules` 的说明）、`start` / `end` / `refresh`（仅 `custom` 有效）。
+            `unit=cost` 时 `limit` 为结算币种的整单位金额，上限 `9000000000000`。
         expires_at:
           type: string
           nullable: true
@@ -3083,6 +3466,19 @@ components:
           description: |
             配额规则 JSON **文本**：空串表示未配置（回退全局默认），`"[]"` 表示显式不限，
             其余为经校验与规范化后的规则数组。
+
+            规则对象字段：`mode`（`day` / `month` / `year` / `custom`）、`limit`
+            （`-1` = 参与窗口计算但不限用量）、`unit`、`start` / `end` / `refresh`
+            （仅 `custom` 有效）。
+
+            `unit` 取 `token`（缺省）或 `cost`，决定该规则按 token 还是按金额限额：
+
+            - `""` / `"token"`：窗口内 `SUM(total_tokens)` 与 `limit` 比较——旧规则的原有语义；
+            - `"cost"`：窗口内 `SUM(cost_platform_micros)` 与 `limit × 1_000_000` 比较，
+              `limit` 是结算币种的**整单位金额**，上限 `9000000000000`。
+
+            写入时 `unit=token`（含空串）会被规范化为省略该键，故存量规则文本逐字节不变。
+            429 响应的 `unit` / `currency` 告诉你本次拒绝的口径。
         global_token_quota_rules:
           type: string
           description: |
@@ -3145,7 +3541,15 @@ components:
           type: integer
           default: 5
           description: 每用户自助密钥数量上限；`0` = 不限
-      required: [default_token_quota_rules, global_token_quota_rules, global_quota_scope, user_key_limit]
+        platform_currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          default: CNY
+          description: |
+            平台结算币种（ISO 4217 三位大写，全局唯一，默认 `CNY`）。
+            每笔请求的 `cost_platform_micros` 按记账时刻的汇率折算到该币种并定死；
+            改动它只影响之后的新请求，不重算历史行。
+      required: [default_token_quota_rules, global_token_quota_rules, global_quota_scope, user_key_limit, platform_currency]
 
     SettingsUpdateRequest:
       type: object
@@ -3162,6 +3566,11 @@ components:
           type: integer
           minimum: 0
           description: 必须 `>= 0`；`0` = 不限
+        platform_currency:
+          type: string
+          description: |
+            平台结算币种（ISO 4217 三位，大小写不敏感，服务端归一为大写）；非法值返回 400。
+            非空即必须合法，不支持用空串清除（清除会静默丢掉全部折算口径）。
 
     # ------------------------------------------------------------------
     # 用量
@@ -3203,7 +3612,27 @@ components:
         request_count:
           type: integer
           format: int64
-      required: [prompt_tokens, completion_tokens, total_tokens, prompt_cache_read_tokens, prompt_cache_write_tokens, request_count]
+        currency:
+          type: string
+          description: |
+            本行金额的计价币种。仅 `group_by=model` 时唯一有意义；跨模型聚合时取
+            `MAX(currency)`（见 `mixed_currency`），币种混合时不要把各行相加。
+        cost_vendor_micros:
+          type: integer
+          format: int64
+          description: |
+            模型币种金额（微元）。**仅 `group_by=model` 时有意义**，其余维度币种可能混合、
+            不可相加，恒为 `0`。
+        cost_platform_micros:
+          type: integer
+          format: int64
+          description: |
+            平台结算币种金额（微元）。记账时刻已统一到 `platform_currency`，
+            任何聚合维度都可相加。
+        mixed_currency:
+          type: boolean
+          description: 本行跨越了多个计价币种（`MAX(currency) <> MIN(currency)`）；出现即表示金额需按模型分别看待。
+      required: [prompt_tokens, completion_tokens, total_tokens, prompt_cache_read_tokens, prompt_cache_write_tokens, request_count, cost_vendor_micros, cost_platform_micros]
 
     UsageSummary:
       type: object
@@ -3215,7 +3644,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/UsageSummaryRow'
-      required: [group_by, rows]
+        total_cost_platform_micros:
+          type: integer
+          format: int64
+          description: 当前返回各行的 `cost_platform_micros` 之和（结算币种微元）
+        platform_currency:
+          type: string
+          description: '`total_cost_platform_micros` 的币种，取自 `settings.platform_currency`'
+      required: [group_by, rows, total_cost_platform_micros, platform_currency]
 
     UsageLog:
       type: object
@@ -3255,10 +3691,23 @@ components:
         latency:
           type: integer
           description: 请求耗时（毫秒）
+        currency:
+          type: string
+          description: |
+            本行**结算金额**（`cost_platform_micros`）的币种，取当前平台结算币种；
+            `cost_vendor_micros` 的币种是记账时的 `ai_models.currency`，本字段不适用于它。
+        cost_vendor_micros:
+          type: integer
+          format: int64
+          description: 记账时刻的模型币种金额（微元，币种见 `ai_models.currency`）；改价、改币种都不改写历史行。
+        cost_platform_micros:
+          type: integer
+          format: int64
+          description: 记账时刻的平台结算币种金额（微元，币种见 `currency` 与 `settings.platform_currency`）。
         created_at:
           type: string
           format: date-time
-      required: [id, api_key_id, user_id, group_id, ai_model_id, model, provider, prompt_tokens, completion_tokens, total_tokens, status_code, latency, created_at]
+      required: [id, api_key_id, user_id, group_id, ai_model_id, model, provider, prompt_tokens, completion_tokens, total_tokens, status_code, latency, currency, cost_vendor_micros, cost_platform_micros, created_at]
 
     UsageLogs:
       type: object
@@ -3275,6 +3724,296 @@ components:
         page_size:
           type: integer
       required: [logs, total, page, page_size]
+
+    # ------------------------------------------------------------------
+    # 计费与金额
+    # ------------------------------------------------------------------
+    ModelPrice:
+      type: object
+      description: |
+        一份价目快照。六个单价都是**整数微元 / 每百万 token**（`1` 元/百万 = `1000000`），
+        峰谷两套都是原始值，不做乘数推导。
+      properties:
+        id:
+          type: integer
+          format: uint
+        ai_model_id:
+          type: integer
+          format: uint
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: 价目币种快照（写入时取请求值或模型当时币种）；改模型币种不改写历史。
+        effective_at:
+          type: string
+          format: date-time
+          description: 生效时刻（RFC 3339，UTC 输出）；记账时取不晚于记账时刻的最新一条
+        peak_hours:
+          type: string
+          description: 峰谷时段 JSON **文本**（结构见 `PeakHours`）；无时段时为 `"{}"`
+        peak_input_hit_micros:
+          type: integer
+          format: int64
+          description: 高峰价 · 输入（缓存命中），微元/百万 token
+        peak_input_miss_micros:
+          type: integer
+          format: int64
+          description: 高峰价 · 输入（缓存未命中），微元/百万 token
+        peak_output_micros:
+          type: integer
+          format: int64
+          description: 高峰价 · 输出，微元/百万 token
+        offpeak_input_hit_micros:
+          type: integer
+          format: int64
+          description: 空闲价 · 输入（缓存命中），微元/百万 token
+        offpeak_input_miss_micros:
+          type: integer
+          format: int64
+          description: 空闲价 · 输入（缓存未命中），微元/百万 token
+        offpeak_output_micros:
+          type: integer
+          format: int64
+          description: 空闲价 · 输出，微元/百万 token
+        created_at:
+          type: string
+          format: date-time
+      required: [id, ai_model_id, currency, effective_at, peak_hours, peak_input_hit_micros, peak_input_miss_micros, peak_output_micros, offpeak_input_hit_micros, offpeak_input_miss_micros, offpeak_output_micros, created_at]
+
+    ModelPriceList:
+      type: object
+      properties:
+        prices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelPrice'
+      required: [prices]
+
+    ModelPriceCreateRequest:
+      type: object
+      description: |
+        追加一份价目快照。六个单价缺省为 `0`（`0` 就是合法单价，例如免费模型）。
+        同一模型同一 `effective_at` 重复追加返回 409。
+      properties:
+        currency:
+          type: string
+          description: 价目币种；缺省取模型当前 `currency`，两处都没有（或非法）时返回 400
+        effective_at:
+          type: string
+          format: date-time
+          description: RFC 3339 时间戳（必填）
+        peak_hours:
+          type: string
+          description: 峰谷时段 JSON 文本；空串 / `null` / `{}` = 无时段，结构见 `PeakHours`
+        peak_input_hit_micros:
+          type: integer
+          format: int64
+        peak_input_miss_micros:
+          type: integer
+          format: int64
+        peak_output_micros:
+          type: integer
+          format: int64
+        offpeak_input_hit_micros:
+          type: integer
+          format: int64
+        offpeak_input_miss_micros:
+          type: integer
+          format: int64
+        offpeak_output_micros:
+          type: integer
+          format: int64
+      required: [effective_at]
+
+    PeakHours:
+      type: object
+      description: |
+        `peak_hours` 文本反序列化后的结构（接口里以 JSON **字符串** 传递，这里给出形状）。
+        空对象 `{}` 表示无时段配置。
+
+        判定口径：
+
+        - 时区为 IANA 名称；`windows` 里每个窗口命中即为高峰；
+        - `days` 取 Go `time.Weekday`（0=周日 … 6=周六），指窗口**开始**的那一天；
+        - `start`/`end` 为 `HH:MM`，半开区间 `[start, end)`；`24:00` 合法；`end <= start`
+          表示跨午夜，此时次日 `[00:00, end)` 也算——按前一天是否在 `days` 里判定；
+        - 计费日历把某日登记为节假日时，该日整日强制非高峰（即使命中窗口）；
+        - **无法评估时 fail-closed 取高峰价**：时区非法、窗口时钟串非法、`days` 全越界
+          都算无法评估——前提是模型开了 `enable_peak_pricing`；没开则恒取空闲价。
+      properties:
+        timezone:
+          type: string
+          description: IANA 时区名，如 `Asia/Shanghai`；配置了 `windows` 时必填
+          example: Asia/Shanghai
+        windows:
+          type: array
+          items:
+            type: object
+            properties:
+              days:
+                type: array
+                description: 窗口开始日的星期编号（0..6，至少一个合法值）
+                items:
+                  type: integer
+                  minimum: 0
+                  maximum: 6
+                example: [1, 2, 3, 4, 5]
+              start:
+                type: string
+                pattern: '^([01][0-9]|2[0-4]):[0-5][0-9]$'
+                example: '09:00'
+              end:
+                type: string
+                pattern: '^([01][0-9]|2[0-4]):[0-5][0-9]$'
+                example: '12:00'
+            required: [days, start, end]
+
+    BillingCalendarDay:
+      type: object
+      properties:
+        date:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: 业务时区日期标签
+        is_workday:
+          type: boolean
+          description: '`true` = 工作日（含调休上班），`false` = 节假日（整日强制非高峰）'
+        note:
+          type: string
+          description: 备注（如「国庆」）
+      required: [date, is_workday, note]
+
+    BillingCalendar:
+      type: object
+      description: 只包含已登记的日期；未登记的日子按星期几推断（周一至周五为工作日）。
+      properties:
+        year:
+          type: integer
+          description: 本次查询的年份（缺省为业务时区当年）
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingCalendarDay'
+      required: [year, days]
+
+    BillingCalendarUpsertRequest:
+      type: object
+      properties:
+        days:
+          type: array
+          minItems: 1
+          description: 非空数组；`date` 不可重复，`is_workday` 必须显式给出
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                pattern: '^\d{4}-\d{2}-\d{2}$'
+              is_workday:
+                type: boolean
+              note:
+                type: string
+            required: [date, is_workday]
+      required: [days]
+
+    BillingCalendarWriteResult:
+      type: object
+      properties:
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingCalendarDay'
+      required: [days]
+
+    CurrencyRate:
+      type: object
+      description: |
+        一条汇率快照：`rate_micros` 表示 **1 单位 `from_currency` = `rate_micros/1e6`
+        单位 `to_currency`**（FX 报价惯例）。
+      properties:
+        id:
+          type: integer
+          format: uint
+        from_currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        to_currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        effective_at:
+          type: string
+          format: date-time
+          description: 生效时刻（RFC 3339，UTC 输出）
+        rate_micros:
+          type: integer
+          format: int64
+          description: 汇率 × 1e6；取值 `1..1000000000`（1 单位源币至多等于 1000 单位目标币）
+        created_at:
+          type: string
+          format: date-time
+      required: [id, from_currency, to_currency, effective_at, rate_micros, created_at]
+
+    CurrencyRateList:
+      type: object
+      properties:
+        from_currency:
+          type: string
+        to_currency:
+          type: string
+        rates:
+          type: array
+          items:
+            $ref: '#/components/schemas/CurrencyRate'
+      required: [from_currency, to_currency, rates]
+
+    CurrencyRateCreateRequest:
+      type: object
+      description: |
+        追加一条汇率快照。同币种对（`from_currency == to_currency`）返回 400——
+        同币种折算恒为 1，不落行；同一 `effective_at` 重复追加返回 409。
+      properties:
+        from_currency:
+          type: string
+          pattern: '^[A-Za-z]{3}$'
+        to_currency:
+          type: string
+          pattern: '^[A-Za-z]{3}$'
+        effective_at:
+          type: string
+          format: date-time
+        rate_micros:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000000
+      required: [from_currency, to_currency, effective_at, rate_micros]
+
+    QuotaExceededErrorResponse:
+      type: object
+      description: |
+        配额超限的错误体：统一三键之外补充 `unit` 与 `currency`。
+        token 规则不带 `currency`（`omitempty`），cost 规则两者都有。
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              example: error
+            code:
+              type: integer
+              description: 等于 HTTP 状态码
+            unit:
+              type: string
+              enum: [token, cost]
+              description: 被拒规则的计量单位；旧规则（无 `unit`）也输出字面量 `token`
+            currency:
+              type: string
+              description: 仅 `unit=cost` 时给出，为平台结算币种
+          required: [message, type, code, unit]
+      required: [error]
 
     # ------------------------------------------------------------------
     # 用户面
@@ -3341,9 +4080,16 @@ components:
         limit:
           type: integer
           description: '`-1` 表示参与窗口计算但不限用量'
+        unit:
+          type: string
+          enum: [token, cost]
+          description: |
+            规则的计量单位，恒为字面量：`token`（缺省，旧规则即此）或 `cost`。
+            `cost` 时 `limit` 是结算币种的**整单位金额**，`used` 是**微元**。
         used:
           type: integer
           format: int64
+          description: 窗口内用量；`unit=token` 时为 token 总量，`unit=cost` 时为结算币种金额（微元）
         active:
           type: boolean
           description: 规则当前是否生效
@@ -3357,7 +4103,7 @@ components:
           format: int64
           nullable: true
           description: 窗口终点（Unix 秒）；空表示无终止
-      required: [rule_index, mode, limit, used, active]
+      required: [rule_index, mode, limit, unit, used, active]
 
     QuotaView:
       type: object

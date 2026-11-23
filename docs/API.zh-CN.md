@@ -38,6 +38,9 @@ Tencent Cloud AIGate 是自托管的 LLM API 网关：**纯 API 服务**（无�
 
 唯一例外是数据面的 `/v1/messages`，它使用 Anthropic 错误信封（见该端点）。
 
+错误体可选的还会在必填三键之外带补充键：配额拒绝额外给出 `unit`（`token` 或 `cost`），
+金额口径再给出 `currency` —— 见 §3.10。
+
 ### 管理员 token 引导
 
 启动时网关确保至少存在一个 `role=admin` 用户：
@@ -172,7 +175,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | 400 | `invalid json body` | 请求体不是 JSON 对象。 |
 | 400 | `requested model is not bound to this key` | 显式 `model` 未命中任何启用绑定。 |
 | 400 | `no available model for this key` | 未提供 `model` 且无启用 `primary` 绑定。 |
-| 429 / 403 | `Global token quota exceeded` / `Model daily token quota exceeded` / `User token quota exceeded` / `Key token quota exceeded` | 配额校验拒绝请求。状态码取 `-quota-exceeded-status`（默认 `429`），并带 `Retry-After` 头。 |
+| 429 / 403 | `Global token quota exceeded` / `Model daily token quota exceeded` / `User token quota exceeded` / `Key token quota exceeded` | 配额校验拒绝请求。状态码取 `-quota-exceeded-status`（默认 `429`），并带 `Retry-After` 头。响应体还标出计量口径：`unit`（`token` / `cost`），金额规则另带 `currency` —— 见 §3.10。 |
 | 500 | `internal server error` | 模型解析失败（数据库错误）。 |
 | 500 | `streaming not supported by server` | `stream: true` 但服务端无法 flush 响应。 |
 | 502 | `failed to connect to LLM backend` | 非流式：到上游的 DNS/连接/TLS/超时失败。细节（含上游地址）只记服务端日志，不回显给调用方。 |
@@ -716,6 +719,10 @@ OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `
 | `custom_http_headers` | object \| null | 允许透传的头（字符串值）。 |
 | `quota_day` | integer | 模型级日 token 配额；`-1` 表示不限。 |
 | `enabled` | bool | 禁用后立即不可路由。 |
+| `currency` | string | 计价币种（ISO 4217）。`""` 表示未配置，该模型不参与金额记账（见 §3.10「计费与金额」）。 |
+| `enable_peak_pricing` | bool | 峰谷定价开关（默认 `false`）。关闭时请求**恒定按空闲价三列**计价。 |
+| `use_upstream_cost` | bool | 是否优先采信上游自报的 `usage.cost`（默认 `true`）。开启且上游自报 `cost > 0` 时直接采用，不再按价目自算。 |
+| `current_price` | object \| null | 当前生效的价目快照（`effective_at` 不晚于当前时刻的最新一条）；无价目时为 `null`。形状同价目行（见 §3.10）。 |
 | `created_at` / `updated_at` | string | RFC 3339 时间戳。 |
 
 `api_key` **绝不**出现在任何响应中。
@@ -736,6 +743,9 @@ OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `
 | `quota_day` | integer | 否 | `-1` | |
 | `enabled` | bool | 否 | `true` | |
 | `user_key_required` | bool | 否 | `false` | 自备 Key（BYOK）模式：模型**不保存**共享密钥，转发密钥取绑定行。与 `api_key`（非空）或 `credential_id > 0` 同时出现返回 `400`；创建后不可变更。 |
+| `currency` | string | 否 | `""` | 计价币种，ISO 4217 三位字母（大小写不敏感，归一为大写）。否则返回 `400 currency must be a 3-letter ISO 4217 code`。 |
+| `enable_peak_pricing` | bool | 否 | `false` | |
+| `use_upstream_cost` | bool | 否 | `true` | |
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/models \
@@ -793,6 +803,9 @@ curl -X POST http://127.0.0.1:8080/admin/models \
 | `quota_day` | integer | |
 | `enabled` | bool | |
 | `user_key_required` | bool | 不可变更：传值与当前不同返回 `400 user_key_required cannot be changed after creation`。自备 Key 模型携带非空 `api_key` 或 `credential_id > 0` 返回 `400`。 |
+| `currency` | string | ISO 4217 三位字母；`""` 清除计价币种。改动后立即失效该模型的计价缓存，且不改写已记账的历史行。 |
+| `enable_peak_pricing` | bool | |
+| `use_upstream_cost` | bool | |
 
 ```bash
 curl -X PUT http://127.0.0.1:8080/admin/models/1 \
@@ -1314,13 +1327,28 @@ curl -X POST http://127.0.0.1:8080/admin/user-groups \
       "total_tokens": 160,
       "prompt_cache_read_tokens": 0,
       "prompt_cache_write_tokens": 0,
-      "request_count": 3
+      "request_count": 3,
+      "currency": "",
+      "cost_vendor_micros": 0,
+      "cost_platform_micros": 500000
     }
-  ]
+  ],
+  "total_cost_platform_micros": 500000,
+  "platform_currency": "CNY"
 }
 ```
 
 `date` 字段仅在 `group_by=date` 时出现。无数据时 `rows` 为 `[]`。
+
+金额字段（口径详见 §3.10）：
+
+| 字段 | 说明 |
+|------|------|
+| `cost_platform_micros` | 结算币种金额（整数微元）。记账时刻已统一到 `platform_currency`，任何聚合维度都可相加。 |
+| `cost_vendor_micros` | 模型币种金额（整数微元）。**仅 `group_by=model` 时有意义**；其余维度可能跨币种、不可相加，恒为 `0`。 |
+| `currency` | 本行金额的币种。仅 `group_by=model` 时唯一；其余维度取 `MAX(currency)`。 |
+| `mixed_currency` | 本行跨越多个计价币种时出现且为 `true`；此时金额要按模型分别看。 |
+| `total_cost_platform_micros` / `platform_currency` | 信封级合计：当前返回各行结算金额之和及其币种。 |
 
 #### GET /admin/usage/logs
 
@@ -1345,6 +1373,9 @@ curl -X POST http://127.0.0.1:8080/admin/user-groups \
       "prompt_cache_write_tokens": 0,
       "status_code": 200,
       "latency": 512,
+      "currency": "CNY",
+      "cost_vendor_micros": 500000,
+      "cost_platform_micros": 500000,
       "created_at": "2026-09-01T16:00:00Z"
     }
   ],
@@ -1365,8 +1396,10 @@ curl -X POST http://127.0.0.1:8080/admin/user-groups \
 | `format` | string | `csv`（默认）或 `json`；其余取值返回 `400 format must be csv or json`。 |
 | `start` / `end` / `user_id` / `group_id` / `api_key_id` / `ai_model_id` | — | 语义同 `/admin/usage/logs`。 |
 
-- `format=csv` → `text/csv` 附件，首行为表头（`id,api_key_id,user_id,group_id,ai_model_id,model,provider,prompt_tokens,completion_tokens,total_tokens,prompt_cache_read_tokens,prompt_cache_write_tokens,status_code,latency,created_at`）。
-- `format=json` → `{"logs": [ … ]}` 流式输出，行对象与 `logs` 一致。
+- `format=csv` → `text/csv` 附件，首行为表头（`id,api_key_id,user_id,group_id,ai_model_id,model,provider,prompt_tokens,completion_tokens,total_tokens,prompt_cache_read_tokens,prompt_cache_write_tokens,status_code,latency,cost_vendor_micros,cost_platform_micros,created_at`）。
+- `format=json` → `{"logs": [ … ]}` 流式输出，行对象与 `logs` 一致（含 `cost_vendor_micros`、`cost_platform_micros` 与 `currency`）。
+
+两种格式里的金额都是**整数微元**，单位与两列含义见 §3.10。
 
 ```bash
 curl -OJ "http://127.0.0.1:8080/admin/usage/export?format=csv&start=2026-09-01" \
@@ -1383,17 +1416,19 @@ curl -OJ "http://127.0.0.1:8080/admin/usage/export?format=csv&start=2026-09-01" 
 | `global_token_quota_rules` | string | 规则数组的 JSON 文本，即全局档。 |
 | `global_quota_scope` | string | `site` 或 `group`，决定全局用量的统计口径。 |
 | `user_key_limit` | integer | 每用户自助密钥数量上限，默认 `5`；`0` = 不限（见 §4.4）。 |
+| `platform_currency` | string | 平台结算币种（ISO 4217 大写），默认 `CNY`。每笔请求的 `cost_platform_micros` 按记账时刻汇率折算到该币种并定死。 |
 
 #### GET /admin/settings
 
-返回当前设置，首次访问时创建默认行。默认为 `"[]"`、`"[]"`、`site`、`5`。
+返回当前设置，首次访问时创建默认行。默认为 `"[]"`、`"[]"`、`site`、`5`、`CNY`。
 
 ```json
 {
   "default_token_quota_rules": "[]",
   "global_token_quota_rules": "[]",
   "global_quota_scope": "site",
-  "user_key_limit": 5
+  "user_key_limit": 5,
+  "platform_currency": "CNY"
 }
 ```
 
@@ -1407,6 +1442,7 @@ curl -OJ "http://127.0.0.1:8080/admin/usage/export?format=csv&start=2026-09-01" 
 | `global_token_quota_rules` | string | 必须是合法 JSON 数组。 |
 | `global_quota_scope` | string | 必须为 `site` 或 `group`。 |
 | `user_key_limit` | integer | 必须 `>= 0`；`0` 表示不限。 |
+| `platform_currency` | string | 必须是 ISO 4217 三位字母；空串被拒绝（结算币种没有「未配置」态）。大小写不敏感，落库为大写。改动只影响此后记账的请求。 |
 
 ```bash
 curl -X PUT http://127.0.0.1:8080/admin/settings \
@@ -1420,7 +1456,7 @@ curl -X PUT http://127.0.0.1:8080/admin/settings \
 | 状态码 | 条件 |
 |--------|------|
 | 200 | 已更新。 |
-| 400 | JSON 非法；规则不是 JSON 数组；scope 非法；`user_key_limit < 0`。 |
+| 400 | JSON 非法；规则不是 JSON 数组；scope 非法；`user_key_limit < 0`；`platform_currency` 非法。 |
 | 500 | 数据库错误。 |
 
 ### 3.8 webhook
@@ -1597,6 +1633,155 @@ curl -X POST http://127.0.0.1:8080/admin/import \
   }'
 ```
 
+### 3.10 计费与金额
+
+网关可以在 token 之外**按钱**计量：每个模型可配价目，每笔请求记录花了多少，配额可以按
+金额限额，用量报表也能给出金额。这些都默认关闭——模型不配 `currency` 时一切照旧记 `0`。
+
+#### 金额一律是整数微元
+
+API 里所有金额都是**整数微元**（字段后缀 `_micros`），1 微元 = `1e-6` 个币种单位。
+一个币种单位是 `1000000` 微元，因此 4 位小数（再多两位）都是精确的：`0.0025` 元记作
+`2500`。服务端全程整数运算；前端负责除以 `1e6` 展示。
+
+单价列的单位是**每百万 token 的微元数**：「1 元/百万 token」记作 `1000000`，
+「0.02 元/百万」记作 `20000`。
+
+#### 两个金额列、两种币种
+
+每行用量带两个金额，都在记账时刻定死：
+
+| 字段 | 币种 | 含义 |
+|------|------|------|
+| `cost_vendor_micros` | 记账时模型的 `ai_models.currency` | 这笔请求在厂商币种下花了多少。 |
+| `cost_platform_micros` | `settings.platform_currency`（默认 `CNY`） | 同一笔花费按记账时刻生效的汇率折算到结算币种的结果。 |
+
+两列只在请求记账时写一次。此后改价目、改模型币种、改汇率或改 `platform_currency`
+**都不会改写历史**：老行保持当时记账的金额。模型币种与结算币种相同时无需汇率
+（`platform = vendor`）。两者不同且记账时刻没有可用汇率时，模型币种金额照常落库，
+平台金额记 `0`。
+
+用量行不冗余币种：`cost_vendor_micros` 的币种要去 `ai_models.currency` 取。这也是为什么
+汇总行的 `currency` 只描述 `cost_platform_micros`（以及 `group_by=model` 时的模型币种金额），
+以及为什么 `cost_vendor_micros` 在 `group_by=model` 之外恒为 `0`。
+
+#### 价目快照与六列原始价
+
+价目以**追加式快照**保存，经下面的路由写入。每份快照总是六列**原始值**——高峰三档、
+空闲三档，从不用乘数推导：
+
+| 列 | 档位 |
+|----|------|
+| `peak_input_hit_micros` / `offpeak_input_hit_micros` | 输入（缓存命中） |
+| `peak_input_miss_micros` / `offpeak_input_miss_micros` | 输入（缓存未命中） |
+| `peak_output_micros` / `offpeak_output_micros` | 输出 |
+
+一笔请求的金额是 `Σ(该档 token 数 × 该档单价_micros) / 1000000`，每笔只取一套三列：
+
+1. **上游自报优先**：`use_upstream_cost` 为 `true`（默认）且上游响应带 `usage.cost > 0`
+   时，直接采信该值（四舍五入到微元）作为 `cost_vendor_micros`，不再查价目。
+2. **否则网关自算**，`enable_peak_pricing` 是总闸：
+   - `enable_peak_pricing = false`（默认）→ **恒取空闲价三列**，即使配了 `peak_hours`
+     或它本身有问题；
+   - `enable_peak_pricing = true` → 按下面的峰谷规则判定；
+   - 时段**无法评估**（没配 `peak_hours`、时区非法、窗口格式错、`days` 全越界）时按
+     **高峰价**计价——fail-closed，绝不静默打折。只有显式开启峰谷的模型会走到这条路径。
+
+#### 峰谷时段与计费日历
+
+`peak_hours` 按价目快照配置，以 JSON **字符串**传递：
+
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "windows": [
+    {"days": [1, 2, 3, 4, 5], "start": "09:00", "end": "12:00"},
+    {"days": [1, 2, 3, 4, 5], "start": "14:00", "end": "18:00"}
+  ]
+}
+```
+
+- `timezone` 为 IANA 名称；配了时区就必须有非空 `windows`。
+- `days` 用 Go `time.Weekday` 编号（`0` = 周日 … `6` = 周六），指窗口**开始**的那一天。
+- `start`/`end` 为 `HH:MM`（`24:00` 合法）。区间半开 `[start, end)`；`end <= start`
+  表示跨午夜，此时次日 `[00:00, end)` 也算。
+- `{}`（或空串 / `null`）表示无时段配置。
+- **计费日历**修正星期规则：登记 `is_workday: false` 的日期（节假日）整日判为非高峰，
+  登记 `true` 的（调休上班）照常按工作日判定。未登记的日期回落到「周一至周五为工作日」。
+- 管理面写入时会拒绝无法评估的 `peak_hours`（时区非法、时钟串格式错、`days` 不可用），
+  因为这样的配置会让该模型一直按高峰价计费。
+
+#### 路由
+
+| 路由 | 用途 |
+|------|------|
+| `GET /admin/models/{id}/prices` | 列价目快照，新版本在前：`{"prices": [...]}`。 |
+| `POST /admin/models/{id}/prices` | 追加一份快照；成功返回 `201` 与价目行。`effective_at`（RFC 3339）必填；`currency` 缺省取模型币种。同模型同 `effective_at` 重复追加返回 `409`。 |
+| `DELETE /admin/model-prices/{id}` | 按**价目行** id 删除：`{"ok": true}`。 |
+| `GET /admin/billing-calendar?year=2026[&month=10]` | 该年（或该月）已登记的日期：`{"year": 2026, "days": [...]}`。`year` 缺省取业务时区当年。 |
+| `PUT /admin/billing-calendar` | 按日期 upsert：`{"days": [{"date": "2026-10-01", "is_workday": false, "note": "国庆"}]}`。数组不可为空、`date` 不可重复、`is_workday` 每条必填；响应用同一形状。 |
+| `DELETE /admin/billing-calendar/{date}` | 删除某天（`YYYY-MM-DD`）的登记：`{"ok": true}`。 |
+| `GET /admin/currency-rates?from=USD&to=CNY` | 列该币种对的汇率快照（两个参数均必填）：`{"from_currency": "USD", "to_currency": "CNY", "rates": [...]}`。 |
+| `POST /admin/currency-rates` | 追加一条汇率：`{"from_currency", "to_currency", "effective_at", "rate_micros"}` → `201`。同币种返回 `400`；同 `effective_at` 重复返回 `409`。 |
+| `DELETE /admin/currency-rates/{id}` | 按 id 删除汇率行：`{"ok": true}`。 |
+
+`rate_micros` 的含义是「1 单位 `from_currency` = `rate_micros/1e6` 单位 `to_currency`」
+（FX 报价惯例，折算直接相乘），取值 `1` 到 `1000000000`。
+
+每个写操作成功后都会失效数据面进程内的对应缓存，下一个请求就能看到新价目、新日历或新
+汇率——无需重启。
+
+```bash
+# 给模型配价目：命中 0.3 元、未命中 9 元、输出 27 元/百万 token（高峰），空闲价为其一半
+curl -X POST http://127.0.0.1:8080/admin/models/1/prices \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "effective_at": "2026-11-01T00:00:00Z",
+    "peak_hours": "{\"timezone\":\"Asia/Shanghai\",\"windows\":[{\"days\":[1,2,3,4,5],\"start\":\"09:00\",\"end\":\"12:00\"}]}",
+    "offpeak_input_hit_micros": 150000, "offpeak_input_miss_micros": 4500000, "offpeak_output_micros": 13500000,
+    "peak_input_hit_micros": 300000,    "peak_input_miss_micros": 9000000, "peak_output_micros": 27000000
+  }'
+
+# 上游按美元计价、平台按人民币结算时，配一条汇率
+curl -X POST http://127.0.0.1:8080/admin/currency-rates \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"from_currency": "USD", "to_currency": "CNY", "effective_at": "2026-11-01T00:00:00Z", "rate_micros": 7100000}'
+```
+
+#### 按金额限额的配额规则
+
+配额规则新增可选的 `unit`：
+
+| `unit` | 窗口用量与 `limit` 的比较 |
+|--------|---------------------------|
+| `""` / `"token"`（缺省） | `SUM(total_tokens)` —— 存量规则行为完全不变。 |
+| `"cost"` | `SUM(cost_platform_micros)` 与 `limit × 1000000` 比较；`limit` 是结算币种的**整单位**金额，上限 `9000000000000`。 |
+
+其余取值写入时被拒绝。`unit=token`（含空串）会被规范化掉，故存量规则文本逐字节不变。
+逐条规则的视图里怎么体现见 `/api/user/quota`（§4.2）。
+
+#### 配额拒绝带 `unit` 与 `currency`
+
+配额拒绝的文案与状态码不变（仍为 `… token quota exceeded`、`-quota-exceeded-status`
+默认 `429`、带 `Retry-After`），但错误体现在会标出计量口径：
+
+```json
+{
+  "error": {
+    "message": "User token quota exceeded",
+    "type": "error",
+    "code": 429,
+    "unit": "cost",
+    "currency": "CNY"
+  }
+}
+```
+
+`unit` 恒出现（`token` 或 `cost`；没写 `unit` 的规则报 `token`）。`currency` 只在金额
+规则下出现，为平台结算币种。`/v1/messages` 仍是 Anthropic 信封，不带这两个键。
+
 ## 4. 用户面
 
 前缀 `/api/user/*`。任意启用用户 token（`user` 或 `admin`）均可访问。`user` 角色 token
@@ -1621,8 +1806,9 @@ curl -X POST http://127.0.0.1:8080/admin/import \
 | `usages[]` | array | 每条生效规则一项。 |
 | `usages[].rule_index` | integer | 规则在解析集合中的序号。 |
 | `usages[].mode` | string | `day`、`month`、`year` 或 `custom`。 |
-| `usages[].limit` | integer | `-1` 表示参与窗口计算但不限用量。 |
-| `usages[].used` | integer | 当前窗口已用 token。 |
+| `usages[].limit` | integer | `-1` 表示参与窗口计算但不限用量。`unit=cost` 时是结算币种的整单位金额（见 §3.10）。 |
+| `usages[].unit` | string | `token` 或 `cost`，恒为字面量：没写 `unit` 的规则报 `token`。 |
+| `usages[].used` | integer | 当前窗口用量：`unit=token` 时为 token 数，`unit=cost` 时为结算币种**微元**。 |
 | `usages[].active` | bool | 规则当前是否生效。 |
 | `usages[].period_start` / `period_end` | integer \| null | 窗口起止（Unix 秒）；`end` 为 `null` 表示无终止。 |
 
@@ -1630,7 +1816,7 @@ curl -X POST http://127.0.0.1:8080/admin/import \
 {
   "user_id": 2,
   "usages": [
-    {"rule_index": 0, "mode": "day", "limit": 1000000, "used": 25310,
+    {"rule_index": 0, "mode": "day", "limit": 1000000, "unit": "token", "used": 25310,
      "active": true, "period_start": 1758038400, "period_end": 1758124800}
   ]
 }
@@ -1800,8 +1986,8 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 | 401 | 全部层面 | 凭据缺失、格式错误、不存在或已禁用。 |
 | 403 | 管理面 | 凭据有效但用户角色不是 `admin`。 |
 | 404 | 管理面 / 用户面 | 目标资源不存在（或不属于本人）。 |
-| 409 | 管理面 | 凭据仍被模型引用，无法删除。 |
-| 429 / 403 | 数据面 | 配额超限；确切状态码由 `-quota-exceeded-status` 决定（默认 `429`），并带 `Retry-After` 头。 |
+| 409 | 管理面 | 凭据仍被模型引用，无法删除；同一 `effective_at` 的价目或汇率已存在。 |
+| 429 / 403 | 数据面 | 配额超限；确切状态码由 `-quota-exceeded-status` 决定（默认 `429`），并带 `Retry-After` 头。响应体带 `unit`（`token` / `cost`），金额规则另带 `currency`（§3.10）。 |
 | 500 | 全部层面 | 内部错误。 |
 | 502 | 数据面 | 上游连接失败，或上游响应无法转换。 |
 
