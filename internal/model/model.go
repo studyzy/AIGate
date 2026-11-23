@@ -145,6 +145,23 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, gorm.ErrRecordNotFound)
 }
 
+// IsDuplicated 判定是否为唯一键冲突（调用方据此映射 409）。
+//
+// 依赖 Open 开启 gorm.Config.TranslateError（把驱动错误翻译成 gorm.ErrDuplicatedKey）；
+// 同时保留驱动原文兜底，使关闭该开关时也不会把冲突误报成 500。
+func IsDuplicated(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "Duplicate entry") ||
+		strings.Contains(msg, "Error 1062")
+}
+
 // ValidationError 表示请求参数/配置层面的校验失败：调用方应映射为 400，
 // 而不是把驱动/事务错误的原文当成参数错误回显（那样既误导调用方也泄漏内部细节）。
 type ValidationError struct{ msg string }

@@ -15,14 +15,11 @@ package admin
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"gorm.io/gorm"
 
 	"aigate/internal/billing"
 	"aigate/internal/httpx"
@@ -689,23 +686,10 @@ func invalidatePlatformCurrency(src *billing.StoreSource) {
 }
 
 // isDuplicateWriteError 判定唯一键冲突（映射为 409）。
-//
-// 【依赖】该判定成立的前提是 model.Open 开启了 gorm.Config.TranslateError: true
-// （它把驱动错误翻译成 gorm.ErrDuplicatedKey）。关掉那个开关后，驱动只会回裸的
-// "UNIQUE constraint failed: ..." / "Duplicate entry ..." 文本，errors.Is 恒为 false，
-// 重复写入会退回 500——这里保留一条文本兜底，使两代驱动错误都能被判为 409。
-// 管理面其余代码不 import gorm；本文件只用它的哨兵值，不触达任何数据库会话。
+// 判定逻辑统一收在 model.IsDuplicated：管理面不 import gorm（见 register.go 的包注释），
+// 驱动错误到哨兵的翻译也属于数据访问层的职责。
 func isDuplicateWriteError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, gorm.ErrDuplicatedKey) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "Duplicate entry") ||
-		strings.Contains(msg, "Error 1062")
+	return model.IsDuplicated(err)
 }
 
 // parseQueryInt 解析查询参数里的十进制整数（非法或为空返回错误）。
