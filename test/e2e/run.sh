@@ -9,8 +9,10 @@
 #           the MySQL image are needed; the image's own mysql client inside the container creates
 #           the schema, so nothing is installed on the host.
 #           With AIGATE_E2E_MYSQL_USE_EXISTING=1 the script instead talks to an already running
-#           MySQL service over TCP (host mysql client, no docker): CI declares one as a job service,
-#           whose container name is chosen by the runner and therefore cannot be addressed by name.
+#           MySQL service: CI declares one as a job service, whose container name is chosen by the
+#           runner. SQL runs through the host `mysql` client over TCP when one is installed, and
+#           falls back to `docker exec` into a container located by image + published port otherwise,
+#           so no MySQL tooling has to be installed on the host.
 #
 # The gateway processes started by the test cases are stopped in their own t.Cleanup; the exit trap
 # here is a backstop that kills anything still running against the test database (it never touches
@@ -25,9 +27,9 @@
 #   MYSQL_HOST (default 127.0.0.1), MYSQL_PORT (default 3306), MYSQL_USER (default root)
 #   AIGATE_E2E_MYSQL_IMAGE (default mysql:8.0), AIGATE_E2E_MYSQL_CONTAINER (default aigate-e2e-mysql),
 #   AIGATE_E2E_MYSQL_PASSWORD (default AIGate-e2e; the container root password, never empty)
-#   AIGATE_E2E_MYSQL_USE_EXISTING (default 0; set 1 to reuse an already running MySQL service via
-#                                  TCP instead of starting a container — needs a host `mysql` client,
-#                                  e.g. a GitHub Actions services container)
+#   AIGATE_E2E_MYSQL_USE_EXISTING (default 0; set 1 to reuse an already running MySQL service,
+#                                  e.g. a GitHub Actions services container — the container serving
+#                                  MYSQL_PORT is located automatically when no host client exists)
 #   AIGATE_E2E_SQLITE_DSN (sqlite only, default ./.e2e/aigate_e2e.db; deleted and recreated on every run)
 set -euo pipefail
 
@@ -57,6 +59,33 @@ CLI_BIN="${REPO_ROOT}/bin/aigatectl"
 container_started=0
 
 log() { printf '[e2e] %s\n' "$*"; }
+
+# CLIENT_CONTAINER 是「没有宿主机 mysql 客户端时」用来执行 SQL 的容器名；
+# 空表示尚未确定（自起容器时即 MYSQL_CONTAINER）。
+CLIENT_CONTAINER=""
+
+# find_client_container 在没有宿主机 mysql 客户端、且复用已有 MySQL 服务时定位容器：
+#   1. 显式指定的 AIGATE_E2E_MYSQL_CONTAINER（若它正在运行）；
+#   2. 运行中、镜像名以 mysql: 开头的容器里，宿主机端口映射命中 MYSQL_PORT 的那个。
+# 找不到时输出空串，由调用方报错。CI 的 services 容器名由 runner 随机生成，
+# 因此第 2 条按端口匹配，而不是按名字猜。
+find_client_container() {
+  local names
+  names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  if [[ -n "${AIGATE_E2E_MYSQL_CONTAINER:-}" ]] && grep -qxF "${AIGATE_E2E_MYSQL_CONTAINER}" <<<"${names}"; then
+    printf '%s\n' "${AIGATE_E2E_MYSQL_CONTAINER}"
+    return 0
+  fi
+  local name image ports
+  while read -r name image ports; do
+    [[ "${image}" == mysql:* ]] || continue
+    if grep -q ":${MYSQL_PORT}->3306/tcp" <<<"${ports}"; then
+      printf '%s\n' "${name}"
+      return 0
+    fi
+  done < <(docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' 2>/dev/null || true)
+  printf '\n'
+}
 
 # ---------------------------------------------------------------- 清理
 
@@ -131,24 +160,39 @@ if [[ "${DB_TYPE}" == "mysql" ]]; then
     container_started=1
   fi
 
+  # 客户端选择：宿主机有 mysql 客户端就直连 TCP；没有就退回 `docker exec` 进容器执行
+  # 镜像自带的客户端。两条路径都不要求宿主机安装 MySQL 工具，CI 与本地行为一致。
+  #
   # 密码一律经环境变量 MYSQL_PWD 注入客户端进程，不落在命令行参数里。
   # 显式走 -h 而不是默认 unix socket：入口脚本重启 mysqld 的瞬间，上一代的 socket 文件
   # 可能仍在而新进程尚未监听，只测 socket 会假性通过，随后建库就报 2002。
-  if [[ "${USE_EXISTING_MYSQL}" == "1" ]]; then
-    if ! command -v mysql >/dev/null 2>&1; then
-      log "mysql client not found; it is required to reuse an already running MySQL service (AIGATE_E2E_MYSQL_USE_EXISTING=1)."
-      log "Install it (e.g. apt-get install -y mysql-client) or unset AIGATE_E2E_MYSQL_USE_EXISTING to let the script start its own container."
-      exit 1
-    fi
-    # 复用已有服务：直连宿主机映射端口，不经过 docker。
+  if command -v mysql >/dev/null 2>&1; then
+    log "Using the host mysql client over TCP ${MYSQL_HOST}:${MYSQL_PORT}."
     mysql_exec() {
       MYSQL_PWD="${MYSQL_PASSWORD}" mysql \
         -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -uroot "$@"
     }
   else
-    # 自起容器：建库与导入全部用镜像自带的 mysql 客户端经 docker exec 完成，宿主机无需 MySQL 工具。
+    # 没有宿主机客户端：只能经 docker exec。自起容器时名字已知；复用已有服务时
+    # 容器名可能是 runner 随机生成的（如 CI services），因此要能按镜像/端口自动定位。
+    if [[ "${USE_EXISTING_MYSQL}" == "1" ]]; then
+      if [[ -z "${CLIENT_CONTAINER}" ]]; then
+        CLIENT_CONTAINER="$(find_client_container)"
+      fi
+      if [[ -z "${CLIENT_CONTAINER}" ]]; then
+        log "No mysql client on the host and no running MySQL container could be located."
+        log "Either install a client (e.g. apt-get install -y mysql-client) or set"
+        log "AIGATE_E2E_MYSQL_CONTAINER=<container name> for the service serving ${MYSQL_HOST}:${MYSQL_PORT}."
+        exit 1
+      fi
+      log "No host mysql client; using docker exec into ${CLIENT_CONTAINER}."
+    else
+      CLIENT_CONTAINER="${MYSQL_CONTAINER}"
+      log "No host mysql client; using docker exec into ${CLIENT_CONTAINER}."
+    fi
+    # 容器内部一律连 127.0.0.1:3306（容器自己的 mysqld），与宿主机端口映射无关。
     mysql_exec() {
-      docker exec -i -e "MYSQL_PWD=${MYSQL_PASSWORD}" "${MYSQL_CONTAINER}" \
+      docker exec -i -e "MYSQL_PWD=${MYSQL_PASSWORD}" "${CLIENT_CONTAINER}" \
         mysql -h 127.0.0.1 -uroot "$@"
     }
   fi

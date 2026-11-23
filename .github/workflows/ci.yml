@@ -69,11 +69,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # 复用 services 容器时 run.sh 走宿主机 mysql 客户端连 TCP（service 容器名由 runner
-      # 生成，无法按名字 docker exec），因此显式确保客户端存在，不依赖 runner 镜像预装内容。
-      - name: Install MySQL client
-        if: matrix.db == 'mysql'
-        run: sudo apt-get update && sudo apt-get install -y mysql-client
+      # run.sh 自行选择客户端：宿主机有 mysql 客户端就直连 TCP，没有就 docker exec 进
+      # services 容器执行（按镜像名 + 端口映射自动定位容器，不依赖 runner 生成的容器名）。
+      # 因此这里不再强制安装 mysql-client，省掉一次 apt-get 与对应的脆弱依赖。
 
       # mysql：连 services 容器建库并导入 sql/init.sql，覆盖生产 schema。
       # sqlite：网关启动时 AutoMigrate 建表，覆盖本地开发路径。
