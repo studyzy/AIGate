@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -91,6 +92,34 @@ const (
 // 入口 → IR
 // ---------------------------------------------------------------------------
 
+// 两条入口接受的顶层字段白名单。决策协议没有生成参数，任何未列出的键
+// （stream 的任意真值写法、max_tokens / temperature / top_p / tools …）一律 400：
+// 静默丢弃会让客户端以为参数生效，属于 spec §4 的反目标。
+var (
+	decisionsTopFields = map[string]struct{}{
+		"model": {}, "input": {}, "questions": {}, "safety_identifier": {},
+	}
+	systemOneTopFields = map[string]struct{}{
+		"model": {}, "state": {}, "questions": {}, "images": {}, "assets": {},
+	}
+)
+
+// rejectUnknownFields 对未在白名单内的顶层键返回 400，消息里点名第一个未知键。
+func rejectUnknownFields(top map[string]json.RawMessage, allowed map[string]struct{}, style string) error {
+	unknown := make([]string, 0, len(top))
+	for key := range top {
+		if _, ok := allowed[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return badRequest(unknown[0],
+		"%s requests do not accept %q (unsupported field)", style, unknown[0])
+}
+
 // DecodeDecisionsRequest 把 OpenAI Decisions 入口请求体解析成 IR。
 func DecodeDecisionsRequest(body []byte) (*DecisionRequest, error) {
 	var top map[string]json.RawMessage
@@ -102,6 +131,10 @@ func DecodeDecisionsRequest(body []byte) (*DecisionRequest, error) {
 		if err := json.Unmarshal(raw, &stream); err == nil && stream {
 			return nil, badRequest("stream", "streaming is not supported on decision models")
 		}
+		return nil, badRequest("stream", "streaming is not supported on decision models")
+	}
+	if err := rejectUnknownFields(top, decisionsTopFields, "decisions"); err != nil {
+		return nil, err
 	}
 	req := &DecisionRequest{}
 	if err := json.Unmarshal(top["model"], &req.Model); err != nil || strings.TrimSpace(req.Model) == "" {
@@ -330,6 +363,10 @@ func DecodeSystemOneRequest(body []byte) (*DecisionRequest, error) {
 		if err := json.Unmarshal(raw, &stream); err == nil && stream {
 			return nil, badRequest("stream", "streaming is not supported on decision models")
 		}
+		return nil, badRequest("stream", "streaming is not supported on decision models")
+	}
+	if err := rejectUnknownFields(top, systemOneTopFields, "system one"); err != nil {
+		return nil, err
 	}
 	req := &DecisionRequest{}
 	if err := json.Unmarshal(top["model"], &req.Model); err != nil || strings.TrimSpace(req.Model) == "" {

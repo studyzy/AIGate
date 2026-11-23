@@ -403,3 +403,40 @@ func TestDecodeDecisionsRequest_RejectsAssistantRole(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotSupportedField", err)
 	}
 }
+
+// 决策请求没有生成参数的概念：任何 chat 专有字段都必须显式 400，不能静默吞掉后转发。
+func TestDecodeDecisionsRequest_RejectsChatParams(t *testing.T) {
+	cases := map[string]string{
+		"stream string": `{"model":"m","input":"x","stream":"true","questions":[{"type":"predicate","instructions":"?"}]}`,
+		"max_tokens":    `{"model":"m","input":"x","max_tokens":16,"questions":[{"type":"predicate","instructions":"?"}]}`,
+		"temperature":   `{"model":"m","input":"x","temperature":0.2,"questions":[{"type":"predicate","instructions":"?"}]}`,
+		"top_p":         `{"model":"m","input":"x","top_p":0.9,"questions":[{"type":"predicate","instructions":"?"}]}`,
+		"unknown key":   `{"model":"m","input":"x","foo":1,"questions":[{"type":"predicate","instructions":"?"}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeDecisionsRequest([]byte(body))
+			var bad *DecisionBadRequest
+			if !errors.As(err, &bad) {
+				t.Fatalf("err = %v, want DecisionBadRequest", err)
+			}
+		})
+	}
+}
+
+func TestDecodeSystemOneRequest_RejectsChatParams(t *testing.T) {
+	body := `{"model":"m","state":"x","stream":"1","questions":{"q":{"type":"noul","instructions":"?"}}}`
+	_, err := DecodeSystemOneRequest([]byte(body))
+	var bad *DecisionBadRequest
+	if !errors.As(err, &bad) {
+		t.Fatalf("err = %v, want DecisionBadRequest", err)
+	}
+}
+
+// 有损字段的报错必须点名字段（Review Focus 4：400 且指名字段）。
+func TestEncodeLossyErrors_NameTheField(t *testing.T) {
+	_, err := EncodeSystemOneRequest(&DecisionRequest{Model: "m", State: json.RawMessage(`"x"`), SafetyID: "u"})
+	if !errors.Is(err, ErrNotSupportedField) || !strings.Contains(err.Error(), "safety_identifier") {
+		t.Fatalf("err = %v", err)
+	}
+}
