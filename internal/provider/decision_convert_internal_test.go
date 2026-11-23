@@ -440,3 +440,44 @@ func TestEncodeLossyErrors_NameTheField(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// 上游 200 但不带 usage 时不能整行记 0：提示层需要知道「没有 usage」而不是「用量为 0」。
+func TestParseDecisionResponse_MissingUsageIsNil(t *testing.T) {
+	req, err := DecodeDecisionsRequest([]byte(decisionsBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ParseOpenAIDecisionsResponse([]byte(`{"model":"m","answers":[{"type":"predicate","name":"is_refund","probability":0.5}]}`), req)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if resp.Usage != nil {
+		t.Fatalf("usage = %+v, want nil when upstream omits it", resp.Usage)
+	}
+}
+
+// 空 answers 数组是合法响应：解析成功且答案为空，不得报错。
+func TestParseOpenAIDecisionsResponse_EmptyAnswers(t *testing.T) {
+	req, err := DecodeDecisionsRequest([]byte(decisionsBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ParseOpenAIDecisionsResponse(
+		[]byte(`{"model":"m","answers":[],"usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}`), req)
+	if err != nil {
+		t.Fatalf("empty answers must parse: %v", err)
+	}
+	if len(resp.Answers) != 0 {
+		t.Fatalf("answers = %+v", resp.Answers)
+	}
+}
+
+func TestEncodeDecisionsResponse_EmptyAnswers(t *testing.T) {
+	body, err := EncodeDecisionsResponse(&DecisionResponse{Model: "m"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(string(body), `"answers":[]`) {
+		t.Fatalf("body = %s", body)
+	}
+}

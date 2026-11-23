@@ -297,3 +297,51 @@ func TestDecisionIngress_PerTokenUsage(t *testing.T) {
 			row.PromptTokens, row.CompletionTokens, row.TotalTokens)
 	}
 }
+
+// 上游 200 但不带 usage：仍要落一行用量（input_only 下 0/0/0 可接受），不得 panic、不得跳过记账。
+func TestDecisionIngress_MissingUsageStillRecords(t *testing.T) {
+	reply := `{"model":"jev-1.14.0","answers":{"reachable":{"type":"noul","noul":0.5}}}`
+	e, token := newDecisionEnv(t, model.ModelTypeSystemOne, respondConstantJSON(http.StatusOK, reply))
+
+	resp := e.postDecision(t, "/v1/systemone", token, decisionSystemOneRequestBody)
+	assertStatus(t, resp, http.StatusOK)
+	readBody(t, resp)
+	e.stopUsage()
+
+	db := openReadDB(t, e.dsn)
+	var row model.LLMUsageLog
+	if err := db.Order("id DESC").First(&row).Error; err != nil {
+		t.Fatalf("usage row must exist even without upstream usage: %v", err)
+	}
+	if row.CompletionTokens != 0 {
+		t.Fatalf("completion = %d, want 0", row.CompletionTokens)
+	}
+}
+
+// 上游 200 但漏答一道题：合法响应，漏答的题按 refusal 回给客户端，不得整单失败。
+func TestDecisionIngress_EmptyAnswers(t *testing.T) {
+	reply := `{"model":"jev-1.14.0","answers":{},"usage":{"input_tokens":5,"output_tokens":0}}`
+	e, token := newDecisionEnv(t, model.ModelTypeSystemOne, respondConstantJSON(http.StatusOK, reply))
+
+	resp := e.postDecision(t, "/v1/systemone", token, decisionSystemOneRequestBody)
+	assertStatus(t, resp, http.StatusOK)
+	out := readBody(t, resp)
+	if !strings.Contains(out, `"reachable":{"type":"refusal"}`) {
+		t.Fatalf("unanswered questions must come back as refusals: %s", out)
+	}
+}
+
+// OpenAI 上游返回空 answers 数组：原样回空数组（上游已按序作答，网关不做补齐）。
+func TestDecisionIngress_DecisionsEmptyAnswers(t *testing.T) {
+	reply := `{"model":"gpt-6-luna","answers":[],"usage":{"input_tokens":5,"output_tokens":0,"total_tokens":5}}`
+	e, token := newDecisionEnv(t, model.ModelTypeDecisions, respondConstantJSON(http.StatusOK, reply))
+
+	body := `{"model":"up-decision","input":"hello",` +
+		`"questions":[{"type":"predicate","name":"reachable","instructions":"?"}]}`
+	resp := e.postDecision(t, "/v1/decisions", token, body)
+	assertStatus(t, resp, http.StatusOK)
+	out := readBody(t, resp)
+	if !strings.Contains(out, `"answers":[]`) {
+		t.Fatalf("body = %s", out)
+	}
+}

@@ -334,3 +334,17 @@ make test-e2e   # end-to-end smoke test (requires a local MySQL)
 `make test-e2e` resets a dedicated test database, imports `sql/init.sql`,
 builds the binary, and drives it with a mock upstream. See `test/e2e/README.md`
 for its prerequisites and environment overrides.
+
+## Upgrading to a build with decision-model support (v0.2.0)
+
+This release adds the `ai_models.billing_mode` column. SQLite deployments get it
+from AutoMigrate at startup; MySQL deployments do **not** auto-migrate, so run the
+statement below before starting the new binary:
+
+```sql
+ALTER TABLE ai_models ADD COLUMN billing_mode VARCHAR(32) NOT NULL DEFAULT 'per_token' AFTER model_type;
+```
+
+The statement only adds a column and rewrites no rows, so it can run online without
+downtime; existing rows keep `per_token` and behave exactly as before. Decision models
+(`model_type` = `openai-decisions` / `systemone`) are created with `input_only`.
