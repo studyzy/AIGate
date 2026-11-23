@@ -682,3 +682,35 @@ func TestCheckRequest_GroupGlobalOverride(t *testing.T) {
 		t.Fatalf("group B = %+v, want not exceeded", st)
 	}
 }
+
+// CheckUser：cost 规则按窗口内平台结算币种微元求和，与「整单位限额 × 1e6」比较。
+func TestCheckUser_CostUnitComparesMicros(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testCtx()
+	year, month, _ := time.Now().In(model.BusinessLocation()).Date()
+	now := time.Date(year, month, 15, 12, 0, 0, 0, model.BusinessLocation())
+	// 金额按明细表窗口求和（与 model.SumUsageCostMicrosInWindow 口径一致）：
+	// 两条各 0.5 元合计 1 元，恰达整单位限额即超限。
+	for i := 0; i < 2; i++ {
+		if err := store.InsertUsageLog(ctx, &model.LLMUsageLog{UserID: 1, TotalTokens: 1,
+			CostPlatformMicros: 500_000, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := quota.CheckUser(ctx, store, 1, 0, []quota.Rule{{Mode: quota.ModeMonth, Limit: 1, Unit: quota.UnitCost}}, now)
+	if !st.Exceeded || st.Used != 1_000_000 || st.Limit != 1 || st.Unit != quota.UnitCost {
+		t.Fatalf("status = %+v", st)
+	}
+}
+
+// CheckUser：token 规则只累加 token，完全忽略金额列（旧规则行为不变）。
+func TestCheckUser_TokenUnitIgnoresCostRows(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testCtx()
+	if err := store.InsertUsageLog(ctx, &model.LLMUsageLog{UserID: 1, TotalTokens: 10, CostPlatformMicros: 9_999_999}); err != nil {
+		t.Fatal(err)
+	}
+	if st := quota.CheckUser(ctx, store, 1, 0, []quota.Rule{{Mode: quota.ModeDay, Limit: 100}}, time.Now()); st.Exceeded {
+		t.Fatalf("token rule must ignore cost: %+v", st)
+	}
+}

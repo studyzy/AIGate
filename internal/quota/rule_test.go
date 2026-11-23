@@ -285,3 +285,54 @@ func TestNormalizeRules(t *testing.T) {
 		}
 	})
 }
+
+// EffectiveUnit：未配置 unit（含空串）按 token 处理，旧规则行为不变。
+func TestRule_EffectiveUnitDefaultsToToken(t *testing.T) {
+	if got := (quota.Rule{Mode: quota.ModeDay, Limit: 100}).EffectiveUnit(); got != quota.UnitToken {
+		t.Fatalf("unit = %q", got)
+	}
+	if got := (quota.Rule{Mode: quota.ModeDay, Limit: 100, Unit: quota.UnitToken}).EffectiveUnit(); got != quota.UnitToken {
+		t.Fatalf("token unit = %q", got)
+	}
+	if got := (quota.Rule{Mode: quota.ModeDay, Limit: 100, Unit: quota.UnitCost}).EffectiveUnit(); got != quota.UnitCost {
+		t.Fatalf("cost unit = %q", got)
+	}
+}
+
+// ValidateRules：unit 白名单；cost 规则的 limit 上界保证 limit×1e6 不溢出 int64。
+func TestValidateRules_RejectsUnknownUnit(t *testing.T) {
+	if err := quota.ValidateRules([]quota.Rule{{Mode: quota.ModeDay, Limit: 1, Unit: "dollar"}}); err == nil {
+		t.Fatal("unknown unit must be rejected")
+	}
+}
+
+func TestValidateRules_RejectsCostLimitTooLarge(t *testing.T) {
+	if err := quota.ValidateRules([]quota.Rule{{Mode: quota.ModeDay, Limit: 9_000_000_000_001, Unit: quota.UnitCost}}); err == nil {
+		t.Fatal("cost limit above int64 micros must be rejected")
+	}
+	// 上界本身合法；token 规则不受该上界约束。
+	ok := []quota.Rule{
+		{Mode: quota.ModeDay, Limit: 9_000_000_000_000, Unit: quota.UnitCost},
+		{Mode: quota.ModeMonth, Limit: 9_000_000_000_001, Unit: quota.UnitToken},
+	}
+	if err := quota.ValidateRules(ok); err != nil {
+		t.Fatalf("ValidateRules(at bound) = %v, want nil", err)
+	}
+}
+
+// MarshalRules：token（缺省）单位不落库，旧规则文本逐字节不变；cost 单位保留。
+func TestMarshalRules_OmitsTokenUnit(t *testing.T) {
+	got := quota.MarshalRules([]quota.Rule{
+		{Mode: quota.ModeDay, Limit: 100},
+		{Mode: quota.ModeMonth, Limit: 5, Unit: quota.UnitCost},
+	})
+	if strings.Contains(got, `"unit":"token"`) {
+		t.Fatalf("token unit must be omitted: %s", got)
+	}
+	if !strings.Contains(got, `"unit":"cost"`) {
+		t.Fatalf("cost unit must be kept: %s", got)
+	}
+	if want := `[{"mode":"day","limit":100},{"mode":"month","limit":5,"unit":"cost"}]`; got != want {
+		t.Fatalf("MarshalRules = %q, want %q", got, want)
+	}
+}

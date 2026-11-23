@@ -15,10 +15,13 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
+	"aigate/internal/billing"
 	"aigate/internal/model"
 )
 
@@ -39,9 +42,11 @@ const (
 // Status 是一次配额检查的结果。
 type Status struct {
 	Exceeded   bool
-	Kind       string // "global" | "model" | "user"；未超限时为空
+	Kind       string // "global" | "model" | "user" | "key"；未超限时为空
 	Used       int64
 	Limit      int
+	Unit       string        // 非空即 UnitCost（token 规则留空以保持旧结果不变）；cost 时 Used 为微元、Limit 为整单位
+	Currency   string        // cost 规则的结算币种（由调用侧按平台结算币种填充）
 	RetryAfter time.Duration // 0 = 无法推算，调用方回退默认值（如 3600s）
 }
 
@@ -52,41 +57,80 @@ func allowed() Status { return Status{} }
 //   - limit < 0 的规则跳过；
 //   - 规则当前不生效（active=false）→ fail-closed：判定超限（Used=0 / RetryAfter=0）；
 //   - 用量读取故障 → fail-open：调用 warnUsageReadFailed 记警告并放行；
-//   - used >= limit → 超限（携带 Used / Limit / RetryAfter）。
+//   - used >= limit → 超限（携带 Used / Limit / RetryAfter；cost 规则另带 Unit=UnitCost）。
 //
-// sum 按层级口径统计窗口内用量；kind 写入超限结果的 Kind 字段。
+// 计量单位按 rule.EffectiveUnit() 选择：token 规则用 sum（token 总量）；
+// cost 规则用 sumCost（窗口内平台结算币种微元），限额换算为 int64(limit)*billing.MicrosPerUnit。
+// sumCost 为 nil 时 cost 规则同样按用量读取故障 fail-open（记警告），绝不误拒。
+// kind 写入超限结果的 Kind 字段。
 func checkRules(
 	ctx context.Context,
 	rules []Rule,
 	now time.Time,
 	kind string,
 	sum func(ctx context.Context, from time.Time, to *time.Time) (int64, error),
+	sumCost func(ctx context.Context, from time.Time, to *time.Time) (int64, error),
 	warnUsageReadFailed func(err error),
 ) Status {
 	for _, rule := range rules {
 		if rule.Limit < 0 {
 			continue
 		}
+		unit := rule.EffectiveUnit()
 		from, to, active := rule.Window(now)
 		if !active {
-			return Status{Exceeded: true, Kind: kind, Limit: rule.Limit}
+			// fail-closed：窗口不生效即拒绝，只带计量单位与限额，不编造用量。
+			return Status{Exceeded: true, Kind: kind, Limit: rule.Limit, Unit: unitStatus(unit)}
 		}
-		used, err := sum(ctx, from, to)
+		read := sum
+		if unit == UnitCost {
+			read = sumCost
+		}
+		if read == nil {
+			warnUsageReadFailed(errors.New("cost usage reader not available"))
+			return allowed()
+		}
+		used, err := read(ctx, from, to)
 		if err != nil {
 			warnUsageReadFailed(err)
 			return allowed()
 		}
-		if used >= int64(rule.Limit) {
+		// token 规则比较 token 总量；cost 规则的 used 为微元，限额换算为 整单位 × MicrosPerUnit。
+		// 上界已由 ValidateRules 保证不溢出；此处仍做饱和兜底，避免直接构造的非法规则溢出为负。
+		limit := int64(rule.Limit)
+		if unit == UnitCost {
+			limit = mulMicrosSaturating(int64(rule.Limit))
+		}
+		if used >= limit {
 			return Status{
 				Exceeded:   true,
 				Kind:       kind,
 				Used:       used,
 				Limit:      rule.Limit,
+				Unit:       unitStatus(unit),
 				RetryAfter: retryAfter(to, now),
 			}
 		}
 	}
 	return allowed()
+}
+
+// unitStatus 把规则的生效单位映射为 Status.Unit：token 缺省不填（保持旧结果的零值与
+// 既有断言逐字段相等），仅 cost 显式标注；调用方据 Status.Unit == UnitCost 判断
+// Used 是微元、Limit 是整单位。
+func unitStatus(effectiveUnit string) string {
+	if effectiveUnit == UnitCost {
+		return UnitCost
+	}
+	return ""
+}
+
+// mulMicrosSaturating 返回 units × billing.MicrosPerUnit，溢出时饱和到 math.MaxInt64。
+func mulMicrosSaturating(units int64) int64 {
+	if units > math.MaxInt64/billing.MicrosPerUnit {
+		return math.MaxInt64
+	}
+	return units * billing.MicrosPerUnit
 }
 
 // CheckGlobal 检查全站或某个分组在规则窗口内的用量是否超限。
@@ -113,6 +157,14 @@ func CheckGlobal(
 		}
 		return store.SumGlobalTokensInWindow(ctx, from, to)
 	}
+	// cost 口径的过滤维度与 token 口径一致：组作用域按组，其余为全站（无过滤）。
+	sumCost := func(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
+		filter := model.UsageFilter{}
+		if scope == scopeGroup {
+			filter.GroupID = groupID
+		}
+		return store.SumUsageCostMicrosInWindow(ctx, filter, from, to)
+	}
 	warn := func(err error) {
 		slog.Warn(
 			"global quota usage read failed, allowing request",
@@ -124,7 +176,7 @@ func CheckGlobal(
 			groupID,
 		)
 	}
-	return checkRules(ctx, rules, now, kindGlobal, sum, warn)
+	return checkRules(ctx, rules, now, kindGlobal, sum, sumCost, warn)
 }
 
 // CheckModelDaily 检查模型在业务时区「今天」的用量是否超出 quotaDay（<0 表示不限制）。
@@ -161,6 +213,10 @@ func CheckUser(ctx context.Context, store *model.Store, userID, groupID uint, ru
 	sum := func(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
 		return store.SumUserTokensInWindow(ctx, userID, groupID, from, to)
 	}
+	// cost 口径沿用同一过滤维度：user_id 必加，group_id>0 时再按分组收窄。
+	sumCost := func(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
+		return store.SumUsageCostMicrosInWindow(ctx, model.UsageFilter{UserID: userID, GroupID: groupID}, from, to)
+	}
 	warn := func(err error) {
 		slog.Warn(
 			"user quota usage read failed, allowing request",
@@ -172,7 +228,7 @@ func CheckUser(ctx context.Context, store *model.Store, userID, groupID uint, ru
 			groupID,
 		)
 	}
-	return checkRules(ctx, rules, now, kindUser, sum, warn)
+	return checkRules(ctx, rules, now, kindUser, sum, sumCost, warn)
 }
 
 // CheckKey 检查密钥级周期配额（照搬 hatchery CheckAgentTokenQuota 语义）。
@@ -185,10 +241,14 @@ func CheckKey(ctx context.Context, store *model.Store, apiKeyID uint, rules []Ru
 	sum := func(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
 		return store.SumKeyTokensInWindow(ctx, apiKeyID, from, to)
 	}
+	// cost 口径按密钥 id 过滤，与 token 口径一致。
+	sumCost := func(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
+		return store.SumUsageCostMicrosInWindow(ctx, model.UsageFilter{APIKeyID: apiKeyID}, from, to)
+	}
 	warn := func(err error) {
 		slog.Warn("key quota usage read failed, allowing request", "error", err, "api_key_id", apiKeyID)
 	}
-	return checkRules(ctx, rules, now, kindKey, sum, warn)
+	return checkRules(ctx, rules, now, kindKey, sum, sumCost, warn)
 }
 
 // CheckRequest 按「全局 → 模型日配额 → 用户 → 密钥」顺序检查一次请求，返回首个超限项；

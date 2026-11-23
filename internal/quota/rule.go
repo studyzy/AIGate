@@ -44,14 +44,34 @@ const (
 	RefreshNone    = "none"    // 固定窗口 [start, end|∞)
 )
 
+// 配额计量单位。
+const (
+	UnitToken = "token" // 窗口内 token 总量（缺省，即旧规则语义）
+	UnitCost  = "cost"  // 窗口内平台结算币种金额（微元）
+)
+
+// MaxCostLimit cost 规则的 limit 上界：limit × billing.MicrosPerUnit 必须不溢出 int64，
+// 故取 math.MaxInt64 / 1e6 向下取整（9 000 000 000 000）。
+const MaxCostLimit = 9_000_000_000_000
+
 // Rule 单条配额规则。
 // Limit < 0（即 -1）表示该规则参与窗口计算但不限制用量。
 type Rule struct {
 	Mode    string `json:"mode"`
 	Limit   int    `json:"limit"`
+	Unit    string `json:"unit,omitempty"`    // token（缺省）| cost
 	Start   *int64 `json:"start,omitempty"`   // Unix 秒，custom 锚点
 	End     *int64 `json:"end,omitempty"`     // Unix 秒，custom 硬截止（nil 或 <=0 视为未配置）
 	Refresh string `json:"refresh,omitempty"` // daily / monthly / yearly / none，仅 custom 有效
+}
+
+// EffectiveUnit 返回规则实际生效的计量单位：未配置（空串）按 token 处理，
+// 保证无 unit 的旧规则 JSON 与升级前行为完全一致。
+func (r Rule) EffectiveUnit() string {
+	if r.Unit == "" {
+		return UnitToken
+	}
+	return r.Unit
 }
 
 // ParseRules 解析 DB 中存储的规则 JSON 文本。
@@ -78,13 +98,17 @@ func ParseRules(raw string) ([]Rule, bool) {
 
 // MarshalRules 将规则序列化为 JSON 文本；序列化前自动规范化：
 //   - custom 模式的空 refresh 补为 "none"；
-//   - 非 custom 模式清除无意义的 start/end/refresh。
+//   - 非 custom 模式清除无意义的 start/end/refresh；
+//   - unit 为空或 "token" 时置空（omitempty 不输出），保证旧规则文本逐字节不变。
 //
 // 空集合（含 nil）输出 "[]"。不修改入参。
 func MarshalRules(rules []Rule) string {
 	out := make([]Rule, len(rules))
 	copy(out, rules)
 	for i := range out {
+		if out[i].EffectiveUnit() == UnitToken {
+			out[i].Unit = ""
+		}
 		if out[i].Mode == ModeCustom {
 			if out[i].Refresh == "" {
 				out[i].Refresh = RefreshNone
@@ -102,6 +126,7 @@ func MarshalRules(rules []Rule) string {
 // ValidateRules 校验规则集合；空集合视为显式不限（合法）。
 //
 // 校验项：同一集合内 mode 不可重复；limit 必须 >= -1；mode 必须合法；
+// unit 只允许空串 / token / cost；unit=cost 时 limit 不得超过 MaxCostLimit；
 // custom 的 refresh 必须合法；custom 同时给出 start/end 时 end 必须晚于 start。
 func ValidateRules(rules []Rule) error {
 	if len(rules) == 0 {
@@ -116,6 +141,17 @@ func ValidateRules(rules []Rule) error {
 
 		if r.Limit < -1 {
 			return errors.New("limit must be >= -1")
+		}
+
+		switch r.Unit {
+		case "", UnitToken:
+		case UnitCost:
+			// limit × billing.MicrosPerUnit 必须不溢出 int64。
+			if r.Limit > MaxCostLimit {
+				return fmt.Errorf("cost limit must be <= %d", MaxCostLimit)
+			}
+		default:
+			return fmt.Errorf("invalid quota unit %q", r.Unit)
 		}
 
 		switch r.Mode {
