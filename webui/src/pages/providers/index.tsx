@@ -2,14 +2,19 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import type { AIGateModel, ConnectivityResult, Credential, SecretItem } from "@/api/types";
+import { PriceEditor } from "@/components/PriceEditor";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
 import { QueryError } from "@/components/ui/QueryError";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, EmptyState, ErrorText, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
+import { microsToInput } from "@/lib/micros";
 
 type ProviderGroup = { key: string; models: AIGateModel[] };
+
+// CURRENCY_OPTIONS 是计价/结算币种下拉的常见选项；下拉只是便利，服务端只校验三位大写。
+const CURRENCY_OPTIONS = ["CNY", "USD", "HKD", "EUR", "GBP", "JPY", "SGD", "AUD", "CAD", "KRW"];
 
 // MAX_AUTO_SELECT 是「拉取模型」后默认勾选的上限：超过就一个都不勾，避免一次点出上百个请求。
 const MAX_AUTO_SELECT = 20;
@@ -55,6 +60,7 @@ export function ProvidersPage() {
   const [editing, setEditing] = useState<ProviderGroup | null>(null);
   const [creating, setCreating] = useState(false);
   const [editingModel, setEditingModel] = useState<AIGateModel | null>(null);
+  const [pricingModel, setPricingModel] = useState<AIGateModel | null>(null);
   const [deletingModel, setDeletingModel] = useState<AIGateModel | null>(null);
   const [deletingProvider, setDeletingProvider] = useState<ProviderGroup | null>(null);
 
@@ -222,6 +228,7 @@ export function ProvidersPage() {
                           <div className="truncate font-mono text-xs text-slate-500" title={model.url}>{model.url}</div>
                           <div className="flex justify-end gap-1">
                             <Button variant="ghost" onClick={() => void test(model.id)}>{t("model.test")}</Button>
+                            <Button variant="ghost" onClick={() => setPricingModel(model)}>{t("price.title")}</Button>
                             <Button variant="ghost" onClick={() => setEditingModel(model)}>{t("common.edit")}</Button>
                             <Button variant="ghost" className="text-red-600" onClick={() => setDeletingModel(model)}>
                               {t("common.delete")}
@@ -249,6 +256,16 @@ export function ProvidersPage() {
       ) : null}
 
       {editingModel ? <ModelDrawer model={editingModel} onClose={() => setEditingModel(null)} /> : null}
+
+      {pricingModel ? (
+        <PriceEditor
+          model={pricingModel}
+          onClose={() => {
+            setPricingModel(null);
+            void client.invalidateQueries({ queryKey: ["models"] });
+          }}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={deletingModel !== null}
@@ -542,23 +559,46 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
   );
 }
 
+/** CURRENCY_CUSTOM 是币种下拉里「手输」的哨兵值，不是合法币种。 */
+const CURRENCY_CUSTOM = "__custom";
+
 function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => void }) {
   const { t } = useI18n();
   const client = useQueryClient();
   const [modelName, setModelName] = useState(model.model_name);
   const [quotaDay, setQuotaDay] = useState(model.quota_day);
   const [enabled, setEnabled] = useState(model.enabled);
+  const [currency, setCurrency] = useState(model.currency);
+  // 已有币种不在常见选项里时，下拉切到「手输」并保留原值。
+  const [customCurrency, setCustomCurrency] = useState(
+    model.currency !== "" && !CURRENCY_OPTIONS.includes(model.currency),
+  );
+  const [peakPricing, setPeakPricing] = useState(model.enable_peak_pricing);
+  const [upstreamCost, setUpstreamCost] = useState(model.use_upstream_cost);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const price = model.current_price;
 
   async function submit() {
     setBusy(true);
+    setError("");
     try {
       await api("/admin/models/" + model.id, {
         method: "PUT",
-        body: JSON.stringify({ model_name: modelName, quota_day: quotaDay, enabled }),
+        body: JSON.stringify({
+          model_name: modelName,
+          quota_day: quotaDay,
+          enabled,
+          currency: currency.trim().toUpperCase(),
+          enable_peak_pricing: peakPricing,
+          use_upstream_cost: upstreamCost,
+        }),
       });
       await client.invalidateQueries({ queryKey: ["models"] });
       onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -586,6 +626,77 @@ function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => vo
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           {t("common.enabled")}
         </label>
+
+        <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+          <div className="text-sm font-medium text-slate-700">{t("model.billing")}</div>
+          <Field label={t("model.currency")} hint={t("model.currencyHint")}>
+            <Select
+              value={customCurrency ? CURRENCY_CUSTOM : currency}
+              onChange={(e) => {
+                if (e.target.value === CURRENCY_CUSTOM) {
+                  setCustomCurrency(true);
+                  return;
+                }
+                setCustomCurrency(false);
+                setCurrency(e.target.value);
+              }}
+              data-testid="model-currency-select"
+            >
+              <option value="">{t("model.currency.none")}</option>
+              {CURRENCY_OPTIONS.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+              <option value={CURRENCY_CUSTOM}>{t("model.currency.custom")}</option>
+            </Select>
+          </Field>
+          {customCurrency ? (
+            <Field label={t("model.currencyCode")}>
+              <Input
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                placeholder="CNY"
+                maxLength={3}
+                data-testid="model-currency-input"
+              />
+            </Field>
+          ) : null}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={peakPricing}
+              onChange={(e) => setPeakPricing(e.target.checked)}
+              data-testid="model-peak-pricing"
+            />
+            {t("model.enablePeakPricing")}
+          </label>
+          <p className="text-xs text-slate-500">{t("model.enablePeakPricingHint")}</p>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={upstreamCost}
+              onChange={(e) => setUpstreamCost(e.target.checked)}
+              data-testid="model-upstream-cost"
+            />
+            {t("model.useUpstreamCost")}
+          </label>
+          <p className="text-xs text-slate-500">{t("model.useUpstreamCostHint")}</p>
+          <div className="flex items-center gap-2 text-xs text-slate-600" data-testid="model-current-price">
+            {price ? (
+              <>
+                <Badge tone="green">{t("model.priceConfigured")}</Badge>
+                <span>{price.currency}</span>
+                <span>{t("price.output")} {microsToInput(price.offpeak_output_micros)}</span>
+              </>
+            ) : currency.trim() === "" ? (
+              <span>{t("model.noCurrency")}</span>
+            ) : (
+              <span>{t("model.noPrice")}</span>
+            )}
+          </div>
+          {error ? <ErrorText>{error}</ErrorText> : null}
+        </div>
       </div>
     </Drawer>
   );

@@ -38,3 +38,19 @@ export function todayISO(offsetDays = 0): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
 }
+
+/** toLocalInput 把 Date 换成 <input type="datetime-local"> 认的本地时刻文本（不带秒与时区）。 */
+export function toLocalInput(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    "T" +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes())
+  );
+}

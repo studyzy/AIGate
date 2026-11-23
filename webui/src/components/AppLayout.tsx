@@ -36,6 +36,13 @@ const GROUPS: { title: MessageKey; items: { key: MessageKey; to: string }[] }[] 
     ],
   },
   {
+    title: "nav.billing",
+    items: [
+      { key: "nav.billingCalendar", to: "/billing-calendar" },
+      { key: "nav.currencyRates", to: "/currency-rates" },
+    ],
+  },
+  {
     title: "nav.system",
     items: [
       { key: "nav.settings", to: "/settings" },

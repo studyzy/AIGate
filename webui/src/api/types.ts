@@ -14,6 +14,14 @@ export interface AIGateModel {
   quota_day: number;
   enabled: boolean;
   user_key_required: boolean;
+  /** 模型计价币种（ISO 4217 三位大写）；空串表示未配置，不参与金额记账。 */
+  currency: string;
+  /** 是否启用峰谷定价；时段随价目快照保存在 peak_hours。 */
+  enable_peak_pricing: boolean;
+  /** 是否优先采信上游自报的 usage.cost。 */
+  use_upstream_cost: boolean;
+  /** 当前生效的价目快照；无价目时为 null。 */
+  current_price: AIModelPrice | null;
   created_at: string;
   updated_at: string;
 }
@@ -30,6 +38,90 @@ export interface ModelInput {
   quota_day?: number;
   enabled?: boolean;
   user_key_required?: boolean;
+  currency?: string;
+  enable_peak_pricing?: boolean;
+  use_upstream_cost?: boolean;
+}
+
+/** PeakWindow 是一个高峰时段窗口；days 用 Go time.Weekday 编号（0=周日 … 6=周六）。 */
+export interface PeakWindow {
+  /** 指窗口开始的那一天。 */
+  days: number[];
+  /** "HH:MM"；end <= start 表示跨午夜，"24:00" 合法。 */
+  start: string;
+  end: string;
+}
+
+/** PeakSchedule 是模型级的峰谷时段配置，时区为 IANA 名称。 */
+export interface PeakSchedule {
+  timezone: string;
+  windows: PeakWindow[];
+}
+
+/**
+ * AIModelPrice 是一份价目快照。micros 字段为「每百万 token 的微元数」，
+ * 展示时要除以 1e6 换成币种单位（整数微元只在这里和录入表单之间换算）。
+ */
+export interface AIModelPrice {
+  id: ID;
+  ai_model_id: ID;
+  currency: string;
+  /** RFC3339 时间戳。 */
+  effective_at: string;
+  /** 服务端原样回显的 JSON 文本，便于直接核对厂商价目页；无时段时为 "{}"。 */
+  peak_hours: string;
+  peak_input_hit_micros: number;
+  peak_input_miss_micros: number;
+  peak_output_micros: number;
+  offpeak_input_hit_micros: number;
+  offpeak_input_miss_micros: number;
+  offpeak_output_micros: number;
+  created_at: string;
+}
+
+export interface PriceInput {
+  /** 缺省取模型当前币种。 */
+  currency?: string;
+  effective_at: string;
+  peak_hours: string;
+  peak_input_hit_micros: number;
+  peak_input_miss_micros: number;
+  peak_output_micros: number;
+  offpeak_input_hit_micros: number;
+  offpeak_input_miss_micros: number;
+  offpeak_output_micros: number;
+}
+
+/** BillingCalendarDay 是计费日历的一天：is_workday 为 false 强制判为非高峰。 */
+export interface BillingCalendarDay {
+  /** YYYY-MM-DD（业务时区日期）。 */
+  date: string;
+  is_workday: boolean;
+  note: string;
+}
+
+export interface BillingCalendarInput {
+  date: string;
+  is_workday: boolean;
+  note?: string;
+}
+
+/** CurrencyRate：1 单位 from_currency = rate_micros/1e6 单位 to_currency。 */
+export interface CurrencyRate {
+  id: ID;
+  from_currency: string;
+  to_currency: string;
+  /** RFC3339 时间戳。 */
+  effective_at: string;
+  rate_micros: number;
+  created_at: string;
+}
+
+export interface CurrencyRateInput {
+  from_currency: string;
+  to_currency: string;
+  effective_at: string;
+  rate_micros: number;
 }
 
 export interface SecretItem {
@@ -138,6 +230,8 @@ export interface Settings {
   global_token_quota_rules: string;
   global_quota_scope: string;
   user_key_limit: number;
+  /** 平台结算币种（ISO 4217 三位大写，全局唯一）。 */
+  platform_currency: string;
 }
 
 export interface Webhook {

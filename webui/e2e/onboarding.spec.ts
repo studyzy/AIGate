@@ -7,7 +7,8 @@ test("guides an empty install to a working key", async ({ page }) => {
 
   // 供应商 = 凭据 + 上游地址 + 模型列表；凭据在同一个表单里内联创建。
   await page.getByRole("link", { name: "Providers" }).click();
-  await expect(page.getByText("No providers yet")).toBeVisible();
+  // 不假定库是空的：同一轮里其他 spec 可能已经建过供应商，这里只等页面就绪。
+  await expect(page.getByRole("button", { name: "New provider" })).toBeVisible();
   await page.getByRole("button", { name: "New provider" }).click();
   await page.getByLabel("Provider", { exact: true }).fill("openai");
   await page.getByLabel("Endpoint").fill("http://127.0.0.1:19090/v1");

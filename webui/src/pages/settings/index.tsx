@@ -10,6 +10,9 @@ import { useApiMutation } from "@/hooks/useApiMutation";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 
+// CURRENCY_OPTIONS 是常见 ISO 4217 结算币种选项。
+const CURRENCY_OPTIONS = ["CNY", "USD", "HKD", "EUR", "GBP", "JPY", "SGD", "AUD", "CAD", "KRW"];
+
 export function SettingsPage() {
   const { t } = useI18n();
   const toast = useToast();
@@ -60,6 +63,23 @@ export function SettingsPage() {
           <div className="mb-1 text-sm font-medium text-slate-700">{t("settings.globalQuota")}</div>
           <QuotaRuleEditor value={form.global_token_quota_rules} onChange={(next) => set("global_token_quota_rules", next)} />
         </div>
+        <Field label={t("settings.platformCurrency")} hint={t("settings.platformCurrencyHint")}>
+          <Select
+            value={form.platform_currency}
+            onChange={(e) => set("platform_currency", e.target.value)}
+            data-testid="settings-platform-currency"
+          >
+            {CURRENCY_OPTIONS.map((code) => (
+              <option key={code} value={code}>
+                {code}
+              </option>
+            ))}
+            {/* 已配置但不常见的币种也要能显示并保存回去，否则一改别处就被压成默认值。 */}
+            {CURRENCY_OPTIONS.includes(form.platform_currency) ? null : (
+              <option value={form.platform_currency}>{form.platform_currency}</option>
+            )}
+          </Select>
+        </Field>
         <Field label={t("settings.userKeyLimit")}>
           <Input
             type="number"
