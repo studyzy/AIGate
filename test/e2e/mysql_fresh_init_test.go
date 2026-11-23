@@ -81,6 +81,7 @@ func TestE2E_MySQLFreshInit(t *testing.T) {
 			"users": true, "ai_models": true, "api_keys": true, "api_key_models": true,
 			"llm_usage_logs": true, "daily_usage_summaries": true, "user_groups": true,
 			"settings": true, "credentials": true, "webhooks": true, "webhook_deliveries": true,
+			"response_states": true,
 		}
 		rows, err := freshDBHandle.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()")
 		if err != nil {
@@ -174,7 +175,7 @@ func TestE2E_MySQLFreshInit(t *testing.T) {
 		for _, table := range []string{
 			"users", "ai_models", "api_keys", "api_key_models", "llm_usage_logs",
 			"daily_usage_summaries", "user_groups", "settings", "credentials",
-			"webhooks", "webhook_deliveries",
+			"webhooks", "webhook_deliveries", "response_states",
 		} {
 			rows, err := freshDBHandle.Query("SELECT * FROM `" + table + "` LIMIT 0")
 			if err != nil {

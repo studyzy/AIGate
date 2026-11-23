@@ -15,12 +15,14 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aigate/internal/event"
@@ -35,20 +37,58 @@ type Handler struct {
 	store               *model.Store
 	usage               *UsageWriter
 	quotaExceededStatus int // 配额超限状态码（429 或 403，默认 429）
+
+	// allowResponseStorage 是 Responses 站点级存储开关（-allow-response-storage，默认 true）。
+	// false 时所有请求按 store:false 处理、显式 store:true 与有状态字段一律 400。
+	// 由 SetResponseStorage 在装配阶段设置，运行期只读，故不需要加锁。
+	allowResponseStorage bool
+
+	// pruneStartOnce / pruneCancel 是保留期清理循环的启停句柄（StartResponseRetention 注册，
+	// StopResponseRetention 取消；未启动时 pruneCancel 为 nil）。
+	pruneStartOnce sync.Once
+	pruneCancel    context.CancelFunc
+
+	// responseBackgroundTimeout 是 background:true 后台执行的总时长上限
+	// （-response-background-timeout，默认 responseBackgroundDefaultTimeout）。
+	// 与 allowResponseStorage 同口径：装配阶段由 SetResponseBackgroundTimeout 设置，
+	// 运行期只读（后台 goroutine 每个任务读一次），因此不需要加锁。
+	responseBackgroundTimeout time.Duration
+
+	// backgroundRuns 登记在途后台任务的可取消 ctx（键为 respID），
+	// 由 registerBackgroundRun / releaseBackgroundRun 维护，cancel 时据此中断上游请求
+	// （见 responses_background.go 顶部的「在途后台任务的注册表」一节）。
+	backgroundMu   sync.Mutex
+	backgroundRuns map[string]context.CancelFunc
 }
 
 // NewHandler 创建数据面处理器。quotaExceededStatus 非 429/403 时回退 429。
+//
+// Responses 存储默认开启（与 -allow-response-storage 的默认值一致）；
+// 站点关闭存储与保留期清理分别由 SetResponseStorage / StartResponseRetention 装配。
 func NewHandler(store *model.Store, usage *UsageWriter, quotaExceededStatus int) *Handler {
 	if quotaExceededStatus != 429 && quotaExceededStatus != 403 {
 		quotaExceededStatus = http.StatusTooManyRequests
 	}
-	return &Handler{store: store, usage: usage, quotaExceededStatus: quotaExceededStatus}
+	return &Handler{
+		store:                     store,
+		usage:                     usage,
+		quotaExceededStatus:       quotaExceededStatus,
+		allowResponseStorage:      true,
+		responseBackgroundTimeout: responseBackgroundDefaultTimeout,
+	}
 }
 
 // Register 注册数据面路由。
+//
+// Responses 的四条路由：创建 + 三个生命周期端点（design §5.6）。生命周期端点必须带 {id}，
+// 与 POST /v1/responses 是不同模式，互不影响（Ruling 3：后加的路由只追加，不重写本函数）。
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", h.handleAnthropicMessages)
+	mux.HandleFunc("POST /v1/responses", h.handleResponses)
+	mux.HandleFunc("GET /v1/responses/{id}", h.handleGetResponse)
+	mux.HandleFunc("DELETE /v1/responses/{id}", h.handleDeleteResponse)
+	mux.HandleFunc("POST /v1/responses/{id}/cancel", h.handleCancelResponse)
 	mux.HandleFunc("GET /v1/models", h.handleModels)
 }
 
@@ -156,6 +196,35 @@ func (h *Handler) prepareForward(
 	key *model.APIKey,
 	reqBody map[string]any,
 ) (resolved *model.Resolved, body []byte, ok bool) {
+	// 解析模型 + 配额检查。
+	res, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
+	if !ok {
+		return nil, nil, false
+	}
+
+	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
+	enforceMaxTokens(reqBody, key.MaxTokens)
+	reqBody["model"] = res.ModelID
+	modifiedBody, err := json.Marshal(reqBody)
+	if err != nil {
+		h.writeIngressError(w, r, http.StatusInternalServerError, msgInvalidJSON)
+		return nil, nil, false
+	}
+	return res, modifiedBody, true
+}
+
+// resolveAndCheckQuota 只完成 prepareForward 的前半段：「模型解析 → 配额检查」；
+// 不做 max_tokens 压制与 body 重写。失败时已写出错误响应并返回 ok=false。
+//
+// 拆成两段是为了让调用方能「只做解析与配额、不碰请求体」：Responses 入口用它拿 resolved
+// 再按 ModelType 分派，避免把 Responses 形态 body 交给 prepareForward 的改写步骤
+// （那会二次压制并掩盖 §5.4.1 第 4 步）。每条路径对它的调用恰好一次。
+func (h *Handler) resolveAndCheckQuota(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	reqBody map[string]any,
+) (*model.Resolved, bool) {
 	// 解析密钥绑定的目标模型（显式未绑定 → 400；未指定 → primary）。
 	reqModelName := extractRequestedModel(reqBody)
 	res, err := h.store.ResolveModelForKey(r.Context(), key, reqModelName)
@@ -171,24 +240,15 @@ func (h *Handler) prepareForward(
 			slog.Error("resolve model failed", "error", err, "key_id", key.ID)
 			h.writeIngressError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
-		return nil, nil, false
+		return nil, false
 	}
 
 	// 配额检查（全局 → 模型日配额 → 用户 → 密钥；首个超限即拒绝，带 Retry-After）。
 	if st := quota.CheckRequest(r.Context(), h.store, key, res, time.Now()); st.Exceeded {
 		h.writeIngressQuotaExceeded(w, r, key, res, st)
-		return nil, nil, false
+		return nil, false
 	}
-
-	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
-	enforceMaxTokens(reqBody, key.MaxTokens)
-	reqBody["model"] = res.ModelID
-	modifiedBody, err := json.Marshal(reqBody)
-	if err != nil {
-		h.writeIngressError(w, r, http.StatusInternalServerError, msgInvalidJSON)
-		return nil, nil, false
-	}
-	return res, modifiedBody, true
+	return res, true
 }
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -374,15 +434,68 @@ func extractRequestedModel(reqBody map[string]any) string {
 	return ""
 }
 
-// enforceMaxTokens 对请求体的 max_tokens / max_completion_tokens 施加密钥上限。
-// 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限；
-// 两个字段都没有有效数值时注入 max_tokens=上限。
+// maxTokensChatFields 是 chat 协议的输出长度字段（缺少时以 max_tokens 注入上限）。
+// 用数组而非切片：包级变量不可被误改写。
+var maxTokensChatFields = [...]string{"max_tokens", "max_completion_tokens"}
+
+// maxTokensCappedFields 是全部受密钥上限压制的输出长度字段：
+// chat 协议的 max_tokens / max_completion_tokens，以及 Responses 协议的 max_output_tokens。
+var maxTokensCappedFields = [...]string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+// maxTokensFieldsProvided 报告请求是否在某组字段上给出了有效数值。
+//
+// 只有 float64 才算「有效数值」，与压制循环的判定一致：
+//   - JSON null 经 json.Unmarshal 得到 nil 但 key 保留，实质等同于「未提供」；
+//   - 字符串 "9999"、布尔 true 等非数值同样不构成上限（逐字约束：非数值忽略）。
+//
+// 三种情况都不算客户端自己给了上限，否则会留下「有字段、无上限、也不注入」的空窗，
+// 让上游收到无上限的输出预算。
+func maxTokensFieldsProvided(reqBody map[string]any, fields []string) bool {
+	for _, key := range fields {
+		if _, ok := reqBody[key].(float64); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// isResponsesShaped 判断请求体是否 Responses 形态：带 max_output_tokens 且没有 chat 的 messages。
+//
+// 协议完全由请求体自身的形态判定，不依赖 model_type（签名拿不到，见 design §5.4.1）。
+//
+// 顺序契约（design §5.4.1）：调用方必须**在把 Responses 请求转成 chat 形状之前**调用
+// enforceMaxTokens。Responses 入口的既定流程是
+// 「对 Responses 形态 body 先调 enforceMaxTokens → 再 responsesRequestToChat 转 chat 形状
+// → 再走 prepareForward 的其余步骤」，转换后得到的 chat 字段 max_tokens 已是压制后的值。
+//
+// 顺序颠倒（先转 chat 再压制）会让 Responses 请求退化为 chat 形态（带 messages），
+// max_output_tokens 随之失去密钥上限保护——这是明令禁止的执行顺序，不是设计意图。
+func isResponsesShaped(reqBody map[string]any) bool {
+	if _, ok := reqBody["max_output_tokens"]; !ok {
+		return false
+	}
+	_, hasMessages := reqBody["messages"]
+	return !hasMessages
+}
+
+// enforceMaxTokens 对请求体的输出长度字段施加密钥上限（三个数据面入口共用）。
+// 数值字段超限、非正数（部分后端把 -1 视作「不限」）时统一收敛为上限。
+//
+// 哪些请求形态会把 max_output_tokens 转为数值下发：
+//   - Responses 形态（带 max_output_tokens、无 messages）：字段超限/非正数时收敛为上限；
+//     没有有效数值（null / 字符串 / 布尔）时改写为上限；此时不注入 chat 专有的 max_tokens。
+//   - chat 形态（带 messages）：max_output_tokens 是非标准字段，逐字透传——不压制、不改写、不删除，
+//     上限一律经 chat 字段按既有语义施加，避免严格校验的上游因多出的字段 400。
 func enforceMaxTokens(reqBody map[string]any, limit int) {
 	if limit <= 0 {
 		return
 	}
-	hasNumeric := false
-	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+	cappedFields := maxTokensChatFields[:]
+	outputTokensIsResponses := isResponsesShaped(reqBody)
+	if outputTokensIsResponses {
+		cappedFields = maxTokensCappedFields[:]
+	}
+	for _, key := range cappedFields {
 		v, ok := reqBody[key]
 		if !ok {
 			continue
@@ -391,15 +504,21 @@ func enforceMaxTokens(reqBody map[string]any, limit int) {
 		if !ok {
 			continue
 		}
-		hasNumeric = true
 		// 用浮点比较而非 int(f)：避免超大值在 float→int 转换上的实现定义行为（可绕过上限）。
 		if f <= 0 || f > float64(limit) {
 			reqBody[key] = float64(limit)
 		}
 	}
-	if !hasNumeric {
-		reqBody["max_tokens"] = float64(limit)
+	if maxTokensFieldsProvided(reqBody, cappedFields) {
+		return
 	}
+	// Responses 形态且没有有效数值（null / 非数值）：补 max_output_tokens，
+	// 别注入 chat 专有的 max_tokens，避免污染 Responses 请求体。
+	if outputTokensIsResponses {
+		reqBody["max_output_tokens"] = float64(limit)
+		return
+	}
+	reqBody["max_tokens"] = float64(limit)
 }
 
 // extractCustomHeaders 从入站请求提取需透传给上游的自定义头。

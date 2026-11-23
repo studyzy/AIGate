@@ -55,6 +55,10 @@ func Open(dbType, dsn string) (*Store, error) {
 	}
 	db, err := gorm.Open(dialector, &gorm.Config{
 		Logger: newDBLogger(),
+		// TranslateError 把驱动级错误翻译成 gorm 的可判定哨兵（如 gorm.ErrDuplicatedKey）。
+		// 没有它，唯一键冲突只是一句 "UNIQUE constraint failed" 文本，调用方无法与真正的
+		// 故障区分，只能一律按 ERROR 处理（response_states 的重复落库即依赖该判定）。
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -107,6 +111,7 @@ var autoMigrateModels = []any{
 	&Credential{},
 	&Webhook{},
 	&WebhookDelivery{},
+	&ResponseState{},
 }
 
 // AutoMigrate 建表（仅用于 SQLite 本地开发；MySQL 生产使用 sql/init.sql）。

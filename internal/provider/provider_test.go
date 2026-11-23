@@ -16,10 +16,12 @@ package provider_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	"aigate/internal/protocol"
 	"aigate/internal/provider"
 )
 
@@ -42,6 +44,28 @@ func TestGetProvider_OpenAICompletions(t *testing.T) {
 	}
 	if _, ok := p.(*provider.OpenAIProvider); !ok {
 		t.Fatalf("GetProvider returned %T, expected *OpenAIProvider", p)
+	}
+}
+
+// TestGetProvider_OpenAIResponses 验证 openai-responses 分发到 *OpenAIResponsesProvider，
+// 且历史回落行为不变：未知类型与空串仍返回 *OpenAIProvider。
+func TestGetProvider_OpenAIResponses(t *testing.T) {
+	p := provider.GetProvider(protocol.TypeOpenAIResponses)
+	if p == nil {
+		t.Fatalf("GetProvider returned nil for %q", protocol.TypeOpenAIResponses)
+	}
+	if got, want := fmt.Sprintf("%T", p), "*provider.OpenAIResponsesProvider"; got != want {
+		t.Fatalf("GetProvider(%q) returned %s, want %s", protocol.TypeOpenAIResponses, got, want)
+	}
+
+	for _, modelType := range []string{"unknown", ""} {
+		fallback := provider.GetProvider(modelType)
+		if fallback == nil {
+			t.Fatalf("GetProvider returned nil for %q", modelType)
+		}
+		if got, want := fmt.Sprintf("%T", fallback), "*provider.OpenAIProvider"; got != want {
+			t.Fatalf("GetProvider(%q) returned %s, want default %s", modelType, got, want)
+		}
 	}
 }
 

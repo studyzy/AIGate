@@ -67,7 +67,8 @@ schema 变更需在 GORM 模型与 `sql/init.sql` 两处同步（`init.sql` 是�
 
 每项配置都同时提供命令行 flag 与 `AIGATE_*` 环境变量，优先级为：
 **flag > 环境变量 > 默认值**。配置在启动阶段校验；非法取值（未知 `db-type`、非法
-`timezone`、`usage-buffer < 1`、`webhook-buffer < 1`、`webhook-delivery-retention-days` 为负、`quota-exceeded-status` 非
+`timezone`、`usage-buffer < 1`、`webhook-buffer < 1`、`webhook-delivery-retention-days` 为负、
+`response-retention-days` 为负或超过 36500、`response-background-timeout` 非正数、`quota-exceeded-status` 非
 429/403、`addr`/`db-dsn` 为空、主密钥格式错误）会让进程直接退出，而不是静默兜底。
 
 | Flag | 环境变量 | 默认值 | 校验 / 说明 |
@@ -79,6 +80,9 @@ schema 变更需在 GORM 模型与 `sql/init.sql` 两处同步（`init.sql` 是�
 | `-usage-buffer` | `AIGATE_USAGE_BUFFER` | `256` | 用量异步写入队列容量，须 >= 1。 |
 | `-webhook-buffer` | `AIGATE_WEBHOOK_BUFFER` | `256` | webhook 事件投递队列容量，须 >= 1；非法取值在启动阶段直接拒绝，不做静默归一。 |
 | `-webhook-delivery-retention-days` | `AIGATE_WEBHOOK_DELIVERY_RETENTION_DAYS` | `7` | `webhook_deliveries` 记录的保留天数（`0` = 永久保留）；投递器启动时清理一次、此后每小时清理过期记录；须 >= 0。 |
+| `-allow-response-storage` | `AIGATE_ALLOW_RESPONSE_STORAGE` | `true` | 站点级 Responses 存储开关。为 `false` 时全部请求按 `store:false` 处理，`store` / `previous_response_id` / `conversation` / `background` 一律返回 `400`（显式 `store:true` 明确拒绝，不静默改写）。 |
+| `-response-retention-days` | `AIGATE_RESPONSE_RETENTION_DAYS` | `7` | `response_states` 记录的保留天数（`0` = 永久保留）；网关启动时清理一次、此后每小时清理过期记录；须 >= 0 且 <= 36500。 |
+| `-response-background-timeout` | `AIGATE_RESPONSE_BACKGROUND_TIMEOUT` | `30m` | `background:true` 任务的总时长上限；超时或进程重启遗留的行被置为 `failed`；须为正数。 |
 | `-quota-exceeded-status` | `AIGATE_QUOTA_EXCEEDED_STATUS` | `429` | 仅支持 `429` 或 `403`；配额校验拒绝请求时使用的状态码。 |
 | `-init-admin-token` | `AIGATE_INIT_ADMIN_TOKEN` | （空） | 引导管理员 token；为空表示「自动生成并打印一次」。 |
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | 为 true 时放宽 SSRF 严格模式，放行私网/回环上游。 |

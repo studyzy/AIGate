@@ -76,9 +76,10 @@ Every option is available as both a command-line flag and a `AIGATE_*`
 environment variable. Precedence is: **flag > environment variable > default**.
 Configuration is validated at startup; an invalid value (unknown `db-type`,
 bad `timezone`, `usage-buffer < 1`, `webhook-buffer < 1`, a negative
-`webhook-delivery-retention-days`, a `quota-exceeded-status` other than 429 or
-403, empty `addr`/`db-dsn`, or a malformed master key) makes the process exit
-rather than fall back silently.
+`webhook-delivery-retention-days`, a negative `response-retention-days` or one
+above 36500, a non-positive `response-background-timeout`, a
+`quota-exceeded-status` other than 429 or 403, empty `addr`/`db-dsn`, or a
+malformed master key) makes the process exit rather than fall back silently.
 
 | Flag | Environment variable | Default | Validation / notes |
 |------|----------------------|---------|--------------------|
@@ -89,6 +90,9 @@ rather than fall back silently.
 | `-usage-buffer` | `AIGATE_USAGE_BUFFER` | `256` | Capacity of the async usage-write queue. Must be >= 1. |
 | `-webhook-buffer` | `AIGATE_WEBHOOK_BUFFER` | `256` | Capacity of the webhook event queue. Must be >= 1; an invalid value is rejected at startup rather than silently clamped. |
 | `-webhook-delivery-retention-days` | `AIGATE_WEBHOOK_DELIVERY_RETENTION_DAYS` | `7` | Days to retain `webhook_deliveries` rows before they are pruned (`0` = keep forever). The dispatcher prunes at startup and then hourly; must be >= 0. |
+| `-allow-response-storage` | `AIGATE_ALLOW_RESPONSE_STORAGE` | `true` | Site-level Responses storage switch. When `false` every request is treated as `store:false`, and `store` / `previous_response_id` / `conversation` / `background` all return `400` (an explicit `store:true` is rejected rather than silently rewritten). |
+| `-response-retention-days` | `AIGATE_RESPONSE_RETENTION_DAYS` | `7` | Days to retain `response_states` rows (`0` = keep forever). The gateway prunes at startup and then hourly; must be >= 0 and <= 36500. |
+| `-response-background-timeout` | `AIGATE_RESPONSE_BACKGROUND_TIMEOUT` | `30m` | Maximum run time of a `background:true` Responses job; rows that time out or are left behind by a restart are marked `failed`. Must be positive. |
 | `-quota-exceeded-status` | `AIGATE_QUOTA_EXCEEDED_STATUS` | `429` | `429` or `403` only. Status code used when a quota check rejects a request. |
 | `-init-admin-token` | `AIGATE_INIT_ADMIN_TOKEN` | (empty) | Bootstrap admin token. Empty means "generate and print once". |
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When true, relaxes SSRF strict mode to allow private/loopback upstreams. |

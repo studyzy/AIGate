@@ -242,6 +242,9 @@ Docker 说明与上游 SSRF 策略见 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.m
 | `-usage-buffer` | `AIGATE_USAGE_BUFFER` | `256` | 用量异步写入队列容量（须 >= 1） |
 | `-webhook-buffer` | `AIGATE_WEBHOOK_BUFFER` | `256` | webhook 事件投递队列容量（须 >= 1） |
 | `-webhook-delivery-retention-days` | `AIGATE_WEBHOOK_DELIVERY_RETENTION_DAYS` | `7` | `webhook_deliveries` 记录保留天数（`0` = 永久保留；须 >= 0） |
+| `-allow-response-storage` | `AIGATE_ALLOW_RESPONSE_STORAGE` | `true` | Responses 站点级存储开关；`false` 时 `store`/`previous_response_id`/`conversation`/`background` 一律 400 |
+| `-response-retention-days` | `AIGATE_RESPONSE_RETENTION_DAYS` | `7` | `response_states` 记录保留天数（`0` = 永久保留；须 0–36500） |
+| `-response-background-timeout` | `AIGATE_RESPONSE_BACKGROUND_TIMEOUT` | `30m` | `background:true` 任务超时（超时或重启遗留置 `failed`；须为正数） |
 | `-quota-exceeded-status` | `AIGATE_QUOTA_EXCEEDED_STATUS` | `429` | 配额超限状态码（`429` 或 `403`） |
 | `-init-admin-token` | `AIGATE_INIT_ADMIN_TOKEN` | （空） | 初始管理员 token；为空时自动生成并打印一次 |
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | 放行私网/回环上游（放宽 SSRF 严格模式） |

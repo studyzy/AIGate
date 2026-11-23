@@ -18,6 +18,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 
 	"aigate/internal/config"
 )
@@ -40,6 +41,42 @@ func TestLoad_InvalidValues(t *testing.T) {
 			"webhook-delivery-retention-days must be >= 0",
 		},
 		{"bad quota status", []string{"-quota-exceeded-status", "500"}, "quota-exceeded-status must be 429 or 403"},
+		{
+			"bad response retention",
+			[]string{"-response-retention-days", "-1"},
+			"response-retention-days must be >= 0",
+		},
+		{
+			"overflowing response retention",
+			[]string{"-response-retention-days", "9223372036854775807"},
+			"response-retention-days must be <=",
+		},
+		{
+			// 同一类溢出（同源修复）：装配层同样是 time.Duration(days) * 24h。
+			"overflowing webhook delivery retention",
+			[]string{"-webhook-delivery-retention-days", "9223372036854775807"},
+			"webhook-delivery-retention-days must be <=",
+		},
+		{
+			"webhook delivery retention just above the bound",
+			[]string{"-webhook-delivery-retention-days", "36501"},
+			"webhook-delivery-retention-days must be <=",
+		},
+		{
+			"response retention just above the bound",
+			[]string{"-response-retention-days", "36501"},
+			"response-retention-days must be <=",
+		},
+		{
+			"non-positive background timeout",
+			[]string{"-response-background-timeout", "0s"},
+			"response-background-timeout must be positive",
+		},
+		{
+			"malformed background timeout",
+			[]string{"-response-background-timeout", "30"},
+			"invalid value \"30\" for flag -response-background-timeout",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +104,14 @@ func TestLoad_DefaultsAndHelp(t *testing.T) {
 	if cfg.QuotaExceededStatus != 429 || cfg.AllowPrivateUpstreams {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
+	// Responses 有状态能力：存储默认开启、保留期默认 7 天（design §7）。
+	if !cfg.AllowResponseStorage || cfg.ResponseRetentionDays != 7 {
+		t.Fatalf("unexpected responses defaults: allow=%v retention=%d", cfg.AllowResponseStorage, cfg.ResponseRetentionDays)
+	}
+	// background 后台执行超时默认 30 分钟（design §5.6）。
+	if cfg.ResponseBackgroundTimeout != 30*time.Minute {
+		t.Fatalf("response background timeout default = %v, want 30m", cfg.ResponseBackgroundTimeout)
+	}
 
 	if _, err := config.Load([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("Load(-h) err = %v, want flag.ErrHelp", err)
@@ -79,5 +124,72 @@ func TestLoad_InvalidEnv(t *testing.T) {
 	_, err := config.Load(nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid integer in environment variable AIGATE_USAGE_BUFFER") {
 		t.Fatalf("Load() err = %v, want invalid integer error", err)
+	}
+}
+
+// TestLoad_ResponseBackgroundTimeout：flag 与环境变量都能设置后台执行超时，flag 优先。
+func TestLoad_ResponseBackgroundTimeout(t *testing.T) {
+	t.Setenv("AIGATE_RESPONSE_BACKGROUND_TIMEOUT", "45m")
+	cfg, err := config.Load(nil)
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.ResponseBackgroundTimeout != 45*time.Minute {
+		t.Fatalf("env value not applied: %v", cfg.ResponseBackgroundTimeout)
+	}
+
+	cfg, err = config.Load([]string{"-response-background-timeout", "90s"})
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.ResponseBackgroundTimeout != 90*time.Second {
+		t.Fatalf("flag value not applied (flag must win): %v", cfg.ResponseBackgroundTimeout)
+	}
+
+	t.Setenv("AIGATE_RESPONSE_BACKGROUND_TIMEOUT", "not-a-duration")
+	if _, err := config.Load(nil); err == nil ||
+		!strings.Contains(err.Error(), "AIGATE_RESPONSE_BACKGROUND_TIMEOUT") {
+		t.Fatalf("Load() err = %v, want invalid duration error", err)
+	}
+}
+
+// Responses 有状态的两个配置项：flag > 环境变量 > 默认，非法环境变量拒绝启动。
+func TestLoad_ResponseStorageOptions(t *testing.T) {
+	cfg, err := config.Load([]string{"-allow-response-storage=false", "-response-retention-days=0"})
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.AllowResponseStorage || cfg.ResponseRetentionDays != 0 {
+		t.Fatalf("flags not applied: allow=%v retention=%d", cfg.AllowResponseStorage, cfg.ResponseRetentionDays)
+	}
+
+	t.Setenv("AIGATE_ALLOW_RESPONSE_STORAGE", "false")
+	t.Setenv("AIGATE_RESPONSE_RETENTION_DAYS", "30")
+	cfg, err = config.Load(nil)
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.AllowResponseStorage || cfg.ResponseRetentionDays != 30 {
+		t.Fatalf("env not applied: allow=%v retention=%d", cfg.AllowResponseStorage, cfg.ResponseRetentionDays)
+	}
+
+	t.Setenv("AIGATE_ALLOW_RESPONSE_STORAGE", "not-a-bool")
+	if _, err := config.Load(nil); err == nil || !strings.Contains(err.Error(), "AIGATE_ALLOW_RESPONSE_STORAGE") {
+		t.Fatalf("Load() err = %v, want invalid boolean error", err)
+	}
+}
+
+// TestLoad_RetentionBoundsAreInclusive：上界本身的边界口径——上界值可用，上界 +1 拒绝。
+// 两个按天计的保留期共用 maxRetentionDays，这条用例同时钉住「都能停下界内合法值」。
+func TestLoad_RetentionBoundsAreInclusive(t *testing.T) {
+	cfg, err := config.Load([]string{
+		"-response-retention-days", "36500",
+		"-webhook-delivery-retention-days", "36500",
+	})
+	if err != nil {
+		t.Fatalf("Load() at the bound err = %v, want it to be accepted", err)
+	}
+	if cfg.ResponseRetentionDays != 36500 || cfg.WebhookDeliveryRetentionDays != 36500 {
+		t.Fatalf("bound values not applied: %+v", cfg)
 	}
 }

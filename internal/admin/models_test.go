@@ -57,6 +57,24 @@ func TestCreateModel_DefaultsAndNoKeyEcho(t *testing.T) {
 	}
 }
 
+// TestCreateModel_OpenAIResponsesType 覆盖管理面接受第三种上游协议 openai-responses。
+func TestCreateModel_OpenAIResponsesType(t *testing.T) {
+	srv, _, adminToken := newAdminServer(t)
+
+	status, body := doRequest(t, srv, http.MethodPost, "/admin/models", adminToken, map[string]any{
+		"provider":   "openai",
+		"model_id":   "gpt-5-responses",
+		"url":        "https://upstream.example/v1",
+		"model_type": model.ModelTypeResponses,
+	})
+	assertStatus(t, status, http.StatusCreated, body)
+
+	got := mustDecode[modelResp](t, body)
+	if got.ModelType != "openai-responses" {
+		t.Errorf("model_type want openai-responses, got %q", got.ModelType)
+	}
+}
+
 // TestCreateModel_CustomHeaders 覆盖 custom_http_headers 对象透传。
 func TestCreateModel_CustomHeaders(t *testing.T) {
 	srv, _, adminToken := newAdminServer(t)

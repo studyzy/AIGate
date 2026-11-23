@@ -463,6 +463,7 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
           >
             <option value="openai-completions">openai-completions</option>
             <option value="anthropic-messages">anthropic-messages</option>
+            <option value="openai-responses">openai-responses</option>
           </Select>
         </Field>
 

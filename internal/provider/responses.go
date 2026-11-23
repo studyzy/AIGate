@@ -1,0 +1,846 @@
+//
+//
+// Tencent is pleased to support the open source community by making Tencent Cloud AIGate available.
+//
+// Copyright (C) 2026 Tencent.
+// All rights reserved.
+//
+// If you have downloaded a copy of the Tencent Cloud AIGate source code from Tencent,
+// please note that Tencent Cloud AIGate source code is licensed under the Apache 2.0 License,
+// A copy of the Apache 2.0 License is included in this file.
+//
+//
+
+package provider
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// 本文件实现 OpenAI Responses API（/responses）上游适配器。
+// Provider 接口的契约是「恒吐 OpenAI-chat 形状」，故方向是
+// chat 请求 → Responses 请求（design §5.3.1）、Responses 响应/流 → chat（design §5.3.3）。
+// 不要与 proxy/responses_convert.go 的入口侧转换（§5.3.1/§5.3.2）混用。
+
+const (
+	// responsesUpstreamTimeout 是非流式上游超时。
+	responsesUpstreamTimeout = 5 * time.Minute
+	// responsesStreamTimeout 是流式上游超时（与 anthropic 侧对齐）。
+	responsesStreamTimeout = 30 * time.Minute
+
+	// responsesPath 是 Responses 上游路径（apiBase 已含 /v1）。
+	responsesPath = "/responses"
+
+	// responsesSSE 单行上限：工具参数等大块 delta 会超过 bufio 默认 64 KiB。
+	responsesSSEMaxLineBytes = 1024 * 1024
+)
+
+// OpenAIResponsesProvider 适配 OpenAI Responses API（/responses）。
+type OpenAIResponsesProvider struct{}
+
+var _ Provider = (*OpenAIResponsesProvider)(nil)
+
+func (p *OpenAIResponsesProvider) baseURL(apiBase string) string {
+	return strings.TrimRight(apiBase, "/")
+}
+
+// ChatCompletion 发送非流式请求，并把上游 Responses 响应转换为 chat 形状。
+func (p *OpenAIResponsesProvider) ChatCompletion(
+	ctx context.Context,
+	apiKey, apiBase, model string,
+	reqBody []byte,
+	customHeaders map[string]string,
+) (result *CompletionResult, statusCode int, err error) {
+	body, err := buildResponsesRequest(model, reqBody, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	httpReq, err := newUpstreamRequest(ctx, p.baseURL(apiBase)+responsesPath, body, func(h http.Header) {
+		h.Set("Authorization", "Bearer "+apiKey)
+	}, customHeaders)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := doUpstream(httpReq, responsesUpstreamTimeout)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := ReadUpstreamBody(resp.Body)
+	if err != nil {
+		return nil, 0, richErrorf(err, "failed to read upstream response")
+	}
+
+	// 非 200 原样返回 status + body，与 OpenAIProvider 一致（不解析）。
+	if resp.StatusCode != http.StatusOK {
+		return &CompletionResult{Body: respBody}, resp.StatusCode, nil
+	}
+
+	chatBody, err := responsesToChatResponse(respBody)
+	if err != nil {
+		return &CompletionResult{Body: respBody}, resp.StatusCode, nil
+	}
+	return &CompletionResult{Body: chatBody, Usage: extractResponsesUsage(string(respBody))}, http.StatusOK, nil
+}
+
+// ChatCompletionStream 发送流式请求，把 Responses SSE 译为 chat chunk 并补 data: [DONE]。
+func (p *OpenAIResponsesProvider) ChatCompletionStream(
+	ctx context.Context,
+	apiKey, apiBase, model string,
+	reqBody []byte,
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	customHeaders map[string]string,
+) (result *StreamResult, statusCode int, err error) {
+	body, err := buildResponsesRequest(model, reqBody, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	httpReq, err := newUpstreamRequest(ctx, p.baseURL(apiBase)+responsesPath, body, func(h http.Header) {
+		h.Set("Authorization", "Bearer "+apiKey)
+	}, customHeaders)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := doUpstream(httpReq, responsesStreamTimeout)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		forwardUpstreamError(w, resp)
+		return nil, resp.StatusCode, nil
+	}
+
+	setSSEHeaders(w)
+	// 这条路径的客户端是 chat 协议，故结尾必须补 data: [DONE]
+	// （与 design §4.3「Responses 入口不发 [DONE]」不矛盾，两者客户端不同）。
+	usage, err := responsesStreamToChat(w, flusher, resp.Body)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &StreamResult{Usage: usage}, http.StatusOK, nil
+}
+
+// CheckConnectivityWithChat 以最小 Responses 请求探测上游连通性与模型可用性。
+func (p *OpenAIResponsesProvider) CheckConnectivityWithChat(
+	ctx context.Context, apiKey, apiBase, model string,
+) (time.Duration, ProbeOutcome, error) {
+	body, err := json.Marshal(map[string]interface{}{
+		"model":             model,
+		"input":             probePrompt,
+		"max_output_tokens": probeMaxTokens,
+		"store":             false,
+	})
+	if err != nil {
+		return 0, ProbeOutcome{}, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
+	}
+	httpReq, err := newProbeRequest(ctx, p.baseURL(apiBase)+responsesPath, body, func(h http.Header) {
+		if apiKey != "" {
+			h.Set("Authorization", "Bearer "+apiKey)
+		}
+	})
+	if err != nil {
+		return 0, ProbeOutcome{}, err
+	}
+	return runConnectivityProbe(httpReq, responsesProbeReply)
+}
+
+// responsesProbeReply 从 Responses 回包中提取探测结果。
+// 与 openAIProbeReply 的区别：正文在 output[].content[] 里、type 为 output_text，
+// 且推理模型可能只产出 reasoning 而正文为空。
+func responsesProbeReply(body []byte) (ProbeOutcome, error) {
+	var parsed struct {
+		ID     string `json:"id"`
+		Model  string `json:"model"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ProbeOutcome{}, errors.New("response is not a responses payload")
+	}
+	var parts []string
+	for _, item := range parsed.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, c := range item.Content {
+			if strings.TrimSpace(c.Text) != "" {
+				parts = append(parts, c.Text)
+			}
+		}
+	}
+	reply := strings.TrimSpace(strings.Join(parts, " "))
+	if reply == "" {
+		return ProbeOutcome{}, errors.New("response has no output text")
+	}
+	return ProbeOutcome{
+		Reply:         truncateReply(reply),
+		UpstreamID:    parsed.ID,
+		UpstreamModel: parsed.Model,
+	}, nil
+}
+
+// buildResponsesRequest 把 chat 请求体转换为 Responses 请求体（design §5.3.1）。
+//
+// 映射：messages → input（system/developer 提升为 instructions，其余转 item）、
+// max_tokens/max_completion_tokens → max_output_tokens、response_format → text.format、
+// 嵌套 tool → 扁平 tool。Responses 不需要 stream_options；store 恒为 false。
+func buildResponsesRequest(model string, reqBody []byte, stream bool) ([]byte, error) {
+	var chat map[string]interface{}
+	if err := json.Unmarshal(reqBody, &chat); err != nil {
+		return nil, richErrorf(err, "failed to decode request body")
+	}
+
+	req := make(map[string]interface{}, len(chat)+4)
+	for k, v := range chat {
+		req[k] = v
+	}
+	req["model"] = model
+
+	// messages → instructions + input items。
+	instructions, items := responsesInputFromMessages(chat["messages"])
+	delete(req, "messages")
+	if len(instructions) > 0 {
+		req["instructions"] = strings.Join(instructions, "\n\n")
+	}
+	if items == nil {
+		items = []interface{}{}
+	}
+	req["input"] = items
+
+	// max_tokens / max_completion_tokens → max_output_tokens。
+	if v, ok := chat["max_tokens"]; ok {
+		req["max_output_tokens"] = v
+	} else if v, ok := chat["max_completion_tokens"]; ok {
+		req["max_output_tokens"] = v
+	}
+	delete(req, "max_tokens")
+	delete(req, "max_completion_tokens")
+
+	// response_format → text.format（合并到已有 text 对象，避免覆盖 verbosity 等字段）。
+	if v, ok := chat["response_format"]; ok {
+		text, _ := req["text"].(map[string]interface{})
+		if text == nil {
+			text = map[string]interface{}{}
+		}
+		text["format"] = v
+		req["text"] = text
+		delete(req, "response_format")
+	}
+
+	// 嵌套 tool → 扁平 tool。
+	if v, ok := chat["tools"]; ok {
+		req["tools"] = flattenResponsesTools(v)
+	}
+
+	// Responses 不需要 stream_options；流式只下发 stream。
+	delete(req, "stream_options")
+	if stream {
+		req["stream"] = true
+	}
+
+	// 安全红线：恒关闭上游存储，忽略入站 store。
+	req["store"] = false
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, richErrorf(err, "failed to encode request body")
+	}
+	return body, nil
+}
+
+// responsesInputFromMessages 把 chat messages 拆成 instructions（system/developer）与 input items。
+// 非 system 消息按 design §5.3.1 的逆映射转为 Responses input item。
+func responsesInputFromMessages(raw interface{}) (instructions []string, items []interface{}) {
+	messages, _ := raw.([]interface{})
+	for _, m := range messages {
+		msg, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		switch role {
+		case "system", "developer":
+			if text := contentToString(msg["content"]); text != "" {
+				instructions = append(instructions, text)
+			}
+		case "tool":
+			callID, _ := msg["tool_call_id"].(string)
+			items = append(items, map[string]interface{}{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  contentToString(msg["content"]),
+			})
+		case "assistant":
+			items = append(items, responsesAssistantItems(msg)...)
+		default:
+			items = append(items, map[string]interface{}{
+				"role":    role,
+				"content": responsesContentParts(msg["content"]),
+			})
+		}
+	}
+	return instructions, items
+}
+
+// responsesAssistantItems 把 assistant 消息转为 message item + 若干 function_call item。
+func responsesAssistantItems(msg map[string]interface{}) []interface{} {
+	var items []interface{}
+	if parts := responsesContentParts(msg["content"]); len(parts) > 0 {
+		items = append(items, map[string]interface{}{
+			"role":    "assistant",
+			"content": parts,
+		})
+	}
+	toolCalls, _ := msg["tool_calls"].([]interface{})
+	for _, tc := range toolCalls {
+		call, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, _ := call["function"].(map[string]interface{})
+		name, _ := fn["name"].(string)
+		args, _ := fn["arguments"].(string)
+		id, _ := call["id"].(string)
+		items = append(items, map[string]interface{}{
+			"type":      "function_call",
+			"call_id":   id,
+			"name":      name,
+			"arguments": args,
+		})
+	}
+	return items
+}
+
+// responsesContentParts 把 chat content（字符串或块数组）转为 Responses 内容块数组。
+func responsesContentParts(raw interface{}) []interface{} {
+	parts := []interface{}{}
+	switch v := raw.(type) {
+	case string:
+		if v != "" {
+			parts = append(parts, map[string]interface{}{"type": "input_text", "text": v})
+		}
+	case []interface{}:
+		for _, item := range v {
+			block, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch block["type"] {
+			case "text", "input_text":
+				parts = append(parts, map[string]interface{}{"type": "input_text", "text": block["text"]})
+			case "image_url", "input_image":
+				url := ""
+				switch iv := block["image_url"].(type) {
+				case string:
+					url = iv
+				case map[string]interface{}:
+					url, _ = iv["url"].(string)
+				}
+				if url == "" {
+					url, _ = block["image_url"].(string)
+				}
+				if url != "" {
+					parts = append(parts, map[string]interface{}{"type": "input_image", "image_url": url})
+				}
+			}
+		}
+	}
+	return parts
+}
+
+// flattenResponsesTools 把 chat 的嵌套 tool（{type,function:{...}}）转为 Responses 扁平 tool。
+func flattenResponsesTools(raw interface{}) []interface{} {
+	tools, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(tools))
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]interface{})
+		if !ok {
+			// 已是扁平形状（或内置工具），原样保留。
+			out = append(out, tool)
+			continue
+		}
+		flat := map[string]interface{}{"type": "function"}
+		for _, k := range []string{"name", "description", "parameters", "strict"} {
+			if v, ok := fn[k]; ok {
+				flat[k] = v
+			}
+		}
+		out = append(out, flat)
+	}
+	return out
+}
+
+// responsesToChatResponse 把 Responses 响应体转换为 chat 响应体（design §5.3.3）。
+// 输出必须是纯 chat JSON：夹带 responses 专有字段会破坏 chat 入口契约。
+func responsesToChatResponse(body []byte) ([]byte, error) {
+	var resp struct {
+		ID                string `json:"id"`
+		Status            string `json:"status"`
+		Model             string `json:"model"`
+		IncompleteDetails struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"output"`
+		Usage *json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, richErrorf(err, "failed to decode upstream response")
+	}
+
+	var textParts []string
+	var toolCalls []map[string]interface{}
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for _, c := range item.Content {
+				if c.Type == "output_text" && c.Text != "" {
+					textParts = append(textParts, c.Text)
+				}
+			}
+		case "function_call":
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":   item.CallID,
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      item.Name,
+					"arguments": item.Arguments,
+				},
+			})
+		}
+	}
+
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": strings.Join(textParts, ""),
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+	}
+
+	chat := map[string]interface{}{
+		"id":      resp.ID,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   resp.Model,
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"message":       message,
+				"finish_reason": responsesFinishReason(resp.Status, resp.IncompleteDetails.Reason, len(toolCalls) > 0),
+			},
+		},
+	}
+	if resp.Usage != nil {
+		chat["usage"] = chatUsageFromResponses(string(body))
+	}
+	return json.Marshal(chat)
+}
+
+// responsesFinishReason 按 status / incomplete_details.reason 决定 chat 的 finish_reason。
+func responsesFinishReason(status, incompleteReason string, hasToolCall bool) string {
+	if status == "incomplete" {
+		switch incompleteReason {
+		case "max_output_tokens":
+			return "length"
+		case "content_filter":
+			return "content_filter"
+		default:
+			return "length"
+		}
+	}
+	if hasToolCall {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
+// responsesUsage 是 Responses 用量对象。
+// 只取 input_tokens / output_tokens / total_tokens：
+// output_tokens 已含 reasoning_tokens（子集），再读会重复累加。
+type responsesUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"input_tokens_details"`
+}
+
+// responsesUsageEnvelope 用于从响应体 / SSE data 中取出 usage。
+type responsesUsageEnvelope struct {
+	Usage    *responsesUsage `json:"usage"`
+	Response *struct {
+		Usage *responsesUsage `json:"usage"`
+	} `json:"response"`
+}
+
+// toUsage 把上游 Responses 用量映射为内部 Usage。
+func (u *responsesUsage) toUsage() *Usage {
+	return &Usage{
+		PromptTokens:           u.InputTokens,
+		CompletionTokens:       u.OutputTokens,
+		TotalTokens:            u.TotalTokens,
+		PromptCacheReadTokens:  u.InputTokensDetails.CachedTokens,
+		PromptCacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
+	}
+}
+
+// extractResponsesUsage 从 Responses 响应体或 SSE data 中提取用量。
+// 不能复用 extractOpenAIUsage：它读 prompt_tokens/completion_tokens，会把 Responses 静默记成 0。
+// 该事件不含 usage 时返回 nil，由调用方决定是否沿用已有值（流式路径见 handleData）。
+func extractResponsesUsage(data string) *Usage {
+	var env responsesUsageEnvelope
+	if json.Unmarshal([]byte(data), &env) != nil {
+		return nil
+	}
+	if env.Usage != nil {
+		return env.Usage.toUsage()
+	}
+	if env.Response != nil && env.Response.Usage != nil {
+		return env.Response.Usage.toUsage()
+	}
+	return nil
+}
+
+// responsesStreamToChat 逐行读取 Responses SSE，译为 chat chunk 写往 w，
+// 结束时补 data: [DONE]（这条路径的客户端是 chat 协议）。返回累计用量。
+func responsesStreamToChat(w http.ResponseWriter, flusher http.Flusher, r io.Reader) (*Usage, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), responsesSSEMaxLineBytes)
+
+	state := newResponsesStreamState(w, flusher)
+	for scanner.Scan() {
+		data, ok := sseDataPayload(scanner.Text())
+		if !ok {
+			continue
+		}
+		state.handleData(data)
+	}
+	// 读取中断（连接重置、单行超限等）必须显式报错：否则调用方会把截断当作正常结束。
+	if err := scanner.Err(); err != nil {
+		return nil, richErrorf(err, "failed to read upstream stream")
+	}
+
+	// 上游流没有终止事件时必须告警：否则调用方会把「截断/失败」当作成功，
+	// 用量静默记 0（这正是 extractResponsesUsage 要防的情形）。
+	if !state.terminalSeen {
+		slog.Warn("responses upstream stream ended without terminal event",
+			slog.String("message_id", state.messageID),
+			slog.Bool("usage_seen", state.usageSeen),
+		)
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	return state.usage, nil
+}
+
+// sseDataPayload 提取 SSE 行 `data:` 后的负载，兼容 `data: {...}` 与 `data:{...}`。
+// 非 data 行（空行、`event:` 行、注释）返回 false。
+func sseDataPayload(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, "data:")
+	if !ok {
+		return "", false
+	}
+	payload := strings.TrimSpace(rest)
+	if payload == "" {
+		return "", false
+	}
+	return payload, true
+}
+
+// responsesStreamState 是 Responses SSE → chat chunk 的翻译状态。
+type responsesStreamState struct {
+	w         http.ResponseWriter
+	flusher   http.Flusher
+	messageID string
+	usage     *Usage
+	usageSeen bool
+	// terminalSeen 记录是否收到 response.completed / incomplete / failed。
+	terminalSeen bool
+	// toolIndex 记录 output_index → chat tool_calls[].index，保证同一工具始终落在同一序号上。
+	toolIndex map[int]int
+	// argsWritten 记录已经写出过参数分片的 output_index。
+	// 用于保证「任何输入顺序下累计参数都是合法 JSON 且不重复」：
+	//   - added 带完整参数时若已有 delta 写出过，则跳过完整参数（以已写出内容为准）；
+	//   - added 带完整参数并写出后，后续 arguments.delta 一律跳过。
+	argsWritten map[int]bool
+	// argsFromAdded 区分「已写出」的来源：
+	// true = 参数来自 output_item.added 的完整参数，后续 delta 必须跳过；
+	// false = 来自 arguments.delta 增量，后续 delta 应继续拼接。
+	argsFromAdded map[int]bool
+	// nextToolIndex 是「下一个待分配的 tool_calls index」的独立计数器。
+	// 不能用 len(toolIndex)：output_index 缺失/乱序时会让两个工具复用同一序号。
+	nextToolIndex int
+	// missingIndexSeq 是「上游未给 output_index」时合成键的递减计数器，
+	// 从 -2 起向下取值，既与真实 output_index(>=0) 不撞车、也不与无主键 -1 重叠。
+	missingIndexSeq int
+	// openMissingIndex 是最近一次 output_item.added 开启的合成键；
+	// 该值可能是负数，故用 hasOpenMissingIndex 显式表达「当前是否有开启中的工具」，
+	// 避免拿 0 当哨兵（0 本身是合法的 output_index）。
+	openMissingIndex    int
+	hasOpenMissingIndex bool
+}
+
+// newResponsesStreamState 创建流式翻译状态。
+func newResponsesStreamState(w http.ResponseWriter, flusher http.Flusher) *responsesStreamState {
+	return &responsesStreamState{
+		w:             w,
+		flusher:       flusher,
+		toolIndex:     map[int]int{},
+		argsWritten:   map[int]bool{},
+		argsFromAdded: map[int]bool{},
+	}
+}
+
+// handleData 解析单条 SSE data 并按事件类型产出 chat chunk。
+// 非法 JSON 与未知事件静默跳过，与 anthropicStreamTranslator 一致。
+func (s *responsesStreamState) handleData(data string) {
+	var event map[string]interface{}
+	if json.Unmarshal([]byte(data), &event) != nil {
+		return
+	}
+	eventType, _ := event["type"].(string)
+
+	// usage 可能出现在终止事件里（response.completed 的 response.usage），
+	// 也可能作为独立的 response.usage 事件下发（--enable-usage 时）。
+	if u := extractResponsesUsage(data); u != nil {
+		s.usage = u
+		s.usageSeen = true
+	}
+
+	switch eventType {
+	case "response.created", "response.in_progress":
+		s.captureID(event)
+	case "response.output_text.delta":
+		if delta, _ := event["delta"].(string); delta != "" {
+			s.writeChunk(newOpenAIChunk(s.messageID, map[string]interface{}{"content": delta}, nil))
+		}
+	case "response.output_item.added":
+		s.handleOutputItemAdded(event)
+	case "response.function_call_arguments.delta":
+		s.handleArgumentsDelta(event)
+	case "response.completed", "response.incomplete", "response.failed":
+		s.terminalSeen = true
+		s.handleTerminal(eventType, event)
+	}
+}
+
+// captureID 记录上游响应 ID；部分事件把 response 嵌在 response 字段里，另一些是扁平结构。
+func (s *responsesStreamState) captureID(event map[string]interface{}) {
+	resp, ok := event["response"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if id, ok := resp["id"].(string); ok && id != "" {
+		s.messageID = id
+	}
+}
+
+// toolIndexFor 返回 output_index 对应的 chat tool_calls index，不存在时分配新序号。
+func (s *responsesStreamState) toolIndexFor(outputIndex int) int {
+	if idx, ok := s.toolIndex[outputIndex]; ok {
+		return idx
+	}
+	idx := s.nextToolIndex
+	s.nextToolIndex++
+	s.toolIndex[outputIndex] = idx
+	return idx
+}
+
+// handleOutputItemAdded 在 function_call 项出现时产出带 name 的首个 tool_call 分片。
+//
+// 参数处理：added 里的 arguments 通常为空串（真实上游随后用 arguments.delta 逐块下发）。
+// 若上游在 added 里直接给了完整参数，这里一次性下发并登记 argsEmitted，
+// 保证随后的 arguments.delta（若仍有）不会把参数重复拼一遍。
+func (s *responsesStreamState) handleOutputItemAdded(event map[string]interface{}) {
+	item, ok := event["item"].(map[string]interface{})
+	if !ok || item["type"] != "function_call" {
+		return
+	}
+	outputIndex := s.outputIndexOf(event, true)
+	idx := s.toolIndexFor(outputIndex)
+
+	callID, _ := item["call_id"].(string)
+	name, _ := item["name"].(string)
+	s.writeChunk(newOpenAIChunk(s.messageID, map[string]interface{}{
+		"tool_calls": []map[string]interface{}{
+			{
+				"index":    idx,
+				"id":       callID,
+				"type":     "function",
+				"function": map[string]interface{}{"name": name, "arguments": ""},
+			},
+		},
+	}, nil))
+
+	// 参数处理：
+	//   - arguments 为空串（真实上游常态，随后用 arguments.delta 逐块下发）→ 什么都不做；
+	//   - arguments 非空且该工具**尚未**写出过参数 → 一次性下发完整参数（兼容不发 delta 的上游）；
+	//   - arguments 非空但该工具**已经**写出过 delta（乱序窗口：delta 先到）→ 跳过，
+	//     以已写出的增量内容为准，避免 `{"b":` + `{"b":2}` 这类非法拼接。
+	if args, _ := item["arguments"].(string); args != "" && !s.argsWritten[outputIndex] {
+		s.argsWritten[outputIndex] = true
+		s.argsFromAdded[outputIndex] = true
+		s.writeArgumentsDelta(idx, args)
+	}
+}
+
+// handleArgumentsDelta 把工具参数增量译为 chat 的 tool_calls arguments 分片。
+// 已在 output_item.added 里下发过完整参数的 output_index 直接跳过（防重复拼接）。
+func (s *responsesStreamState) handleArgumentsDelta(event map[string]interface{}) {
+	outputIndex := s.outputIndexOf(event, false)
+	delta, _ := event["delta"].(string)
+	if delta == "" {
+		return
+	}
+	// 已在 output_item.added 里下发过完整参数的工具，不再接受 delta（防重复拼接）。
+	if s.argsWritten[outputIndex] && s.argsFromAdded[outputIndex] {
+		return
+	}
+	s.argsWritten[outputIndex] = true
+	s.writeArgumentsDelta(s.toolIndexFor(outputIndex), delta)
+}
+
+// outputIndexOf 读取事件的 output_index。
+// 字段缺失时退化为合成键（负号段，与真实 output_index 不撞车）：
+// arguments.delta 归属到最近一次 output_item.added 开启的那个工具；
+// 没有 opened 的工具（纯 delta 事件）则共用同一个「无主」合成键 -1。
+func (s *responsesStreamState) outputIndexOf(event map[string]interface{}, isAdded bool) int {
+	if v, ok := intField(event, "output_index"); ok {
+		return v
+	}
+	if isAdded {
+		s.missingIndexSeq--
+		s.openMissingIndex = s.missingIndexSeq
+		s.hasOpenMissingIndex = true
+		return s.openMissingIndex
+	}
+	if s.hasOpenMissingIndex {
+		return s.openMissingIndex
+	}
+	return -1 // 无主 delta：没有 opened 的工具，统一归到一个合成键
+
+}
+
+// writeArgumentsDelta 写出一条只含 tool_calls arguments 的 chat 分片。
+func (s *responsesStreamState) writeArgumentsDelta(idx int, args string) {
+	s.writeChunk(newOpenAIChunk(s.messageID, map[string]interface{}{
+		"tool_calls": []map[string]interface{}{
+			{"index": idx, "function": map[string]interface{}{"arguments": args}},
+		},
+	}, nil))
+}
+
+// handleTerminal 处理终止事件：补发带 finish_reason 与 usage 的收尾分片；
+// response.failed 改为透出 chat 兼容的 error 分片，客户端才能区分「无输出」与「上游失败」。
+func (s *responsesStreamState) handleTerminal(eventType string, event map[string]interface{}) {
+	switch eventType {
+	case "response.completed", "response.incomplete":
+		finishReason := "stop"
+		if len(s.toolIndex) > 0 {
+			finishReason = "tool_calls"
+		}
+		if eventType == "response.incomplete" {
+			reason := ""
+			if resp, ok := event["response"].(map[string]interface{}); ok {
+				if details, ok := resp["incomplete_details"].(map[string]interface{}); ok {
+					reason, _ = details["reason"].(string)
+				}
+			}
+			finishReason = responsesFinishReason("incomplete", reason, len(s.toolIndex) > 0)
+		}
+		chunk := newOpenAIChunk(s.messageID, map[string]interface{}{}, finishReason)
+		if s.usage != nil {
+			chunk["usage"] = chatUsageFromResponsesUsage(s.usage)
+		}
+		s.writeChunk(chunk)
+	default: // response.failed
+		errObj := map[string]interface{}{
+			"message": "upstream response failed",
+			"type":    "upstream_error",
+		}
+		if resp, ok := event["response"].(map[string]interface{}); ok {
+			if upstreamErr, ok := resp["error"].(map[string]interface{}); ok {
+				if msg, _ := upstreamErr["message"].(string); msg != "" {
+					errObj["message"] = msg
+				}
+				if code, _ := upstreamErr["code"].(string); code != "" {
+					errObj["code"] = code
+				}
+			}
+		}
+		s.writeChunk(map[string]interface{}{"error": errObj})
+	}
+}
+
+// writeChunk 写出一个 chat 分片并立即 flush。
+func (s *responsesStreamState) writeChunk(chunk map[string]interface{}) {
+	writeSSEChunk(s.w, s.flusher, chunk)
+}
+
+// chatUsageFromResponses 从响应体 / SSE data 中提取并渲染 chat 形状的 usage 对象。
+// 统一走 chatUsageFromResponsesUsage，避免两处口径漂移。
+func chatUsageFromResponses(data string) map[string]interface{} {
+	u := extractResponsesUsage(data)
+	if u == nil {
+		return map[string]any{}
+	}
+	return chatUsageFromResponsesUsage(u)
+}
+
+// chatUsageFromResponsesUsage 把内部 Usage 渲染为 chat 形状的 usage 对象。
+func chatUsageFromResponsesUsage(u *Usage) map[string]interface{} {
+	return map[string]interface{}{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.TotalTokens,
+		"prompt_tokens_details": map[string]interface{}{
+			"cached_tokens":      u.PromptCacheReadTokens,
+			"cache_write_tokens": u.PromptCacheWriteTokens,
+		},
+	}
+}
+
+// intField 读取 JSON 数字字段（float64 → int）。
+// 返回 (value, present)：必须用 present 区分「值为 0」与「字段缺失」，
+// 否则缺失的 output_index 会被当成合法的 0，让并行工具共享同一序号。
+func intField(m map[string]interface{}, key string) (int, bool) {
+	v, ok := m[key].(float64)
+	if !ok {
+		return 0, false
+	}
+	return int(v), true
+}
