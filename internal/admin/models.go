@@ -33,6 +33,7 @@ type modelResponse struct {
 	URL               string            `json:"url"`
 	CredentialID      uint              `json:"credential_id"`
 	ModelType         string            `json:"model_type"`
+	BillingMode       string            `json:"billing_mode"`
 	CustomHTTPHeaders map[string]string `json:"custom_http_headers"`
 	QuotaDay          int               `json:"quota_day"`
 	Enabled           bool              `json:"enabled"`
@@ -51,6 +52,7 @@ type modelCreateRequest struct {
 	APIKey            string           `json:"api_key"`
 	CredentialID      *uint            `json:"credential_id"`
 	ModelType         string           `json:"model_type"`
+	BillingMode       string           `json:"billing_mode"`
 	CustomHTTPHeaders *json.RawMessage `json:"custom_http_headers"`
 	QuotaDay          *int             `json:"quota_day"`
 	Enabled           *bool            `json:"enabled"`
@@ -66,6 +68,7 @@ type modelUpdateRequest struct {
 	APIKey            *string          `json:"api_key"`
 	CredentialID      *uint            `json:"credential_id"`
 	ModelType         *string          `json:"model_type"`
+	BillingMode       *string          `json:"billing_mode"`
 	CustomHTTPHeaders *json.RawMessage `json:"custom_http_headers"`
 	QuotaDay          *int             `json:"quota_day"`
 	Enabled           *bool            `json:"enabled"`
@@ -102,6 +105,11 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 		// 自备 Key 模式标记（入参校验见 validateModelCreate）。
 		userKeyRequired := req.UserKeyRequired != nil && *req.UserKeyRequired
 
+		billingMode, msg := resolveBillingMode(req.ModelType, req.BillingMode)
+		if msg != "" {
+			httpx.WriteError(w, http.StatusBadRequest, msg)
+			return
+		}
 		m := &model.AIModel{
 			Provider:          req.Provider,
 			ModelID:           req.ModelID,
@@ -109,6 +117,7 @@ func handleCreateModel(store *model.Store) http.HandlerFunc {
 			URL:               req.URL,
 			APIKey:            req.APIKey,
 			ModelType:         req.ModelType,
+			BillingMode:       billingMode,
 			CustomHTTPHeaders: headers,
 			QuotaDay:          -1,
 			Enabled:           true,
@@ -193,6 +202,19 @@ func handleUpdateModel(store *model.Store) http.HandlerFunc {
 			httpx.WriteError(w, http.StatusBadRequest, msg)
 			return
 		}
+		// 跨族变更（chat ↔ 决策）且模型仍被密钥绑定时拒绝：改动会让线上已绑定的调用立刻 400。
+		if req.ModelType != nil && IsDecisionModelType(*req.ModelType) != IsDecisionModelType(before.ModelType) {
+			bound, err := store.CountAIModelBindings(r.Context(), id)
+			if err != nil {
+				writeInternalError(w, err)
+				return
+			}
+			if bound > 0 {
+				httpx.WriteError(w, http.StatusBadRequest,
+					fmt.Sprintf("model is bound to %d key(s); unbind them before changing model_type family", bound))
+				return
+			}
+		}
 
 		fields, msg := modelUpdateFields(&req)
 		if msg != "" {
@@ -261,6 +283,7 @@ func toModelResponse(m *model.AIModel) modelResponse {
 		URL:               m.URL,
 		CredentialID:      m.CredentialID,
 		ModelType:         m.ModelType,
+		BillingMode:       billingModeOrDefault(m.BillingMode),
 		CustomHTTPHeaders: m.GetCustomHTTPHeaders(),
 		QuotaDay:          m.QuotaDay,
 		Enabled:           m.Enabled,
@@ -280,7 +303,7 @@ func validateModelCreate(req *modelCreateRequest) string {
 		return "url is required"
 	}
 	if !validModelType(req.ModelType) {
-		return "model_type must be openai-completions, anthropic-messages or openai-responses"
+		return "model_type must be one of: " + modelTypeList()
 	}
 	// 自备 Key 模式：不保存共享密钥（照搬 hatchery：UserKeyRequired=true 时 api_key 必须为空）。
 	if req.UserKeyRequired != nil && *req.UserKeyRequired {
@@ -335,9 +358,15 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 	}
 	if req.ModelType != nil {
 		if !validModelType(*req.ModelType) {
-			return nil, "model_type must be openai-completions, anthropic-messages or openai-responses"
+			return nil, "model_type must be one of: " + modelTypeList()
 		}
 		fields["model_type"] = *req.ModelType
+	}
+	if req.BillingMode != nil {
+		if !model.ValidBillingMode(*req.BillingMode) {
+			return nil, "billing_mode must be per_token or input_only"
+		}
+		fields["billing_mode"] = *req.BillingMode
 	}
 	if req.APIKey != nil && *req.APIKey != "" {
 		fields["api_key"] = *req.APIKey
@@ -356,7 +385,49 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 
 // validModelType 校验模型接口类型取值。
 func validModelType(t string) bool {
-	return t == model.ModelTypeOpenAI || t == model.ModelTypeAnthropic || t == model.ModelTypeResponses
+	switch t {
+	case model.ModelTypeOpenAI, model.ModelTypeAnthropic, model.ModelTypeResponses,
+		model.ModelTypeDecisions, model.ModelTypeSystemOne:
+		return true
+	default:
+		return false
+	}
+}
+
+// modelTypeList 是 model_type 合法取值的文案（四处错误消息共用）。
+func modelTypeList() string {
+	return model.ModelTypeOpenAI + ", " + model.ModelTypeAnthropic + ", " + model.ModelTypeResponses +
+		", " + model.ModelTypeDecisions + " or " + model.ModelTypeSystemOne
+}
+
+// billingModeOrDefault 把空值按 per_token 回显（加列前的存量行没有该字段）。
+func billingModeOrDefault(m string) string {
+	if m == "" {
+		return model.BillingModePerToken
+	}
+	return m
+}
+
+// IsDecisionModelType 报告 model_type 是否是决策协议；与 provider 侧白名单同口径，
+// admin 包不 import provider，故在此重复一次（取值仍来自 internal/model）。
+func IsDecisionModelType(t string) bool {
+	return t == model.ModelTypeDecisions || t == model.ModelTypeSystemOne
+}
+
+// resolveBillingMode 决定创建模型时的计费口径：
+//   - 显式给出：必须是合法值；
+//   - 未给出：决策模型默认 input_only（决策的输出通常免费），其余默认 per_token。
+func resolveBillingMode(modelType, requested string) (string, string) {
+	if requested == "" {
+		if IsDecisionModelType(modelType) {
+			return model.BillingModeInputOnly, ""
+		}
+		return model.BillingModePerToken, ""
+	}
+	if !model.ValidBillingMode(requested) {
+		return "", "billing_mode must be per_token or input_only"
+	}
+	return requested, ""
 }
 
 // modelZeroValuePatch 返回创建后需要补写的零值字段（见 handleCreateModel 中说明）。

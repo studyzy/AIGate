@@ -50,7 +50,7 @@ func handleDiscoverModels(store *model.Store) http.HandlerFunc {
 			return
 		}
 		if !validModelType(req.ModelType) {
-			httpx.WriteError(w, http.StatusBadRequest, "model_type must be openai-completions, anthropic-messages or openai-responses")
+			httpx.WriteError(w, http.StatusBadRequest, "model_type must be one of: "+modelTypeList())
 			return
 		}
 		if strings.TrimSpace(req.URL) == "" {

@@ -209,3 +209,12 @@ func (m *AIModel) decryptAPIKey() error {
 	m.APIKey = plain
 	return nil
 }
+
+// CountAIModelBindings 返回引用该模型的密钥绑定数量。
+func (s *Store) CountAIModelBindings(ctx context.Context, id uint) (int64, error) {
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&APIKeyModel{}).Where("ai_model_id = ?", id).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("count model bindings: %w", err)
+	}
+	return n, nil
+}

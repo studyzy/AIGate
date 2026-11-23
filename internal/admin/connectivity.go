@@ -15,6 +15,7 @@ package admin
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -85,6 +86,24 @@ func handleModelConnectivity(store *model.Store) http.HandlerFunc {
 			return
 		}
 
+		// 决策模型没有「聊一句」的概念，改发一道二元问句并以「是」的概率作为回执。
+		if provider.IsDecisionModelType(m.ModelType) {
+			latency, yes, err := provider.ProbeDecision(r.Context(), m.ModelType, apiKey, m.URL, m.ModelID)
+			if err != nil {
+				httpx.WriteJSON(w, http.StatusOK, connectivityFailure{
+					OK:        false,
+					ErrorKind: classifyConnectivityError(err),
+					Message:   err.Error(),
+				})
+				return
+			}
+			httpx.WriteJSON(w, http.StatusOK, connectivityOK{
+				OK:        true,
+				LatencyMS: latencyMillis(latency),
+				Reply:     fmt.Sprintf("yes=%.2f", yes),
+			})
+			return
+		}
 		latency, outcome, err := provider.GetProvider(m.ModelType).
 			CheckConnectivityWithChat(r.Context(), apiKey, m.URL, m.ModelID)
 		if err != nil {

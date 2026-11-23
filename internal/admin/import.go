@@ -338,7 +338,7 @@ func (r *importRun) importModels(items []importModel) {
 				importKindModel,
 				ref,
 				importActionError,
-				"model_type must be openai-completions, anthropic-messages or openai-responses",
+				"model_type must be one of: "+modelTypeList(),
 			)
 			continue
 		}
