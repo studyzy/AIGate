@@ -314,6 +314,11 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 
 // writeQuotaExceeded 写出配额超限响应：按配置的状态码（默认 429）+ Retry-After 头；
 // 响应后发出 quota.exceeded 事件（key/resolved 提供事件维度字段）。
+//
+// 响应体在统一错误体之外补充 unit / currency：unit 为 token 或 cost，让调用方知道
+// used / limit 是 token 还是金额；cost 规则另带结算币种，token 规则币种为空（省略）。
+// 注意 Status.Unit 对 token 规则是空串（保持既有结果的零值约定），
+// "token" 这个字面量只在此 JSON 输出边界补齐。
 func (h *Handler) writeQuotaExceeded(
 	w http.ResponseWriter,
 	key *model.APIKey,
@@ -329,8 +334,16 @@ func (h *Handler) writeQuotaExceeded(
 	case "key":
 		msg = msgKeyQuotaExceeded
 	}
+	unit := st.Unit
+	if unit == "" {
+		unit = quota.UnitToken
+	}
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(st.RetryAfter)))
-	httpx.WriteError(w, h.quotaExceededStatus, msg)
+	httpx.WriteErrorDetail(w, h.quotaExceededStatus, httpx.ErrorDetail{
+		Message:  msg,
+		Unit:     unit,
+		Currency: st.Currency,
+	})
 	emitQuotaExceeded(key, resolved, st)
 }
 

@@ -62,6 +62,7 @@ func allowed() Status { return Status{} }
 // 计量单位按 rule.EffectiveUnit() 选择：token 规则用 sum（token 总量）；
 // cost 规则用 sumCost（窗口内平台结算币种微元），限额换算为 int64(limit)*billing.MicrosPerUnit。
 // sumCost 为 nil 时 cost 规则同样按用量读取故障 fail-open（记警告），绝不误拒。
+// 结果只带计量单位；cost 规则的结算币种由 CheckRequest 统一补齐（fillCurrency）。
 // kind 写入超限结果的 Kind 字段。
 func checkRules(
 	ctx context.Context,
@@ -259,6 +260,9 @@ func CheckKey(ctx context.Context, store *model.Store, apiKeyID uint, rules []Ru
 //
 // 分组口径：组规则解析与按组统计均使用「密钥的分组快照」（key.GroupID，建密钥时写入）——
 // 用户换组后存量密钥仍按原组规则执行，重签/新建密钥后收敛到新组。
+//
+// cost 规则的结算币种在出现超限结果时才解析（fillCurrency），一次请求至多读一次设置；
+// 未超限的请求完全不读设置，也不改变既有判定路径。
 func CheckRequest(
 	ctx context.Context,
 	store *model.Store,
@@ -270,7 +274,7 @@ func CheckRequest(
 	if err != nil {
 		slog.Warn("resolve global quota rules failed, allowing request", "error", err)
 	} else if st := CheckGlobal(ctx, store, scope, key.GroupID, globalRules, now); st.Exceeded {
-		return st
+		return fillCurrency(ctx, store, st)
 	}
 
 	if resolved != nil && resolved.QuotaDay >= 0 {
@@ -283,15 +287,44 @@ func CheckRequest(
 	if err != nil {
 		slog.Warn("resolve user quota rules failed, allowing request", "error", err, "group_id", key.GroupID)
 	} else if st := CheckUser(ctx, store, key.UserID, key.GroupID, userRules, now); st.Exceeded {
-		return st
+		return fillCurrency(ctx, store, st)
 	}
 
 	// 密钥级周期配额（照搬 hatchery 单 Agent 配额语义）：空串/非法 JSON/[] 一律视为不限制。
 	keyRules, _ := ParseRules(key.TokenQuotaRules)
 	if st := CheckKey(ctx, store, key.ID, keyRules, now); st.Exceeded {
-		return st
+		return fillCurrency(ctx, store, st)
 	}
 	return allowed()
+}
+
+// fillCurrency 为 cost 规则的超限结果补上结算币种（Status.Currency）。
+//
+// token 规则与模型日配额（Status.Unit 为空）原样返回，不读设置也不改变零值；
+// 币种读取失败时留空（记警告）——币种只用于向调用方说明金额口径，不影响拒绝本身。
+func fillCurrency(ctx context.Context, store *model.Store, st Status) Status {
+	if st.Unit != UnitCost {
+		return st
+	}
+	settlement, err := settlementCurrency(ctx, store)
+	if err != nil {
+		slog.Warn("resolve settlement currency for quota rejection failed", "error", err)
+		return st
+	}
+	st.Currency = settlement
+	return st
+}
+
+// settlementCurrency 读取平台结算币种（settings.platform_currency）；未配置时回退默认币种。
+func settlementCurrency(ctx context.Context, store *model.Store) (string, error) {
+	st, err := store.GetSettings(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get settings: %w", err)
+	}
+	if st.PlatformCurrency == "" {
+		return model.DefaultPlatformCurrency, nil
+	}
+	return st.PlatformCurrency, nil
 }
 
 // ResolveUserRules 解析用户的生效规则：所属分组的策略优先，未配置时回退全局默认规则。
@@ -386,10 +419,14 @@ func retryUntilNextLocalMidnight(now time.Time) time.Duration {
 }
 
 // RuleUsage 单条规则的用户用量视图（用户面配额展示）。
+//
+// 与 Status 的零值约定不同，这里是直接对外序列化的结构：Unit 一律给出明文
+// （token / cost），不依赖调用方把空串理解为 token。cost 规则时 Used 为微元。
 type RuleUsage struct {
 	Index       int    `json:"rule_index"`
 	Mode        string `json:"mode"`
 	Limit       int    `json:"limit"`
+	Unit        string `json:"unit"`
 	Used        int64  `json:"used"`
 	Active      bool   `json:"active"`
 	PeriodStart *int64 `json:"period_start"`
@@ -400,6 +437,9 @@ type RuleUsage struct {
 //
 // 生效规则（Active=true）给出窗口边界（Unix 秒，PeriodEnd 为空表示无终止）与窗口内用量；
 // 不生效规则（Active=false）Used=0，周期字段回填规则配置的锚点（custom 的 start/end，若有）。
+//
+// 用量口径按 rule.EffectiveUnit() 选择：token 规则累计 token 总量，
+// cost 规则累计平台结算币种金额（微元）；两条口径互不混算。
 func UserRuleUsages(
 	ctx context.Context,
 	store *model.Store,
@@ -409,7 +449,8 @@ func UserRuleUsages(
 ) ([]RuleUsage, error) {
 	out := make([]RuleUsage, 0, len(rules))
 	for i, rule := range rules {
-		u := RuleUsage{Index: i, Mode: rule.Mode, Limit: rule.Limit}
+		unit := rule.EffectiveUnit()
+		u := RuleUsage{Index: i, Mode: rule.Mode, Limit: rule.Limit, Unit: unit}
 		from, to, active := rule.Window(now)
 		if !active {
 			u.PeriodStart = rule.Start
@@ -426,9 +467,22 @@ func UserRuleUsages(
 			end := to.Unix()
 			u.PeriodEnd = &end
 		}
-		used, err := store.SumUserTokensInWindow(ctx, userID, groupID, from, to)
-		if err != nil {
-			return nil, fmt.Errorf("sum user tokens for rule %d: %w", i, err)
+		var (
+			used int64
+			err  error
+		)
+		if unit == UnitCost {
+			used, err = store.SumUsageCostMicrosInWindow(
+				ctx, model.UsageFilter{UserID: userID, GroupID: groupID}, from, to,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("sum user cost for rule %d: %w", i, err)
+			}
+		} else {
+			used, err = store.SumUserTokensInWindow(ctx, userID, groupID, from, to)
+			if err != nil {
+				return nil, fmt.Errorf("sum user tokens for rule %d: %w", i, err)
+			}
 		}
 		u.Used = used
 		out = append(out, u)

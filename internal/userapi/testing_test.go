@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"aigate/internal/admin"
+	"aigate/internal/billing"
 	"aigate/internal/model"
 	"aigate/internal/userapi"
 )
@@ -57,7 +58,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *model.Store) {
 	t.Helper()
 	store := newTestStore(t)
 	mux := http.NewServeMux()
-	admin.Register(mux, store)
+	admin.Register(mux, store, billing.NewStoreSource(store))
 	userapi.Register(mux, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -213,6 +214,7 @@ type ruleUsageResp struct {
 	RuleIndex   int    `json:"rule_index"`
 	Mode        string `json:"mode"`
 	Limit       int    `json:"limit"`
+	Unit        string `json:"unit"`
 	Used        int64  `json:"used"`
 	Active      bool   `json:"active"`
 	PeriodStart *int64 `json:"period_start"`
@@ -239,8 +241,10 @@ type usageSummaryRowResp struct {
 }
 
 type usageSummaryResp struct {
-	GroupBy string                `json:"group_by"`
-	Rows    []usageSummaryRowResp `json:"rows"`
+	GroupBy   string                `json:"group_by"`
+	Rows      []usageSummaryRowResp `json:"rows"`
+	TotalCost int64                 `json:"total_cost_platform_micros"`
+	Platform  string                `json:"platform_currency"`
 }
 
 type usageLogResp struct {

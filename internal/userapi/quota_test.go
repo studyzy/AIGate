@@ -14,6 +14,7 @@
 package userapi_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -98,4 +99,44 @@ func TestQuota_AdminQueriesAnyUser(t *testing.T) {
 		status, body := doRequest(t, srv, http.MethodGet, "/api/user/quota?user_id=9999", adminToken, nil)
 		assertStatus(t, status, http.StatusNotFound, body)
 	})
+}
+
+// TestUserQuota_ExposesUnit 覆盖金额配额的展示：用户组规则 unit=cost 时视图逐条给出
+// 单位明文（cost）与窗口内金额用量（微元），token 规则则给出 token 与 token 用量。
+func TestUserQuota_ExposesUnit(t *testing.T) {
+	srv, store := newTestServer(t)
+	gid := seedGroup(t, store, "team-cost",
+		`[{"mode":"month","limit":5,"unit":"cost"},{"mode":"day","limit":1000}]`)
+	uid, token := seedUser(t, store, "alice", model.RoleUser, gid, true)
+	// 1.5 元的平台金额与 30 token：两者分属不同规则的口径，互不干扰。
+	now := time.Now().UTC()
+	entry := &model.LLMUsageLog{
+		UserID:             uid,
+		APIKeyID:           7,
+		GroupID:            gid,
+		AIModelID:          9,
+		Model:              "test-model",
+		Provider:           "mock",
+		TotalTokens:        30,
+		CostPlatformMicros: 1_500_000,
+		StatusCode:         http.StatusOK,
+		CreatedAt:          now,
+	}
+	if err := store.InsertUsageLog(context.Background(), entry); err != nil {
+		t.Fatalf("insert usage log: %v", err)
+	}
+
+	status, body := doRequest(t, srv, http.MethodGet, "/api/user/quota", token, nil)
+	assertStatus(t, status, http.StatusOK, body)
+
+	got := mustDecode[quotaResp](t, body)
+	if len(got.Usages) != 2 {
+		t.Fatalf("rule count: want 2, got %d, response: %s", len(got.Usages), body)
+	}
+	if u := got.Usages[0]; u.Unit != "cost" || u.Used != 1_500_000 || u.Limit != 5 {
+		t.Errorf("cost rule view mismatch, got %+v", u)
+	}
+	if u := got.Usages[1]; u.Unit != "token" || u.Used != 30 || u.Limit != 1000 {
+		t.Errorf("token rule view mismatch, got %+v", u)
+	}
 }

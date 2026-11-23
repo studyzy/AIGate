@@ -39,6 +39,10 @@ type ErrorDetail struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    int    `json:"code"`
+	// 以下为可选的补充信息（omitempty）：目前仅配额拒绝写出。
+	// Unit 是 used / limit 的计量单位（"token" | "cost"），Currency 是金额口径的结算币种。
+	Unit     string `json:"unit,omitempty"`
+	Currency string `json:"currency,omitempty"`
 }
 
 // WriteJSON 写出 JSON 响应。
@@ -51,6 +55,14 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // WriteError 写出统一错误响应。
 func WriteError(w http.ResponseWriter, status int, message string) {
 	WriteJSON(w, status, ErrorBody{Error: ErrorDetail{Message: message, Type: "error", Code: status}})
+}
+
+// WriteErrorDetail 写出带补充信息的错误响应（如配额拒绝的计量单位与结算币种）；
+// 入参的 Message / Type / Code 会被写入值覆盖，保证统一错误体的三个必填键始终齐全。
+func WriteErrorDetail(w http.ResponseWriter, status int, d ErrorDetail) {
+	d.Type = "error"
+	d.Code = status
+	WriteJSON(w, status, ErrorBody{Error: d})
 }
 
 // ReadBody 读取请求体（上限 MaxBodyBytes），并关闭 body；

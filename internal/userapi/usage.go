@@ -120,7 +120,22 @@ func writeUsageSummary(
 	if rows == nil {
 		rows = []model.UsageSummaryRow{}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"group_by": groupBy, "rows": rows})
+	// 金额合计与管理面同口径：行内 cost_platform_micros 已统一到平台结算币种，
+	// 跨模型相加有意义；total 由此处按行求和得出，避免多一次聚合查询。
+	var total int64
+	for i := range rows {
+		total += rows[i].CostPlatformMicros
+	}
+	platform := model.DefaultPlatformCurrency
+	if st, getErr := store.GetSettings(r.Context()); getErr == nil && st.PlatformCurrency != "" {
+		platform = st.PlatformCurrency
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"group_by":                   groupBy,
+		"rows":                       rows,
+		"total_cost_platform_micros": total,
+		"platform_currency":          platform,
+	})
 }
 
 // usageFilterForRequest 解析用量查询过滤并施加行级隔离：

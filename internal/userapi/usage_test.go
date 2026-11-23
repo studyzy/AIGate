@@ -14,8 +14,10 @@
 package userapi_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"aigate/internal/model"
 )
@@ -162,5 +164,32 @@ func TestUsage_RequiresToken(t *testing.T) {
 		if status != http.StatusUnauthorized {
 			t.Errorf("%s: want 401, got %d, response: %s", path, status, body)
 		}
+	}
+}
+
+// TestUsage_SummaryCarriesCostTotal 验证用户面汇总也给出平台结算币种金额合计：
+// 行内金额已是结算币种，跨模型可相加；合计与设置里的平台币种一并返回。
+func TestUsage_SummaryCarriesCostTotal(t *testing.T) {
+	srv, store := newTestServer(t)
+	uidA, tokenA := seedUser(t, store, "alice", model.RoleUser, 0, true)
+	now := time.Now().UTC()
+	// 两行分别属于同一天；金额落在日聚合表（配额与报表的同一数据源）。
+	for _, c := range []int64{1_000_000, 500_000} {
+		if err := store.UpsertDailyUsage(context.Background(), &model.LLMUsageLog{
+			UserID: uidA, APIKeyID: 11, AIModelID: 31, TotalTokens: 10,
+			CostPlatformMicros: c, CreatedAt: now,
+		}); err != nil {
+			t.Fatalf("seed daily usage: %v", err)
+		}
+	}
+
+	status, body := doRequest(t, srv, http.MethodGet, "/api/user/usage/summary?group_by=date", tokenA, nil)
+	assertStatus(t, status, http.StatusOK, body)
+	got := mustDecode[usageSummaryResp](t, body)
+	if got.TotalCost != 1_500_000 {
+		t.Fatalf("total_cost_platform_micros: want 1500000, got %d, response: %s", got.TotalCost, body)
+	}
+	if got.Platform != "CNY" {
+		t.Fatalf("platform_currency: want CNY, got %q", got.Platform)
 	}
 }
