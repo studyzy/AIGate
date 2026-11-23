@@ -389,3 +389,17 @@ func bodyNumber(t *testing.T, body map[string]any, key string) (float64, bool) {
 func reqWithModel(modelID string) string {
 	return `{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}]}`
 }
+
+// RawBody 返回上游最近一次收到的原始请求体字节。
+func (u *upstreamRequest) RawBody() []byte {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]byte(nil), u.rawBody...)
+}
+
+// Path 返回上游最近一次收到的请求路径。
+func (u *upstreamRequest) Path() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.path
+}

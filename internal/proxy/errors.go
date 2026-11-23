@@ -30,4 +30,11 @@ const (
 	msgModelQuotaExceeded  = "Model daily token quota exceeded"
 	msgUserQuotaExceeded   = "User token quota exceeded"
 	msgKeyQuotaExceeded    = "Key token quota exceeded"
+
+	// 决策模型相关（/v1/decisions 与 /v1/systemone）。
+	msgDecisionStreaming     = "streaming is not supported on decision models"
+	msgNotDecisionModel      = "model type %s does not support decisions"
+	msgDecisionOnChatRoute   = "model type %s does not support chat completions"
+	msgInvalidDecisionInput  = "invalid decisions request: %s"
+	msgInvalidSystemOneInput = "invalid system one request: %s"
 )

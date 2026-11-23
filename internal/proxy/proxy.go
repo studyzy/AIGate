@@ -89,6 +89,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/responses/{id}", h.handleGetResponse)
 	mux.HandleFunc("DELETE /v1/responses/{id}", h.handleDeleteResponse)
 	mux.HandleFunc("POST /v1/responses/{id}/cancel", h.handleCancelResponse)
+	// 决策模型入口（spec §7.2）：两个协议各一条，外加无版本别名以适配
+	// TypeSafe SDK（base_url 只写 origin）与 OpenAI SDK（base_url 含 /v1）两种配置习惯。
+	mux.HandleFunc("POST /v1/decisions", h.handleDecisions)
+	mux.HandleFunc("POST /decisions", h.handleDecisions)
+	mux.HandleFunc("POST /v1/systemone", h.handleSystemOne)
+	mux.HandleFunc("POST /systemone", h.handleSystemOne)
 	mux.HandleFunc("GET /v1/models", h.handleModels)
 }
 

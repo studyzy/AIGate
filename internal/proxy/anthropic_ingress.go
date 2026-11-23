@@ -118,6 +118,44 @@ func anthropicErrorKindForStatus(status int) string {
 	}
 }
 
+// ingressKind 标识当前请求属于哪条数据面入口，决定错误信封与上游协议守卫。
+type ingressKind int
+
+const (
+	ingressChat ingressKind = iota
+	ingressResponses
+	ingressAnthropic
+	ingressDecisions
+	ingressSystemOne
+)
+
+// ingressFormat 返回请求所属的入口格式。以 ServeMux 记录的路由模式为准，
+// 回退到路径比较（直接调用 handler 的场景）。
+//
+// 决策入口与 Responses 入口同样使用 OpenAI 风格错误信封，故只有 Anthropic
+// 需要单独分支；但类型必须分得出来，否则 chat 入口的协议守卫无从判断。
+func ingressFormat(r *http.Request) ingressKind {
+	path := r.URL.Path
+	if r.Pattern != "" {
+		path = r.Pattern
+		if i := strings.IndexByte(path, ' '); i >= 0 {
+			path = path[i+1:]
+		}
+	}
+	switch path {
+	case anthropicMessagesPath:
+		return ingressAnthropic
+	case "/v1/responses", "/responses":
+		return ingressResponses
+	case "/v1/decisions", "/decisions":
+		return ingressDecisions
+	case "/v1/systemone", "/systemone":
+		return ingressSystemOne
+	default:
+		return ingressChat
+	}
+}
+
 // isAnthropicIngressRoute 判断当前请求是否命中 /v1/messages 路由。
 // 以 ServeMux 记录的路由模式为准，回退到路径比较（直接调用 handler 的场景）。
 func isAnthropicIngressRoute(r *http.Request) bool {
