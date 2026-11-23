@@ -441,6 +441,70 @@ func adminQueryJSON(t *testing.T, baseURL string, dst any, args ...string) error
 	return nil
 }
 
+// ---------------------------------------------------------------- 计费数据夹具
+//
+// 价目 / 日历 / 汇率三张快照表的写操作一律经 aigatectl（与 createModel 同风格）：
+// 每个用例同时也在验证 prices / calendar / rates 三条命令。
+
+// createPrice 经 aigatectl 追加一份模型价目快照，返回价目 id。
+func createPrice(t *testing.T, baseURL string, modelID int64, payload map[string]any) int64 {
+	t.Helper()
+
+	var out struct {
+		ID        int64 `json:"id"`
+		AIModelID int64 `json:"ai_model_id"`
+	}
+	adminCLI(t, requireEnv(t, envCLIBinKey), baseURL, &out,
+		"prices", "create", "--id", fmt.Sprintf("%d", modelID),
+		"--data", "@"+cliDataFile(t, "price.json", payload))
+	if out.ID == 0 || out.AIModelID != modelID {
+		t.Fatalf("prices create response is missing id or names another model: %+v", out)
+	}
+	// 单价是否原样落库由调用方用 prices list 断言（这里不重复解析响应体）。
+	return out.ID
+}
+
+// setCalendar 经 aigatectl 批量覆盖写计费日历，断言回显的天数与请求一致。
+func setCalendar(t *testing.T, baseURL string, days []map[string]any) {
+	t.Helper()
+
+	var out struct {
+		Days []struct {
+			Date      string `json:"date"`
+			IsWorkday bool   `json:"is_workday"`
+		} `json:"days"`
+	}
+	adminCLI(t, requireEnv(t, envCLIBinKey), baseURL, &out,
+		"calendar", "set", "--data", "@"+cliDataFile(t, "calendar.json", map[string]any{"days": days}))
+	if len(out.Days) != len(days) {
+		t.Errorf("calendar set echoed %d days, want %d: %+v", len(out.Days), len(days), out.Days)
+	}
+}
+
+// createRate 经 aigatectl 追加一条汇率快照（1 单位 from = rate_micros/1e6 单位 to），返回 id。
+func createRate(t *testing.T, baseURL, from, to string, rateMicros int64, effectiveAt string) int64 {
+	t.Helper()
+
+	var out struct {
+		ID           int64  `json:"id"`
+		FromCurrency string `json:"from_currency"`
+		ToCurrency   string `json:"to_currency"`
+		RateMicros   int64  `json:"rate_micros"`
+	}
+	payload := map[string]any{
+		"from_currency": from,
+		"to_currency":   to,
+		"rate_micros":   rateMicros,
+		"effective_at":  effectiveAt,
+	}
+	adminCLI(t, requireEnv(t, envCLIBinKey), baseURL, &out,
+		"rates", "create", "--data", "@"+cliDataFile(t, "rate.json", payload))
+	if out.ID == 0 || out.FromCurrency != from || out.ToCurrency != to || out.RateMicros != rateMicros {
+		t.Fatalf("unexpected rates create response: %+v", out)
+	}
+	return out.ID
+}
+
 // listKeysRaw 经 aigatectl 拉取密钥列表并返回原始 JSON 字节（用于断言明文不回显）。
 func listKeysRaw(t *testing.T, baseURL string) []byte {
 	t.Helper()

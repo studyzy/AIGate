@@ -34,6 +34,7 @@ error; see `cliExitOK` … `cliExitTransport` in `helpers_test.go`.
 | `webui_test.go` | `TestE2E_WebUI_*` — static hosting contract for `/ui/` |
 | `cli_test.go` | `TestE2E_CLI_*` — CLI closed loop and exit-code contract |
 | `version_test.go` | `TestE2E_Version` / `TestE2E_CLI_VersionCommands` — public `GET /version` and the gateway-vs-CLI version distinction |
+| `billing_test.go` | `TestE2E_Billing_*` — cost billing: prices, currency rates, settlement currency, cost quotas |
 
 ## How to run
 
@@ -139,6 +140,13 @@ process against the shared test database; `cli_test.go` additionally drives the 
 | `TestE2E_CLI_ClosedLoop` (`cli_test.go`) | Drive the real `aigatectl` binary through the 8-step closed loop: `health` → `models create` → `models list`/`get` → `users create` → `keys create` → data-plane forwarding → `self me`/`self keys list` → `keys rotate` | Every step exits 0 with JSON on stdout and empty stderr; the created model row exists in `ai_models` (direct database query); the `sk-` token issued by the CLI really drives `/v1/chat/completions` and its usage lands in `llm_usage_logs`; the rotated-away token is rejected with 401 |
 | `TestE2E_CLI_ExitCodes` (`cli_test.go`) | One case per CLI exit code: 0 / 2 / 3 / 4 / 5 | Errors appear only on stderr and stdout is empty |
 | `TestE2E_CLI_SpecialSemantics` (`cli_test.go`) | `models connectivity` (`ok:false` but HTTP 200), `import run` (partial failure but HTTP 200), `usage export --format csv` | All still exit 0 with the body verbatim; CSV is raw text and is never JSON-decoded |
+| `TestE2E_BillingCostLoop` (`billing_test.go`) | The whole cost-billing chain on one CNY-priced model: price snapshot, `CNY→USD` rate, `platform_currency: USD`, off-peak price, a real chat completion, the settlement-currency report and a key-level `unit: cost` quota | `llm_usage_logs` carries `cost_vendor_micros=2000000` (500 output tokens × 4 CNY/M) and `cost_platform_micros=280000`; `daily_usage_summaries` agrees; `GET /admin/usage/summary?group_by=model` reports `platform_currency` and a total including `280000`; billing calendar / prices / rates round-trip; the cost quota rejects with `error.unit == "cost"` and `error.currency` |
+| `TestE2E_BillingUpstreamReportedCost` (`billing_test.go`) | `use_upstream_cost: true` with an upstream that reports `usage.cost` | `cost_vendor_micros == 3500` (the reported `0.0035`), not the price-derived amount, even though a price is configured |
+
+Peak-tier pricing is deliberately **not** covered here: this suite does not control the clock, so
+`enable_peak_pricing` stays `false` and only the off-peak columns are exercised. Peak/off-peak
+boundaries, cross-midnight windows and the fail-closed cases are covered by the `internal/billing`
+unit tests, which can inject the accounting instant.
 
 ## Troubleshooting
 

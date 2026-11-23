@@ -83,6 +83,10 @@ type upstreamMock struct {
 	server *httptest.Server
 	kind   upstreamKind
 
+	// nonStreamBody 覆盖非流式响应体；为空时用本协议固定的 body。
+	// 只给需要特定 usage（如上游自报 cost）的用例使用，其余用例保持固定报文。
+	nonStreamBody string
+
 	mu   sync.Mutex
 	last recordedRequest
 }
@@ -109,6 +113,9 @@ func (m *upstreamMock) record(r *http.Request, body []byte) {
 	defer m.mu.Unlock()
 	m.last = recordedRequest{Method: r.Method, Path: r.URL.Path, Body: body, Headers: r.Header.Clone()}
 }
+
+// setNonStreamBody 覆盖 OpenAI 非流式响应体；须在起网关、发请求之前设置。
+func (m *upstreamMock) setNonStreamBody(body string) { m.nonStreamBody = body }
 
 func (m *upstreamMock) lastRequest() recordedRequest {
 	m.mu.Lock()
@@ -143,6 +150,10 @@ func (m *upstreamMock) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	if m.nonStreamBody != "" {
+		fmt.Fprint(w, m.nonStreamBody)
+		return
+	}
 	fmt.Fprint(w, openAINonStreamBody)
 }
 
