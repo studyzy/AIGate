@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -205,6 +206,13 @@ func (h *Handler) prepareForward(
 	// 解析模型 + 配额检查。
 	res, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
 	if !ok {
+		return nil, nil, false
+	}
+
+	// 协议守卫：chat 系入口不接受决策模型。GetProvider 对未知类型会兜底到 chat，
+	// 决策模型若漏到这里会被当成 chat 发给上游（静默错发），因此在分派前拒绝。
+	if provider.IsDecisionModelType(res.ModelType) {
+		h.writeIngressError(w, r, http.StatusBadRequest, fmt.Sprintf(msgDecisionOnChatRoute, res.ModelType))
 		return nil, nil, false
 	}
 

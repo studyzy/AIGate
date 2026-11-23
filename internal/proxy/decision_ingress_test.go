@@ -196,3 +196,104 @@ func TestDecisionIngress_DecisionsToSystemOne(t *testing.T) {
 		t.Fatalf("question name lost: %v", questions)
 	}
 }
+
+// chat 系入口命中决策模型必须 400，不能落到 GetProvider 的 chat 兜底把请求发给上游。
+func TestChatRejectsDecisionModel(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, `{}`))
+	m := newAIModel("up-decision", e.upstream.URL+"/v1")
+	m.ModelType = model.ModelTypeSystemOne
+	mustCreateAIModel(t, e.store, m)
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postChat(t, token, `{"model":"up-decision","messages":[{"role":"user","content":"hi"}]}`, nil)
+	assertStatus(t, resp, http.StatusBadRequest)
+	if got := readBody(t, resp); !strings.Contains(got, "does not support chat completions") {
+		t.Fatalf("body = %s", got)
+	}
+	if got := e.rec.Calls(); got != 0 {
+		t.Fatalf("upstream must not be called, got %d calls", got)
+	}
+}
+
+func TestMessagesRejectsDecisionModel(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, `{}`))
+	m := newAIModel("up-decision", e.upstream.URL+"/v1")
+	m.ModelType = model.ModelTypeDecisions
+	mustCreateAIModel(t, e.store, m)
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postDecision(t, "/v1/messages", token,
+		`{"model":"up-decision","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	assertStatus(t, resp, http.StatusBadRequest)
+	if got := readBody(t, resp); !strings.Contains(got, "does not support chat completions") {
+		t.Fatalf("body = %s", got)
+	}
+	if got := e.rec.Calls(); got != 0 {
+		t.Fatalf("upstream must not be called, got %d calls", got)
+	}
+}
+
+func TestResponsesRejectsDecisionModel(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, `{}`))
+	m := newAIModel("up-decision", e.upstream.URL+"/v1")
+	m.ModelType = model.ModelTypeSystemOne
+	mustCreateAIModel(t, e.store, m)
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postDecision(t, "/v1/responses", token, `{"model":"up-decision","input":"hi","store":false}`)
+	assertStatus(t, resp, http.StatusBadRequest)
+	if got := readBody(t, resp); !strings.Contains(got, "does not support chat completions") {
+		t.Fatalf("body = %s", got)
+	}
+	if got := e.rec.Calls(); got != 0 {
+		t.Fatalf("upstream must not be called, got %d calls", got)
+	}
+}
+
+// input_only 计费：落库 completion=0、total=prompt；响应体里的 usage 保持上游原值。
+func TestDecisionIngress_InputOnlyUsage(t *testing.T) {
+	e, token := newDecisionEnv(t, model.ModelTypeSystemOne, respondConstantJSON(http.StatusOK, decisionSystemOneReply))
+
+	resp := e.postDecision(t, "/v1/systemone", token, decisionSystemOneRequestBody)
+	assertStatus(t, resp, http.StatusOK)
+	body := readBody(t, resp)
+	if !strings.Contains(body, `"output_tokens":7`) {
+		t.Fatalf("client must see upstream usage verbatim: %s", body)
+	}
+
+	e.stopUsage()
+	db := openReadDB(t, e.dsn)
+	var row model.LLMUsageLog
+	if err := db.Order("id DESC").First(&row).Error; err != nil {
+		t.Fatalf("read usage log: %v", err)
+	}
+	if row.PromptTokens != 40 || row.CompletionTokens != 0 || row.TotalTokens != 40 {
+		t.Fatalf("usage row = prompt %d completion %d total %d, want 40/0/40",
+			row.PromptTokens, row.CompletionTokens, row.TotalTokens)
+	}
+}
+
+// per_token 计费：如实记录上游返回的 completion。
+func TestDecisionIngress_PerTokenUsage(t *testing.T) {
+	e := newEnv(t, respondConstantJSON(http.StatusOK, decisionSystemOneReply))
+	m := newAIModel("up-decision", e.upstream.URL+"/v1")
+	m.ModelType = model.ModelTypeSystemOne
+	m.BillingMode = model.BillingModePerToken
+	mustCreateAIModel(t, e.store, m)
+	_, token := mustCreateKey(t, e.store, e.user.ID, 0, primary(m.ID, 0))
+
+	resp := e.postDecision(t, "/v1/systemone", token, decisionSystemOneRequestBody)
+	assertStatus(t, resp, http.StatusOK)
+	readBody(t, resp)
+
+	e.stopUsage()
+	db := openReadDB(t, e.dsn)
+	var row model.LLMUsageLog
+	if err := db.Order("id DESC").First(&row).Error; err != nil {
+		t.Fatalf("read usage log: %v", err)
+	}
+	if row.PromptTokens != 40 || row.CompletionTokens != 7 || row.TotalTokens != 47 {
+		t.Fatalf("usage row = prompt %d completion %d total %d, want 40/7/47",
+			row.PromptTokens, row.CompletionTokens, row.TotalTokens)
+	}
+}

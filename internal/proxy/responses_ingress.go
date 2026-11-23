@@ -40,6 +40,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -133,6 +134,11 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	//      · 转换：第 4 步 → 转换器映射成 max_tokens → 转换路径内再幂等复压。
 	resolved, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
 	if !ok {
+		return
+	}
+	// 协议守卫：Responses 入口不接受决策模型（否则会被当成 chat 转换路径发给上游）。
+	if provider.IsDecisionModelType(resolved.ModelType) {
+		h.writeIngressError(w, r, http.StatusBadRequest, fmt.Sprintf(msgDecisionOnChatRoute, resolved.ModelType))
 		return
 	}
 
