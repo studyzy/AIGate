@@ -24,4 +24,19 @@ const (
 	TypeAnthropicMessages = "anthropic-messages"
 	// TypeOpenAIResponses 是 OpenAI Responses 协议（URL 含 /v1，转发时拼 /responses）。
 	TypeOpenAIResponses = "openai-responses"
+	// TypeOpenAIDecisions 是 OpenAI Decisions 决策协议（URL 含 /v1，转发时拼 /decisions）。
+	TypeOpenAIDecisions = "openai-decisions"
+	// TypeSystemOne 是 TypeSafe System One 决策协议（URL 含 /v1，转发时拼 /systemone）。
+	TypeSystemOne = "systemone"
+)
+
+// DecisionFormat 标识上游决策协议说哪种线上格式。
+// 入口格式与它相同则语义不变（仅规范化），不同则由网关按映射表转换。
+type DecisionFormat string
+
+const (
+	// FormatOpenAIDecisions 对应 openai-decisions：input + questions 数组。
+	FormatOpenAIDecisions DecisionFormat = "openai-decisions"
+	// FormatSystemOne 对应 systemone：state + questions 对象。
+	FormatSystemOne DecisionFormat = "systemone"
 )

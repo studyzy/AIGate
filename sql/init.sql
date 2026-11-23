@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS `ai_models` (
     `api_key`             VARCHAR(1024)   NOT NULL DEFAULT '',
     `credential_id`       BIGINT UNSIGNED NOT NULL DEFAULT 0,
     `model_type`          VARCHAR(32)     NOT NULL DEFAULT 'openai-completions',
+    `billing_mode`        VARCHAR(32)     NOT NULL DEFAULT 'per_token',
     `custom_http_headers` TEXT            NOT NULL,
     `quota_day`           BIGINT          NOT NULL DEFAULT -1,
     `enabled`             TINYINT(1)      NOT NULL DEFAULT 1,

@@ -80,6 +80,7 @@ type Resolved struct {
 	ModelName         string
 	Provider          string
 	ModelType         string
+	BillingMode       string
 	URL               string
 	APIKey            string
 	QuotaDay          int
@@ -401,6 +402,7 @@ func (s *Store) resolvedFromAIModel(ctx context.Context, m AIModel, bindingKey s
 		ModelName:         m.ModelName,
 		Provider:          m.Provider,
 		ModelType:         m.ModelType,
+		BillingMode:       m.BillingMode,
 		URL:               m.URL,
 		APIKey:            apiKey,
 		QuotaDay:          m.QuotaDay,

@@ -167,3 +167,41 @@ func TestAIModel_GetCustomHTTPHeaders(t *testing.T) {
 		})
 	}
 }
+
+// billing_mode 只有两个合法取值，且必须能落库回读。
+func TestValidBillingMode(t *testing.T) {
+	for _, ok := range []string{model.BillingModePerToken, model.BillingModeInputOnly} {
+		if !model.ValidBillingMode(ok) {
+			t.Fatalf("%q must be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "token", "PER_TOKEN", "input-only"} {
+		if model.ValidBillingMode(bad) {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+}
+
+func TestAIModelBillingModePersists(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testCtx()
+
+	m := &model.AIModel{
+		Provider:    "typesafe",
+		ModelID:     "jev-latest",
+		ModelName:   "Jev",
+		URL:         "https://api.typesafe.ai/v1",
+		ModelType:   model.ModelTypeSystemOne,
+		BillingMode: model.BillingModeInputOnly,
+	}
+	if err := store.CreateAIModel(ctx, m); err != nil {
+		t.Fatalf("CreateAIModel: %v", err)
+	}
+	got, err := store.GetAIModel(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("GetAIModel: %v", err)
+	}
+	if got.BillingMode != model.BillingModeInputOnly {
+		t.Fatalf("BillingMode = %q", got.BillingMode)
+	}
+}

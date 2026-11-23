@@ -32,7 +32,23 @@ const (
 	ModelTypeOpenAI    = protocol.TypeOpenAICompletions // OpenAI 兼容端点（URL 含 /v1，转发时拼 /chat/completions）
 	ModelTypeAnthropic = protocol.TypeAnthropicMessages // Anthropic Messages（URL 为 host，转发时拼 /v1/messages）
 	ModelTypeResponses = protocol.TypeOpenAIResponses   // OpenAI Responses（URL 含 /v1，转发时拼 /responses）
+	ModelTypeDecisions = protocol.TypeOpenAIDecisions   // OpenAI Decisions（URL 含 /v1，转发时拼 /decisions）
+	ModelTypeSystemOne = protocol.TypeSystemOne         // TypeSafe System One（URL 含 /v1，转发时拼 /systemone）
 )
+
+// 计费口径（ai_models.billing_mode）。
+const (
+	// BillingModePerToken 按上游返回的 prompt/completion 如实记账（chat 模型默认）。
+	BillingModePerToken = "per_token"
+	// BillingModeInputOnly 只按输入计费：completion_tokens 记 0，total_tokens 等于 prompt_tokens。
+	// 决策模型的 output_tokens 通常免费，按原值记账会让用量报表与账单不一致。
+	BillingModeInputOnly = "input_only"
+)
+
+// ValidBillingMode 报告 billing_mode 是否为合法取值。
+func ValidBillingMode(m string) bool {
+	return m == BillingModePerToken || m == BillingModeInputOnly
+}
 
 // AIModel 上游模型配置。
 type AIModel struct {
@@ -45,6 +61,7 @@ type AIModel struct {
 	APIKey            string `gorm:"size:1024;not null;default:''"                 json:"-"`
 	CredentialID      uint   `gorm:"not null;default:0;index"` // >0 时引用凭据，转发时实时解析
 	ModelType         string `gorm:"size:32;not null;default:'openai-completions'"`
+	BillingMode       string `gorm:"size:32;not null;default:'per_token'"`
 	CustomHTTPHeaders string `gorm:"type:text;not null"` // JSON 对象字符串
 	QuotaDay          int    `gorm:"not null;default:-1"`
 	Enabled           bool   `gorm:"not null;default:true"`
