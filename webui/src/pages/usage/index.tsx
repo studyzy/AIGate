@@ -2,14 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import type { AIGateModel, ApiKey, GroupBy, UsageLogRow, UsageSummaryRow, User, UserGroup } from "@/api/types";
+import type { AIGateModel, ApiKey, GroupBy, UsageLogRow, UsageSummary, UsageSummaryRow, User, UserGroup } from "@/api/types";
 import { Table, type Column } from "@/components/ui/Table";
 import { QueryError } from "@/components/ui/QueryError";
 import { Badge, Button, EmptyState, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/i18n";
 import { api, downloadFile } from "@/lib/api";
-import { formatDateTime, formatLatency, formatNumber, todayISO } from "@/lib/format";
+import { formatDateTime, formatLatency, formatMicros, formatNumber, todayISO } from "@/lib/format";
 
 const PAGE_SIZE = 20;
 
@@ -47,7 +47,12 @@ export function UsagePage() {
 
   const models = useQuery({ queryKey: ["models"], queryFn: () => api<{ models: AIGateModel[] }>("/admin/models") });
   const modelNames = new Map<number, string>();
-  (models.data?.models ?? []).forEach((m) => modelNames.set(m.id, m.model_name || m.model_id));
+  // 明细行的模型币种金额按模型各自币种展示；行内的 currency 只是结算币种。
+  const modelCurrencies = new Map<number, string>();
+  (models.data?.models ?? []).forEach((m) => {
+    modelNames.set(m.id, m.model_name || m.model_id);
+    modelCurrencies.set(m.id, m.currency);
+  });
 
   const keys = useQuery({ queryKey: ["keys"], queryFn: () => api<{ keys: ApiKey[] }>("/admin/keys") });
   const users = useQuery({ queryKey: ["users"], queryFn: () => api<{ users: User[] }>("/admin/users") });
@@ -129,6 +134,7 @@ export function UsagePage() {
           keyNames={keyNames}
           userNames={userNames}
           groupNames={groupNames}
+          modelCurrencies={modelCurrencies}
         />
       )}
     </section>
@@ -155,8 +161,9 @@ function SummaryTab({
   const { t } = useI18n();
   const query = useQuery({
     queryKey: ["usage-summary", groupBy, filter],
-    queryFn: () => api<{ rows: UsageSummaryRow[] }>("/admin/usage/summary?group_by=" + groupBy + "&" + filter),
+    queryFn: () => api<UsageSummary>("/admin/usage/summary?group_by=" + groupBy + "&" + filter),
   });
+  const platformCurrency = query.data?.platform_currency ?? "";
 
   const label = (row: UsageSummaryRow): string => {
     switch (groupBy) {
@@ -180,7 +187,16 @@ function SummaryTab({
     { key: "completion", header: t("usage.completion"), render: (r) => formatNumber(r.completion_tokens), className: "tabular-nums" },
     { key: "total", header: t("usage.total"), render: (r) => formatNumber(r.total_tokens), className: "tabular-nums" },
     { key: "read", header: t("usage.cacheRead"), render: (r) => formatNumber(r.prompt_cache_read_tokens), className: "tabular-nums" },
+    {
+      key: "cost_platform",
+      header: t("usage.costSettlement"),
+      render: (r) => formatMicros(r.cost_platform_micros, platformCurrency),
+      className: "tabular-nums",
+    },
   ];
+
+  const rows = query.data?.rows ?? [];
+  const mixedCurrency = rows.some((r) => r.mixed_currency);
 
   return (
     <div>
@@ -201,12 +217,26 @@ function SummaryTab({
       ) : query.isLoading ? (
         <Spinner label={t("common.loading")} />
       ) : (
-        <Table
-          columns={columns}
-          rows={query.data?.rows ?? []}
-          rowKey={(r) => label(r)}
-          empty={<EmptyState title={t("usage.emptyTitle")} />}
-        />
+        rows.length === 0 ? (
+          <EmptyState title={t("usage.emptyTitle")} />
+        ) : (
+          <Table
+            columns={columns}
+            rows={rows}
+            rowKey={(r) => label(r)}
+            footer={
+              <tr className="border-t border-slate-200 bg-slate-50 font-medium text-slate-800">
+                <td className="px-4 py-2">{t("usage.costTotal")}</td>
+                <td className="px-4 py-2" colSpan={columns.length - 2}>
+                  {mixedCurrency ? <span className="text-xs font-normal text-amber-700">{t("usage.mixedCurrencyNote")}</span> : null}
+                </td>
+                <td className="px-4 py-2 tabular-nums" data-testid="usage-total-cost">
+                  {formatMicros(query.data?.total_cost_platform_micros ?? 0, platformCurrency)}
+                </td>
+              </tr>
+            }
+          />
+        )
       )}
     </div>
   );
@@ -221,6 +251,7 @@ function LogsTab({
   keyNames,
   userNames,
   groupNames,
+  modelCurrencies,
 }: {
   filter: string;
   page: number;
@@ -230,6 +261,7 @@ function LogsTab({
   keyNames: Map<number, string>;
   userNames: Map<number, string>;
   groupNames: Map<number, string>;
+  modelCurrencies: Map<number, string>;
 }) {
   const { t } = useI18n();
   const query = useQuery({
@@ -255,6 +287,19 @@ function LogsTab({
     { key: "prompt", header: t("usage.prompt"), render: (r) => formatNumber(r.prompt_tokens), className: "tabular-nums" },
     { key: "completion", header: t("usage.completion"), render: (r) => formatNumber(r.completion_tokens), className: "tabular-nums" },
     { key: "total", header: t("usage.total"), render: (r) => formatNumber(r.total_tokens), className: "tabular-nums" },
+    {
+      key: "cost_vendor",
+      header: t("usage.costVendor"),
+      // 模型币种金额按模型各自的币种展示，不能被行内 currency（结算币种）误标。
+      render: (r) => formatMicros(r.cost_vendor_micros, modelCurrencies.get(r.ai_model_id) ?? r.currency),
+      className: "tabular-nums",
+    },
+    {
+      key: "cost_platform",
+      header: t("usage.costSettlement"),
+      render: (r) => formatMicros(r.cost_platform_micros, r.currency),
+      className: "tabular-nums",
+    },
   ];
 
   const rows = query.data?.logs ?? [];
@@ -307,6 +352,7 @@ function LogsTab({
           {expanded !== null ? (
             <LogDetail
               row={rows.find((r) => r.id === expanded)}
+              modelCurrencies={modelCurrencies}
               keyNames={keyNames}
               userNames={userNames}
               groupNames={groupNames}
@@ -335,11 +381,13 @@ function LogsTab({
 
 function LogDetail({
   row,
+  modelCurrencies,
   keyNames,
   userNames,
   groupNames,
 }: {
   row?: UsageLogRow;
+  modelCurrencies: Map<number, string>;
   keyNames: Map<number, string>;
   userNames: Map<number, string>;
   groupNames: Map<number, string>;
@@ -369,6 +417,14 @@ function LogDetail({
         <div>
           <div className="text-xs text-slate-500">{t("usage.cacheWrite")}</div>
           {formatNumber(row.prompt_cache_write_tokens)}
+        </div>
+        <div>
+          <div className="text-xs text-slate-500">{t("usage.costVendor")}</div>
+          {formatMicros(row.cost_vendor_micros, modelCurrencies.get(row.ai_model_id) ?? row.currency)}
+        </div>
+        <div>
+          <div className="text-xs text-slate-500">{t("usage.costSettlement")}</div>
+          {formatMicros(row.cost_platform_micros, row.currency)}
         </div>
       </div>
     </div>

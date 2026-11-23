@@ -66,11 +66,13 @@ export function Field({
   );
 }
 
-export function Card({ title, value, hint }: { title: string; value: string; hint?: string }) {
+export function Card({ title, value, hint, valueTestId }: { title: string; value: string; hint?: string; valueTestId?: string }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{title}</div>
-      <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
+      <div className="mt-2 text-2xl font-semibold text-slate-900" data-testid={valueTestId}>
+        {value}
+      </div>
       {hint ? <div className="mt-1 text-xs text-slate-500">{hint}</div> : null}
     </div>
   );

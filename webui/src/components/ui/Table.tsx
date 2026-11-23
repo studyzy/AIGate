@@ -12,11 +12,14 @@ export function Table<T>({
   rows,
   rowKey,
   empty,
+  footer,
 }: {
   columns: Column<T>[];
   rows: T[];
   rowKey: (row: T) => string | number;
   empty?: ReactNode;
+  /** footer 是合计行（<tr> 内的单元格），随表头列宽对齐。 */
+  footer?: ReactNode;
 }) {
   if (rows.length === 0) return <>{empty}</>;
   return (
@@ -42,6 +45,7 @@ export function Table<T>({
             </tr>
           ))}
         </tbody>
+        {footer ? <tfoot>{footer}</tfoot> : null}
       </table>
     </div>
   );

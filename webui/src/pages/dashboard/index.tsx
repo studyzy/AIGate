@@ -3,12 +3,12 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import type { AIGateModel, ApiKey, UsageSummaryRow, User } from "@/api/types";
+import type { AIGateModel, ApiKey, UsageSummary, UsageSummaryRow, User } from "@/api/types";
 import { EmptyState, PageHeader, Spinner } from "@/components/ui/primitives";
 import { Card, Select } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
-import { formatNumber, todayISO } from "@/lib/format";
+import { formatMicros, formatNumber, todayISO } from "@/lib/format";
 
 type Range = "today" | "7d" | "30d";
 
@@ -23,7 +23,7 @@ export function DashboardPage() {
   const summary = useQuery({
     queryKey: ["usage-summary", "date", start, end],
     queryFn: () =>
-      api<{ rows: UsageSummaryRow[] }>("/admin/usage/summary?group_by=date&start=" + start + "&end=" + end),
+      api<UsageSummary>("/admin/usage/summary?group_by=date&start=" + start + "&end=" + end),
   });
   const byModel = useQuery({
     queryKey: ["usage-summary", "model", start, end],
@@ -117,6 +117,8 @@ export function DashboardPage() {
             <Card title={t("dashboard.tokens")} value={formatNumber(totals.tokens)} />
             <Card title={t("dashboard.models")} value={formatNumber(models.data?.models.length ?? 0)} />
             <Card title={t("dashboard.keys")} value={formatNumber(keys.data?.keys.length ?? 0)} />
+            {/* 本期花费：结算币金额在记账时已统一，按日期维度聚合可直接求和。 */}
+            <Card title={t("dashboard.cost")} value={formatMicros(summary.data?.total_cost_platform_micros ?? 0, summary.data?.platform_currency ?? "")} valueTestId="dashboard-cost" />
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-white p-4">

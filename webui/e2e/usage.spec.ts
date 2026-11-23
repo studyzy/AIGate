@@ -17,4 +17,16 @@ test("records a proxied request in the usage page", async ({ page, request }) =>
   await page.getByLabel("Group by").selectOption("model");
   await expect(page.getByRole("table")).toBeVisible();
   await expect(page.getByText(modelName).first()).toBeVisible();
+
+  // 明细表的两列金额：模型币种金额与结算币种金额。
+  await page.getByRole("button", { name: "Request logs" }).click();
+  await expect(page.getByRole("columnheader", { name: "Cost (model currency)" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Cost (settlement)" })).toBeVisible();
+});
+
+test("shows cost columns and total in the usage report", async ({ page }) => {
+  await login(page);
+  await page.goto("/ui/usage");
+  await expect(page.getByRole("columnheader", { name: "Cost (settlement)" })).toBeVisible();
+  await expect(page.getByTestId("usage-total-cost")).toContainText("¥");
 });

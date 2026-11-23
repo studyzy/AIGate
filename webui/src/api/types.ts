@@ -277,6 +277,25 @@ export interface UsageSummaryRow {
   prompt_cache_read_tokens: number;
   prompt_cache_write_tokens: number;
   request_count: number;
+  /** 行金额的计价币种；只有 group_by=model 时唯一有意义，空串表示未配置。 */
+  currency?: string;
+  /** 模型币种金额（整数微元）；只有 group_by=model 时可直接相加，其余维度恒为 0。 */
+  cost_vendor_micros: number;
+  /** 平台结算币种金额（整数微元）；记账时已统一到结算币种，任何维度都可相加。 */
+  cost_platform_micros: number;
+  /** 该聚合行跨越了多个计价币种：模型币种金额不可跨模型求和。 */
+  mixed_currency?: boolean;
+}
+
+/**
+ * UsageSummary 是 /admin/usage/summary 的响应信封：顶层合计即当前筛选行的
+ * cost_platform_micros 之和，币种取平台的全局结算币种。
+ */
+export interface UsageSummary {
+  group_by: GroupBy;
+  rows: UsageSummaryRow[];
+  total_cost_platform_micros: number;
+  platform_currency: string;
 }
 
 export interface UsageLogRow {
@@ -294,6 +313,12 @@ export interface UsageLogRow {
   prompt_cache_write_tokens: number;
   status_code: number;
   latency: number;
+  /** 结算币种，与 cost_platform_micros 同币种；不适用于模型币种的 cost_vendor_micros。 */
+  currency: string;
+  /** 记账时的模型币种金额（整数微元），币种见模型的 currency。 */
+  cost_vendor_micros: number;
+  /** 记账时的平台结算币种金额（整数微元），币种见 currency。 */
+  cost_platform_micros: number;
   created_at: string;
 }
 

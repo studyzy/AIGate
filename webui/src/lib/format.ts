@@ -1,4 +1,6 @@
 // 展示层格式化统一走 Intl，避免手写数字/日期拼接。
+import { microsToInput } from "./micros";
+
 let locale = "en";
 let timeZone: string | undefined;
 
@@ -30,6 +32,35 @@ export function formatDate(value: string | null | undefined): string {
 
 export function formatLatency(ms: number): string {
   return ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms + " ms";
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  CNY: "¥",
+  USD: "$",
+  HKD: "HK$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  SGD: "S$",
+  AUD: "A$",
+  CAD: "C$",
+  KRW: "₩",
+};
+
+/**
+ * formatMicros 把整数微元渲染成金额文本：最多 6 位小数、去尾零、最少 2 位（"1.5" → "1.50"）。
+ * 换算复用 microsToInput（字符串拆分，不经浮点除法）；符号取自币种，未知币种追加 ISO 代码。
+ */
+export function formatMicros(micros: number, currency: string): string {
+  const code = currency.trim().toUpperCase();
+  const negative = micros < 0;
+  const text = microsToInput(Math.abs(Math.trunc(micros)));
+  const [whole, fraction = ""] = text.split(".");
+  const amount = whole + "." + fraction.padEnd(2, "0");
+  const sign = negative ? "-" : "";
+  const symbol = CURRENCY_SYMBOLS[code];
+  if (symbol) return sign + symbol + amount;
+  return sign + amount + (code ? " " + code : "");
 }
 
 export function todayISO(offsetDays = 0): string {
