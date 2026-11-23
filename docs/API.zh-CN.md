@@ -605,6 +605,91 @@ GET 就能拿到结果或失败原因：
 | 400 | `response already finished and cannot be cancelled` | 行已终态（响应体另含 `response` 字段）。 |
 | 500 | `internal server error` | — |
 
+### POST /v1/decisions 与 POST /v1/systemone（决策模型）
+
+决策模型不生成文本，只回答「有类型的问题」并返回概率。网关同时开放两种协议入口，
+任一入口都能落到任一上游格式（跨协议由网关翻译）：
+
+| 入口 | 协议 | 上游 `model_type` | 说明 |
+|------|------|-------------------|------|
+| `POST /v1/decisions`（别名 `POST /decisions`） | OpenAI Decisions | `openai-decisions` 或 `systemone` | `input` + `questions` 数组 |
+| `POST /v1/systemone`（别名 `POST /systemone`） | TypeSafe System One | `systemone` 或 `openai-decisions` | `state` + `questions` 对象 |
+
+两条入口都**不支持流式**：请求体出现 `stream: true` 直接返回 `400`。
+
+#### 请求：OpenAI Decisions 形态
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/decisions \
+  -H "Authorization: Bearer sk-xxx" -H "Content-Type: application/json" \
+  -d '{"model":"luna","input":"Customer wrote: I was charged twice.",
+       "questions":[{"type":"predicate","name":"is_refund","instructions":"Refund request?"},
+                    {"type":"choice","name":"dept","instructions":"Team?",
+                     "choices":[{"value":"billing"},{"value":"technical"}]},
+                    {"type":"score","name":"frustration","instructions":"How angry?",
+                     "levels":[{"label":"calm"},{"label":"angry"}]}]}'
+```
+
+| 字段 | 规则 |
+|------|------|
+| `model` | 必填，必须是该密钥绑定的模型名 |
+| `input` | 必填；字符串，或 `{role, content}` 消息数组（content 为字符串或 `input_text` / `input_image` part） |
+| `questions` | 1..128 项；`type` 为 `predicate` / `choice` / `score` / `box`；`name` 缺省按序号 |
+| `questions[].choices` | 2..255 项，`value` 为字符串或布尔，且互不重复 |
+| `questions[].levels` | 2..10 项，`label` 必填 |
+| `safety_identifier` | 可选；仅在 `openai-decisions` 上游生效，落到 `systemone` 上游返回 400 |
+
+#### 请求：System One 形态
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/systemone \
+  -H "Authorization: Bearer sk-xxx" -H "Content-Type: application/json" \
+  -d '{"model":"jev","state":"Customer wrote: I was charged twice.",
+       "questions":{"is_refund":{"type":"noul","instructions":"Refund request?"},
+                    "dept":{"type":"choice","instructions":"Team?","criteria":{"billing":"","technical":""}},
+                    "frustration":{"type":"score","instructions":"How angry?","criteria":["calm","angry"]}}}'
+```
+
+| 字段 | 规则 |
+|------|------|
+| `state` | 必填；字符串、对象或数组 |
+| `questions` | 对象，1..128 个 key（**key 的顺序即答案顺序**）；`type` 为 `noul` / `choice` / `score` / `box` |
+| `questions[].criteria` | choice：1..255 个 key；score：1..10 个字符串 |
+| `images` / `assets` | 可选；`assets` 无法翻译到 `openai-decisions` 上游，跨协议时返回 400 |
+
+两种入口的 `type` 互不通用：在 `/v1/decisions` 上写 `noul`、在 `/v1/systemone` 上写
+`predicate` 都会返回 400，并提示应使用的等价类型。
+
+#### 响应
+
+响应永远与**入口**协议一致：
+
+- `/v1/decisions`：`answers` 为数组，顺序与请求 `questions` 一致，每项带 `name` 与 `type`；
+- `/v1/systemone`：`answers` 为对象，key 与请求 `questions` 一致。
+
+两边都保留上游 `usage`（`input_tokens` / `output_tokens` / `total_tokens`）。上游拒答时：
+OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `decision_refused`
+原样透传到客户端。
+
+#### 跨协议映射
+
+| 概念 | OpenAI Decisions | System One |
+|------|------------------|------------|
+| 上下文 | `input`（字符串或消息数组） | `state`；消息数组按 `\n\n` 拍平成字符串 |
+| 二元判断 | `predicate` → `probability` | `noul` → `noul` |
+| 多选 | `choices[{value,description}]`（value 可为布尔） | `criteria{key: description}`（key 恒为字符串） |
+| 打分 | `levels[{label,description}]` | `criteria: [label, ...]` |
+| 框选 | `box` | `box` |
+
+有损字段一律 400，不静默丢弃：`assets`（→ OpenAI）、`safety_identifier`（→ System One）、
+`input` 里非 `user` / `system` / `developer` 角色的消息。
+
+#### 用量计费
+
+决策模型的 `ai_models.billing_mode` 默认 `input_only`：用量表记
+`completion_tokens = 0`、`total_tokens = prompt_tokens`，响应体里的 `usage` 仍是上游原值。
+显式设成 `per_token` 时按上游返回值如实记账。
+
 ## 3. 管理面
 
 所有 `/admin/*` 路由都要求 `Authorization: Bearer <ADMIN_TOKEN>`，且该 token 属于
@@ -626,7 +711,8 @@ GET 就能拿到结果或失败原因：
 | `model_name` | string | 展示名。 |
 | `url` | string | 上游基础地址。 |
 | `credential_id` | integer | 引用的凭据 ID；`0` 表示未引用（使用 `api_key`）。 |
-| `model_type` | string | 上游协议：`openai-completions`、`anthropic-messages` 或 `openai-responses`。同时决定 `url` 的拼接方式（见 §6「运行须知」）。 |
+| `model_type` | string | 上游协议：`openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions` 或 `systemone`。同时决定 `url` 的拼接方式（见 §6「运行须知」）。 |
+| `billing_mode` | string | 计费口径：`per_token`（默认，如实记账）或 `input_only`（completion 记 0）。决策类 `model_type` 创建时缺省为 `input_only`。 |
 | `custom_http_headers` | object \| null | 允许透传的头（字符串值）。 |
 | `quota_day` | integer | 模型级日 token 配额；`-1` 表示不限。 |
 | `enabled` | bool | 禁用后立即不可路由。 |
@@ -644,7 +730,8 @@ GET 就能拿到结果或失败原因：
 | `url` | string | **是** | — | 去空白后必须非空。 |
 | `api_key` | string | 否 | `""` | 上游凭据（`credential_id` 为 `0` 时使用）。 |
 | `credential_id` | integer | 否 | `0` | 必须引用存在的凭据，否则 `400 credential <id> not found`。 |
-| `model_type` | string | **是** | — | 必须为 `openai-completions`、`anthropic-messages` 或 `openai-responses`。 |
+| `model_type` | string | **是** | — | 必须为 `openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions` 或 `systemone`。 |
+| `billing_mode` | string | 否 | 按 `model_type` 推 | `per_token` 或 `input_only`；决策类模型缺省为 `input_only`。 |
 | `custom_http_headers` | object | 否 | 无 | 字符串值的 JSON 对象；`null` 存为空值。 |
 | `quota_day` | integer | 否 | `-1` | |
 | `enabled` | bool | 否 | `true` | |
@@ -1809,13 +1896,15 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 
 #### 上游 URL 拼接规则
 
-`ai_models.model_type` 有三种取值，三者的 `url` 语义**不一致**——配置模型时务必逐条对照：
+`ai_models.model_type` 的取值 `url` 语义**不一致**——配置模型时务必逐条对照：
 
 | `model_type` | `url` 应写成 | 网关实际请求的地址 |
 |--------------|--------------|--------------------|
 | `openai-completions` | `<host>/v1` | `<url>/chat/completions` |
 | `openai-responses` | `<host>/v1` | `<url>/responses` |
 | `anthropic-messages` | `<host>`（**不含** `/v1`） | `<url>/v1/messages` |
+| `openai-decisions` | `<host>/v1` | `<url>/decisions` |
+| `systemone` | `<host>/v1` | `<url>/systemone` |
 
 `url` 末尾的斜杠会被去除。因此：
 `https://api.openai.com/v1` 配 `openai-responses` → `https://api.openai.com/v1/responses`；

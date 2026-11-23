@@ -288,3 +288,16 @@ make test-e2e   # 端到端冒烟（需要本地 MySQL）
 
 `make test-e2e` 会重置专用测试库、导入 `sql/init.sql`、构建二进制，并用 mock 上游
 驱动它。前置条件与环境变量覆盖见 `test/e2e/README.md`。
+
+### 升级到包含决策模型支持的版本（v0.2.0）
+
+新增了 `ai_models.billing_mode` 列。SQLite 部署由 AutoMigrate 在启动时自动加列；MySQL 部署
+**不会**自动迁移，需要在启动新版本之前手工执行：
+
+```sql
+ALTER TABLE ai_models ADD COLUMN billing_mode VARCHAR(32) NOT NULL DEFAULT 'per_token' AFTER model_type;
+```
+
+该语句只加列、不重写数据，可以在线执行、无需停机；存量行按 `per_token` 处理，行为与升级前一致。
+决策类模型（`model_type` 为 `openai-decisions` / `systemone`）在管理面创建时缺省落
+`input_only`。

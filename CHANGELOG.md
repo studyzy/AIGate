@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decision models (both protocols)** — the gateway now serves decision models, which
+  answer typed questions with calibrated probabilities instead of text, on two new
+  data-plane routes: `POST /v1/decisions` (OpenAI Decisions, aliases `/decisions`) and
+  `POST /v1/systemone` (TypeSafe System One, alias `/systemone`). Two new
+  `ai_models.model_type` values select the upstream format — `openai-decisions` and
+  `systemone` — and either ingress reaches either upstream: same-protocol calls pass
+  through, cross-protocol calls are translated through an internal representation
+  (`predicate` <-> `noul`, `choices` <-> `criteria`, `levels` <-> `criteria` array,
+  `box` <-> `box`, message arrays flattened into `state` with `\n\n`). Fields a target
+  protocol cannot express (`assets`, `safety_identifier`, non-user input roles) are
+  rejected with a 400 that names them rather than silently dropped. Neither route
+  streams. The new `ai_models.billing_mode` column (`per_token` default, `input_only`
+  for decision models) records decision usage as input-only, so usage rows carry
+  `completion_tokens = 0` while responses keep the upstream `usage` verbatim. The admin
+  API and console accept the new model types, `POST /admin/models/{id}/connectivity`
+  probes a decision model with a yes/no question and replies `yes=<probability>`, and
+  changing `model_type` across the chat/decision families is refused while the model is
+  still bound to keys. MySQL deployments need
+  `ALTER TABLE ai_models ADD COLUMN billing_mode VARCHAR(32) NOT NULL DEFAULT 'per_token' AFTER model_type;`
+
 - **Build info everywhere** — a public, unauthenticated `GET /version` returns the running
   binary's `version`, `commit`, `build_time`, `dirty`, `go_version` and `started_at`, so an
   operator can confirm which code and commit a deployment actually serves. The value is

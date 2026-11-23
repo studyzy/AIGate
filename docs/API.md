@@ -632,6 +632,53 @@ already written, the cancel simply returns that terminal status.
 | 400 | `response already finished and cannot be cancelled` | The row is terminal (the body also carries a `response` field). |
 | 500 | `internal server error` | — |
 
+### POST /v1/decisions and POST /v1/systemone (decision models)
+
+Decision models do not generate text. They answer typed questions and return
+probabilities. The gateway exposes both protocols and lets either ingress reach
+either upstream format (cross-protocol calls are translated by the gateway).
+
+| Ingress | Protocol | Upstream `model_type` |
+|---------|----------|-----------------------|
+| `POST /v1/decisions` (alias `POST /decisions`) | OpenAI Decisions | `openai-decisions` or `systemone` |
+| `POST /v1/systemone` (alias `POST /systemone`) | TypeSafe System One | `systemone` or `openai-decisions` |
+
+Neither ingress streams: `stream: true` is rejected with `400`.
+
+**OpenAI Decisions request** — `model`, `input` (string or message array) and
+`questions` (1..128 items, `type` = `predicate` | `choice` | `score` | `box`;
+`choices` 2..255 unique string/boolean values; `levels` 2..10 labelled levels;
+optional `safety_identifier`).
+
+**System One request** — `model`, `state` (string, object or array) and
+`questions` (1..128 keys; key order is the answer order; `type` = `noul` |
+`choice` | `score` | `box`; `criteria` is a 1..255 key map for `choice` and a
+1..10 string array for `score`; optional `images` / `assets`).
+
+The question-type names are protocol-specific: `noul` on `/v1/decisions` and
+`predicate` on `/v1/systemone` are rejected with a 400 that names the
+equivalent type.
+
+**Response** — always in the ingress protocol: `/v1/decisions` returns an
+`answers` array in request order (each with `name` and `type`), `/v1/systemone`
+returns an `answers` object keyed by question name. Both keep the upstream
+`usage` object. A refusal surfaces as `{"type":"refusal","name":...}` on the
+OpenAI ingress, while a System One upstream `422 decision_refused` is relayed
+verbatim.
+
+**Cross-protocol mapping** — message arrays are joined with `\n\n` into
+`state`; `predicate` <-> `noul`; `choices[{value,description}]` <-> `criteria{key: description}`
+(boolean values become the strings `true`/`false`); `levels[{label,description}]`
+<-> `criteria: [label, ...]`; `box` <-> `box`. Lossy fields are rejected with a
+400 rather than dropped: `assets` (to OpenAI), `safety_identifier` (to System
+One), and `input` messages whose role is neither `user`, `system` nor
+`developer`.
+
+**Billing** — decision models default to `billing_mode: input_only`: usage rows
+record `completion_tokens = 0` and `total_tokens = prompt_tokens`, while the
+response body still carries the upstream usage verbatim. Setting
+`billing_mode: per_token` records the upstream numbers as reported.
+
 ## 3. Admin plane
 
 All `/admin/*` routes require `Authorization: Bearer <ADMIN_TOKEN>` where the token belongs to a user with `role=admin`. Path `{id}` values must be positive integers; a non-numeric or zero value yields `400 invalid <model|credential|key|user|group|webhook> id`. A missing target yields `404 <model|credential|key|user|group|webhook> not found`.
@@ -650,7 +697,8 @@ Model objects returned by the API:
 | `model_name` | string | Display name. |
 | `url` | string | Upstream base URL. |
 | `credential_id` | integer | Credential referenced for the upstream key; `0` means none (use `api_key`). |
-| `model_type` | string | Upstream protocol: `openai-completions`, `anthropic-messages` or `openai-responses`. It also determines how `url` is joined (see "Upstream URL joining" in §6). |
+| `model_type` | string | Upstream protocol: `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. It also determines how `url` is joined (see "Upstream URL joining" in §6). |
+| `billing_mode` | string | Billing basis: `per_token` (default, recorded as reported) or `input_only` (completion recorded as 0). Decision `model_type`s default to `input_only` on creation. |
 | `custom_http_headers` | object \| null | Allowed headers for passthrough (string values). |
 | `quota_day` | integer | Model-level daily token quota; `-1` means unlimited. |
 | `enabled` | bool | Disabled models are immediately unroutable. |
@@ -668,7 +716,8 @@ Model objects returned by the API:
 | `url` | string | **yes** | — | Must be non-empty after trimming. |
 | `api_key` | string | no | `""` | Upstream credential (used when `credential_id` is `0`). |
 | `credential_id` | integer | no | `0` | Must reference an existing credential, else `400 credential <id> not found`. |
-| `model_type` | string | **yes** | — | Must be `openai-completions`, `anthropic-messages` or `openai-responses`. |
+| `model_type` | string | **yes** | — | Must be `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. |
+| `billing_mode` | string | no | derived | `per_token` or `input_only`; decision models default to `input_only`. |
 | `custom_http_headers` | object | no | none | JSON object of string values; `null` stores an empty value. |
 | `quota_day` | integer | no | `-1` | |
 | `enabled` | bool | no | `true` | |
@@ -1482,7 +1531,7 @@ Import existing data (groups, users, models, keys) in one call.
 | `models[].provider` / `model_id` | string | `model_id` required; `(provider, model_id)` is the key. |
 | `models[].url` | string | Required. |
 | `models[].api_key` | string | Optional. |
-| `models[].model_type` | string | `openai-completions`, `anthropic-messages` or `openai-responses`. |
+| `models[].model_type` | string | `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. |
 | `models[].quota_day` / `enabled` | integer / bool | Optional. |
 | `keys[].token` | string | **Plaintext**; required. Hashed on import and never stored or echoed. |
 | `keys[].user` | string | Owner **name**; required and must resolve. |
@@ -1816,6 +1865,8 @@ check them one by one when configuring a model:
 | `openai-completions` | `<host>/v1` | `<url>/chat/completions` |
 | `openai-responses` | `<host>/v1` | `<url>/responses` |
 | `anthropic-messages` | `<host>` (**without** `/v1`) | `<url>/v1/messages` |
+| `openai-decisions` | `<host>/v1` | `<url>/decisions` |
+| `systemone` | `<host>/v1` | `<url>/systemone` |
 
 Trailing slashes on `url` are trimmed. Hence `https://api.openai.com/v1` with `openai-responses`
 becomes `https://api.openai.com/v1/responses`, while the same `url` with `anthropic-messages`

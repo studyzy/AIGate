@@ -120,6 +120,84 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /v1/decisions:
+    post:
+      tags: [data-plane]
+      summary: OpenAI Decisions 决策入口
+      description: |
+        接受 OpenAI Decisions 请求体（`input` + `questions` 数组），返回 `answers` 数组，
+        顺序与请求 `questions` 一致。
+
+        **上游路径**：命中模型 `model_type` 为 `openai-decisions` 时同协议直通；
+        为 `systemone` 时由网关翻译（有损字段 `assets` 无法到达，会返回 400）。
+
+        不支持流式：`stream: true` 返回 400。别名 `POST /decisions` 行为完全一致。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionsRequest'
+      responses:
+        '200':
+          description: 决策结果（`answers` 数组 + 上游 `usage`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/QuotaExceeded'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /v1/systemone:
+    post:
+      tags: [data-plane]
+      summary: TypeSafe System One 决策入口
+      description: |
+        接受 System One 请求体（`state` + `questions` 对象），返回以问题名为 key 的
+        `answers` 对象。
+
+        **上游路径**：命中模型 `model_type` 为 `systemone` 时同协议直通；
+        为 `openai-decisions` 时由网关翻译（`safety_identifier` 无法到达，会返回 400）。
+
+        不支持流式：`stream: true` 返回 400。别名 `POST /systemone` 行为完全一致。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemOneRequest'
+      responses:
+        '200':
+          description: 决策结果（`answers` 对象 + 上游 `usage`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemOneResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: 上游（或本网关）拒绝了本次判断（`decision_refused`）
+          content:
+            application/json:
+              schema:
+                type: object
+        '429':
+          $ref: '#/components/responses/QuotaExceeded'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
   /v1/models:
     get:
       tags: [data-plane]
@@ -2244,6 +2322,150 @@ components:
     # ------------------------------------------------------------------
     # 管理面：模型
     # ------------------------------------------------------------------
+    DecisionsRequest:
+      type: object
+      required: [model, input, questions]
+      properties:
+        model:
+          type: string
+          description: 该密钥绑定的模型名。
+        input:
+          description: 上下文；字符串，或 `{role, content}` 消息数组（content 为字符串或 part 数组）。
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+        questions:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items:
+            type: object
+            required: [type, instructions]
+            properties:
+              type:
+                type: string
+                enum: [predicate, choice, score, box]
+              name:
+                type: string
+                description: 缺省时按序号赋值，并在答案里回显。
+              instructions:
+                type: string
+              choices:
+                type: array
+                minItems: 2
+                maxItems: 255
+                description: 仅 `choice`；`value` 为字符串或布尔且必须唯一。
+                items:
+                  type: object
+                  required: [value]
+                  properties:
+                    value: {}
+                    description:
+                      type: string
+              levels:
+                type: array
+                minItems: 2
+                maxItems: 10
+                description: 仅 `score`，最低档在前。
+                items:
+                  type: object
+                  required: [label]
+                  properties:
+                    label:
+                      type: string
+                    description:
+                      type: string
+        safety_identifier:
+          type: string
+          description: 仅 `openai-decisions` 上游支持；跨协议时返回 400。
+
+    DecisionsResponse:
+      type: object
+      properties:
+        model:
+          type: string
+        answers:
+          type: array
+          description: 顺序与请求 `questions` 一致；拒答项为 `{"type":"refusal","name":...}`。
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              name:
+                type: string
+              probability:
+                type: number
+              choice: {}
+              probabilities:
+                type: array
+                items:
+                  type: object
+              score:
+                type: number
+              confidence:
+                type: number
+              box:
+                type: object
+        usage:
+          type: object
+
+    SystemOneRequest:
+      type: object
+      required: [model, state, questions]
+      properties:
+        model:
+          type: string
+        state:
+          description: 上下文；字符串、对象或数组。
+          oneOf:
+            - type: string
+            - type: object
+            - type: array
+        questions:
+          type: object
+          minProperties: 1
+          maxProperties: 128
+          description: key 的顺序即答案顺序。
+          additionalProperties:
+            type: object
+            required: [type, instructions]
+            properties:
+              type:
+                type: string
+                enum: [noul, choice, score, box]
+              instructions:
+                type: string
+              criteria:
+                description: choice 为 1..255 个 key 的对象；score 为 1..10 个字符串的数组。
+                oneOf:
+                  - type: object
+                  - type: array
+                    items:
+                      type: string
+        images:
+          type: array
+          items:
+            type: string
+        assets:
+          type: object
+          description: 仅 `systemone` 上游支持；跨协议时返回 400。
+
+    SystemOneResponse:
+      type: object
+      properties:
+        model:
+          type: string
+        answers:
+          type: object
+          description: key 与请求 `questions` 一致。
+          additionalProperties:
+            type: object
+        usage:
+          type: object
+
     Model:
       type: object
       properties:
@@ -2260,13 +2482,15 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
           description: |
             上游协议（`ai_models.model_type` 的单一事实源）。它同时决定 `url` 的拼接方式：
 
             - `openai-completions`：转发到 `<url>/chat/completions`
             - `openai-responses`：转发到 `<url>/responses`（`url` 须含 `/v1`）
             - `anthropic-messages`：转发到 `<url>/v1/messages`（`url` 只到 host）
+            - `openai-decisions`：转发到 `<url>/decisions`（`url` 须含 `/v1`）
+            - `systemone`：转发到 `<url>/systemone`（`url` 须含 `/v1`）
 
             `url` 末尾的斜杠会被去除。未知或空值按 `openai-completions` 处理（兼容历史数据）。
         custom_http_headers:
@@ -2321,7 +2545,7 @@ components:
           description: 上游凭据（不会出现在任何响应中）
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
         custom_http_headers:
           type: object
           nullable: true
@@ -2359,7 +2583,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
         custom_http_headers:
           type: object
           nullable: true
@@ -3214,7 +3438,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
         quota_day:
           type: integer
           default: -1
