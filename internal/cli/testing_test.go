@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"aigate/internal/admin"
+	"aigate/internal/billing"
 	"aigate/internal/cli"
 	"aigate/internal/client"
 	"aigate/internal/model"
@@ -198,7 +199,7 @@ func newSmokeServer(t *testing.T) (*httptest.Server, string) {
 	}
 
 	mux := http.NewServeMux()
-	admin.Register(mux, store)
+	admin.Register(mux, store, billing.NewStoreSource(store))
 	userapi.Register(mux, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
