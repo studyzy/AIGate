@@ -777,13 +777,18 @@ func providerUsageFromResponsesData(data string) *provider.Usage {
 	if u == nil {
 		return nil
 	}
-	return &provider.Usage{
+	usage := &provider.Usage{
 		PromptTokens:           u.InputTokens,
 		CompletionTokens:       u.OutputTokens,
 		TotalTokens:            u.TotalTokens,
 		PromptCacheReadTokens:  u.InputTokensDetails.CachedTokens,
 		PromptCacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
 	}
+	// 上游报 0 视为未报，与「完全没报」同口径。
+	if u.Cost != nil && *u.Cost > 0 {
+		usage.ReportedCost = u.Cost
+	}
+	return usage
 }
 
 // responsesIngressUsage 是 Responses 用量对象的入站解析形状。
@@ -795,6 +800,8 @@ type responsesIngressUsage struct {
 		CachedTokens     int `json:"cached_tokens"`
 		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	// Cost 上游自报的本次请求成本；缺省或 <=0 视为未报。
+	Cost *float64 `json:"cost"`
 }
 
 // randRead 是 crypto/rand.Read 的间接引用，**仅作为测试缝**存在：

@@ -91,6 +91,8 @@ type anthropicResponse struct {
 		OutputTokens             int `json:"output_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		// Cost 上游自报的本次请求成本（非 Anthropic 官方字段，兼容实现可能提供）。
+		Cost *float64 `json:"cost"`
 	} `json:"usage"`
 }
 
@@ -682,13 +684,20 @@ func NewAnthropicUsage(inputTokens, outputTokens, cacheReadTokens, cacheCreation
 	}
 }
 
+// anthropicUsage 组装用量；自报成本在 NewAnthropicUsage 之外补上。
+// NewAnthropicUsage 的签名与 proxy 直通路径共用，不能加参数，故在此处赋值。
 func anthropicUsage(ar *anthropicResponse) *Usage {
-	return NewAnthropicUsage(
+	usage := NewAnthropicUsage(
 		ar.Usage.InputTokens,
 		ar.Usage.OutputTokens,
 		ar.Usage.CacheReadInputTokens,
 		ar.Usage.CacheCreationInputTokens,
 	)
+	// 上游报 0 视为未报，与「完全没报」同口径。
+	if ar.Usage.Cost != nil && *ar.Usage.Cost > 0 {
+		usage.ReportedCost = ar.Usage.Cost
+	}
+	return usage
 }
 
 // --- Provider interface ---
@@ -1035,6 +1044,10 @@ func applyAnthropicUsage(usage *Usage, u map[string]interface{}) {
 		if iv > 0 || usage.PromptCacheWriteTokens == 0 {
 			usage.PromptCacheWriteTokens = iv
 		}
+	}
+	if v, ok := u["cost"].(float64); ok && v > 0 {
+		// 自报成本只在新事件带了正数成本时覆盖，没带时保留已累积值（与 token 字段同口径）。
+		usage.ReportedCost = &v
 	}
 	usage.PromptTokens = inputTokens + usage.PromptCacheReadTokens + usage.PromptCacheWriteTokens
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens

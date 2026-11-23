@@ -226,7 +226,8 @@ func extractOpenAIUsage(data string, prev *Usage) *Usage {
 			InputDetails struct {
 				CachedTokens int `json:"cached_tokens"` // OpenAI Responses.
 			} `json:"input_tokens_details"`
-			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"` // DeepSeek.
+			PromptCacheHitTokens int      `json:"prompt_cache_hit_tokens"` // DeepSeek.
+			Cost                 *float64 `json:"cost"`                    // 上游自报成本（OpenRouter 等兼容实现）。
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Usage != nil {
@@ -240,13 +241,21 @@ func extractOpenAIUsage(data string, prev *Usage) *Usage {
 			chunk.Usage.PromptDetails.CacheWriteTokens,
 			chunk.Usage.PromptDetails.CacheCreationTokens,
 		)
-		return &Usage{
+		usage := &Usage{
 			PromptTokens:           chunk.Usage.PromptTokens,
 			CompletionTokens:       chunk.Usage.CompletionTokens,
 			TotalTokens:            chunk.Usage.TotalTokens,
 			PromptCacheReadTokens:  cacheRead,
 			PromptCacheWriteTokens: cacheWrite,
 		}
+		// 流式分片无 cost 时保留此前已解析到的自报成本（与 token 字段同口径）：
+		// 只在块内出现 cost > 0 时覆盖。本分片无 usage 时整体返回 prev，成本自然保留。
+		if cost := chunk.Usage.Cost; cost != nil && *cost > 0 {
+			usage.ReportedCost = cost
+		} else if prev != nil {
+			usage.ReportedCost = prev.ReportedCost
+		}
+		return usage
 	}
 	return prev
 }

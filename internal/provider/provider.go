@@ -37,6 +37,9 @@ type Usage struct {
 	TotalTokens            int
 	PromptCacheReadTokens  int
 	PromptCacheWriteTokens int
+	// ReportedCost 是上游自报的本次请求成本（响应体 usage.cost），nil 表示上游未报。
+	// 只有 cost 存在且大于 0 时才赋值；上游报 0 同样视为未报（无法区分「免费」与「未填」）。
+	ReportedCost *float64
 }
 
 // CompletionResult holds a non-streaming response body and parsed usage.

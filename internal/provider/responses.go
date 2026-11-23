@@ -496,6 +496,8 @@ type responsesUsage struct {
 		CachedTokens     int `json:"cached_tokens"`
 		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	// Cost 上游自报的本次请求成本；缺省或 <=0 视为未报。
+	Cost *float64 `json:"cost"`
 }
 
 // responsesUsageEnvelope 用于从响应体 / SSE data 中取出 usage。
@@ -508,13 +510,18 @@ type responsesUsageEnvelope struct {
 
 // toUsage 把上游 Responses 用量映射为内部 Usage。
 func (u *responsesUsage) toUsage() *Usage {
-	return &Usage{
+	usage := &Usage{
 		PromptTokens:           u.InputTokens,
 		CompletionTokens:       u.OutputTokens,
 		TotalTokens:            u.TotalTokens,
 		PromptCacheReadTokens:  u.InputTokensDetails.CachedTokens,
 		PromptCacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
 	}
+	// 上游报 0 视为未报，与「完全没报」同口径。
+	if u.Cost != nil && *u.Cost > 0 {
+		usage.ReportedCost = u.Cost
+	}
+	return usage
 }
 
 // extractResponsesUsage 从 Responses 响应体或 SSE data 中提取用量。
@@ -636,7 +643,11 @@ func (s *responsesStreamState) handleData(data string) {
 
 	// usage 可能出现在终止事件里（response.completed 的 response.usage），
 	// 也可能作为独立的 response.usage 事件下发（--enable-usage 时）。
+	// 新事件没带 cost 时沿用此前已解析到的自报成本（与 token 字段同口径）。
 	if u := extractResponsesUsage(data); u != nil {
+		if u.ReportedCost == nil && s.usage != nil {
+			u.ReportedCost = s.usage.ReportedCost
+		}
 		s.usage = u
 		s.usageSeen = true
 	}

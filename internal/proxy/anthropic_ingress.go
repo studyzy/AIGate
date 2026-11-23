@@ -518,17 +518,25 @@ func streamResultUsage(result *provider.StreamResult) *provider.Usage {
 
 // --- 用量解析（直通路径） ---
 
-// anthropicUsageFields 是 Anthropic usage 对象中的四个 token 字段。
+// anthropicUsageFields 是 Anthropic usage 对象中的四个 token 字段，外加上游自报成本。
 type anthropicUsageFields struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// Cost 上游自报的本次请求成本；缺省或 <=0 视为未报。
+	Cost *float64 `json:"cost"`
 }
 
 // toProviderUsage 组装记账口径的用量；统一走 provider.NewAnthropicUsage，避免两处口径漂移。
+// NewAnthropicUsage 的签名与 provider 侧共用，自报成本在此处补上。
 func (u anthropicUsageFields) toProviderUsage() *provider.Usage {
-	return provider.NewAnthropicUsage(u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	usage := provider.NewAnthropicUsage(u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	// 上游报 0 视为未报，与「完全没报」同口径。
+	if u.Cost != nil && *u.Cost > 0 {
+		usage.ReportedCost = u.Cost
+	}
+	return usage
 }
 
 // anthropicUsageFromBody 从非流式 Anthropic 响应体中解析 usage；无 usage 时返回 nil。
@@ -614,6 +622,10 @@ func (u *anthropicStreamUsage) apply(usage map[string]any) {
 	if n, ok := anthJSONInt(usage["cache_creation_input_tokens"]); ok {
 		u.fields.CacheCreationInputTokens = n
 		u.seen = true
+	}
+	// 自报成本只在新事件带了正数成本时覆盖，没带时保留已累积值（与 token 字段同口径）。
+	if v, ok := usage["cost"].(float64); ok && v > 0 {
+		u.fields.Cost = &v
 	}
 }
 

@@ -904,6 +904,8 @@ func parseDecisionUsage(raw json.RawMessage) *Usage {
 		InputTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"input_tokens_details"`
+		// Cost 上游自报成本；缺省或 <=0 视为未报。
+		Cost *float64 `json:"cost"`
 	}
 	if err := json.Unmarshal(raw, &u); err != nil {
 		return nil
@@ -915,6 +917,9 @@ func parseDecisionUsage(raw json.RawMessage) *Usage {
 	}
 	if u.InputTokensDetails != nil {
 		usage.PromptCacheReadTokens = u.InputTokensDetails.CachedTokens
+	}
+	if u.Cost != nil && *u.Cost > 0 {
+		usage.ReportedCost = u.Cost
 	}
 	return usage
 }
