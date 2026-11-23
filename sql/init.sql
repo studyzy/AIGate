@@ -276,30 +276,3 @@ CREATE TABLE IF NOT EXISTS `currency_rates` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_currency_rates_effective` (`from_currency`, `to_currency`, `effective_at`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
-
--- ---------------------------------------------------------------------------
--- Upgrade only: RUN ONCE when upgrading an EXISTING database (do not re-run; MySQL 8 has no
--- ADD COLUMN IF NOT EXISTS, so a second run fails with "Duplicate column name").
--- A fresh install must NOT execute this block: the CREATE TABLE statements above already carry
--- every column, so these ALTERs would fail there with the same duplicate-column error.
--- The three CREATE TABLE IF NOT EXISTS statements above run cleanly on both paths.
--- ---------------------------------------------------------------------------
-ALTER TABLE `ai_models`
-    ADD COLUMN `currency`             VARCHAR(3) NOT NULL DEFAULT '' AFTER `user_key_required`,
-    ADD COLUMN `enable_peak_pricing`  TINYINT(1) NOT NULL DEFAULT 0   AFTER `currency`,
-    ADD COLUMN `use_upstream_cost`    TINYINT(1) NOT NULL DEFAULT 1   AFTER `enable_peak_pricing`;
-
-ALTER TABLE `llm_usage_logs`
-    ADD COLUMN `cost_vendor_micros`   BIGINT NOT NULL DEFAULT 0 AFTER `latency`,
-    ADD COLUMN `cost_platform_micros` BIGINT NOT NULL DEFAULT 0 AFTER `cost_vendor_micros`;
-
-ALTER TABLE `daily_usage_summaries`
-    ADD COLUMN `cost_vendor_micros`   BIGINT     NOT NULL DEFAULT 0 AFTER `request_count`,
-    ADD COLUMN `cost_platform_micros` BIGINT     NOT NULL DEFAULT 0 AFTER `cost_vendor_micros`,
-    ADD COLUMN `currency`             VARCHAR(3) NOT NULL DEFAULT '' AFTER `cost_platform_micros`;
-
-ALTER TABLE `settings`
-    ADD COLUMN `platform_currency` VARCHAR(3) NOT NULL DEFAULT 'CNY' AFTER `user_key_limit`;
-
--- Existing settings row was created before the column existed: backfill the settlement currency.
-UPDATE `settings` SET `platform_currency` = 'CNY' WHERE `platform_currency` = '';
