@@ -151,6 +151,8 @@ func run() error {
 
 	// Responses 有状态能力：站点级存储开关 + 保留期清理循环（保留期 0 = 永不清理）。
 	proxyHandler := proxy.NewHandler(store, usage, cfg.QuotaExceededStatus)
+	// auto 伪模型路由取价目：与记账共用同一个 billingSource，复用其缓存与失效机制。
+	proxyHandler.SetAutoPriceSource(billingSource)
 	if err := proxyHandler.SetResponseStorage(cfg.AllowResponseStorage); err != nil {
 		return fmt.Errorf("configure response storage: %w", err)
 	}
@@ -160,6 +162,9 @@ func run() error {
 	proxyHandler.StartResponseRetention(time.Duration(cfg.ResponseRetentionDays) * 24 * time.Hour)
 	defer proxyHandler.StopResponseRetention()
 	proxyHandler.Register(mux)
+	// 路由策略目录与预览由数据面实现、管理面暴露：在此桥接，避免管理面依赖数据面内部结构。
+	admin.SetRouterStrategies(proxyHandler)
+	admin.SetRouterPreviewer(proxyHandler)
 	admin.Register(mux, store, billingSource)
 	userapi.Register(mux, store)
 

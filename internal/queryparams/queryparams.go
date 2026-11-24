@@ -60,8 +60,11 @@ type UsageLogRow struct {
 	// CostVendorMicros 记账时的模型币种金额（微元）；币种见 ai_models.currency，本行 Currency 不适用于它。
 	CostVendorMicros int64 `json:"cost_vendor_micros"`
 	// CostPlatformMicros 记账时的平台结算币种金额（微元）；与 Currency 同币种。
-	CostPlatformMicros int64     `json:"cost_platform_micros"`
-	CreatedAt          time.Time `json:"created_at"`
+	CostPlatformMicros int64 `json:"cost_platform_micros"`
+	// CountTowardQuota 为 false 表示这是网关内部开销（如 auto 路由的决策调用）：
+	// 金额真实发生并记在本行，但不消耗任何配额。报表据此把平台侧路由开销与用户消费分开。
+	CountTowardQuota bool      `json:"count_toward_quota"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // ValidGroupBy 校验聚合维度取值。
@@ -176,6 +179,7 @@ func ToUsageLogRow(l *model.LLMUsageLog, platformCurrency string) UsageLogRow {
 		Currency:               platformCurrency,
 		CostVendorMicros:       l.CostVendorMicros,
 		CostPlatformMicros:     l.CostPlatformMicros,
+		CountTowardQuota:       l.CountsTowardQuota(),
 		CreatedAt:              l.CreatedAt,
 	}
 }
