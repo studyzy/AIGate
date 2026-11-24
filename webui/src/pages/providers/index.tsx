@@ -9,7 +9,6 @@ import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, EmptyState, ErrorText, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
-import { microsToInput } from "@/lib/micros";
 
 type ProviderGroup = { key: string; models: AIGateModel[] };
 
@@ -212,7 +211,7 @@ export function ProvidersPage() {
                       {group.models.map((model) => (
                         <div
                           key={model.id}
-                          className="grid min-w-[760px] grid-cols-[minmax(180px,1.3fr)_minmax(110px,1fr)_70px_minmax(150px,1fr)_minmax(110px,0.9fr)_minmax(120px,0.8fr)_250px] items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm"
+                          className="grid min-w-[980px] grid-cols-[minmax(160px,1.2fr)_minmax(90px,0.7fr)_80px_minmax(170px,1fr)_minmax(180px,1fr)_330px] items-center gap-3 rounded-lg bg-white px-3 py-2 text-sm"
                         >
                           <div className="min-w-0">
                             <div className="truncate font-medium">{model.model_name}</div>
@@ -222,13 +221,13 @@ export function ProvidersPage() {
                           <div>
                             {model.enabled ? <Badge tone="green">{t("common.enabled")}</Badge> : <Badge>{t("common.disabled")}</Badge>}
                           </div>
-                          <div className="text-xs">
+                          <div className="truncate text-xs" data-testid="model-price-status">
                             {model.current_price ? (
                               <Badge tone="green">{model.currency}</Badge>
                             ) : model.currency ? (
-                              <span className="text-amber-600">{t("model.noPrice")}</span>
+                              <span className="text-amber-600">{t("model.priceStatus.missing")}</span>
                             ) : (
-                              <span className="text-slate-400">{t("model.noCurrency")}</span>
+                              <span className="text-slate-400">{t("model.priceStatus.unset")}</span>
                             )}
                           </div>
                           <div className="truncate font-mono text-xs text-slate-500" title={model.url}>{model.url}</div>
@@ -703,19 +702,6 @@ function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => vo
           <p className="text-xs text-slate-500">{t("model.effortLevelsHint")}</p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-600" data-testid="model-current-price">
-          {model.current_price ? (
-            <>
-              <Badge tone="green">{t("model.priceConfigured")}</Badge>
-              <span>{model.current_price.currency}</span>
-              <span>{t("price.output")} {microsToInput(model.current_price.offpeak_output_micros)}</span>
-            </>
-          ) : model.currency === "" ? (
-            <span>{t("model.noCurrency")}</span>
-          ) : (
-            <span>{t("model.noPrice")}</span>
-          )}
-        </div>
         {error ? <ErrorText>{error}</ErrorText> : null}
       </div>
     </Drawer>

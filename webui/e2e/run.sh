@@ -27,6 +27,13 @@ fi
 cd "$ROOT"
 command -v go >/dev/null 2>&1 || { echo "go toolchain not found (needed to build the binary under test)" >&2; exit 1; }
 command -v pnpm >/dev/null 2>&1 || { echo "pnpm not found (run: corepack enable)" >&2; exit 1; }
+# 先重建前端再编译二进制：go:embed 打包的是 internal/webui/dist 里的**已有产物**，
+# 少了这一步，改了 webui/src 却只跑 go build，测到的仍是上一次构建的界面。
+pnpm --dir webui build >"$WORK/webui-build.log" 2>&1 || {
+  echo "webui build failed:" >&2
+  tail -20 "$WORK/webui-build.log" >&2
+  exit 1
+}
 go build -o "$WORK/aigate" ./cmd/aigate
 
 node webui/e2e/mock-upstream.mjs >"$WORK/mock.log" 2>&1 &

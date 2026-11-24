@@ -22,10 +22,39 @@ test("configures model currency, peak pricing and price rows", async ({ page, re
   await expect(modelRow).toBeVisible();
   await modelRow.getByRole("button", { name: "Edit" }).click();
 
+  // 布局回归：grid 的列轨道数必须等于子元素数，且相邻单元格不重叠。
+  // 上一版声明了 7 个轨道却只填 6 个单元格，按钮被挤到价格列、文字互相压盖。
+  const layout = await modelRow.evaluate((row) => {
+    const cells = [...row.children] as HTMLElement[];
+    const tracks = getComputedStyle(row).gridTemplateColumns.split(" ").filter(Boolean).length;
+    // 检测可见重叠：任一单元格的左边不得越过前一单元格内容的右边界。
+    let overlap = false;
+    for (let i = 1; i < cells.length; i += 1) {
+      const prev = cells[i - 1].getBoundingClientRect();
+      const cur = cells[i].getBoundingClientRect();
+      if (cur.left < prev.left) overlap = true;
+      if (i <= 4 && cur.left < cells[i - 1].getBoundingClientRect().right - 1) overlap = true;
+    }
+    const actions = cells[cells.length - 1].getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    return {
+      tracks,
+      cells: cells.length,
+      overlap,
+      actionsRightGap: rowBox.right - actions.right,
+    };
+  });
+  expect(layout.tracks).toBe(layout.cells);
+  expect(layout.overlap).toBe(false);
+  // 按钮组贴住行的右边缘（允许 padding 余量）。
+  expect(layout.actionsRightGap).toBeLessThan(40);
+
   // 模型编辑抽屉只编辑模型能力：上下文窗口、输出上限、图片、effort 等级。
   const drawer = page.getByRole("dialog", { name: "Edit model" });
   await expect(drawer).toBeVisible();
-  await expect(drawer.getByTestId("model-current-price")).toContainText("Set a pricing currency first");
+  // 计价状态只在列表里露出，模型抽屉里不再重复（避免同一信息出现在两处）。
+  await expect(drawer.getByTestId("model-current-price")).toHaveCount(0);
+  await expect(modelRow.getByTestId("model-price-status")).toContainText("No currency");
   await drawer.getByTestId("model-context-window").fill("128000");
   await drawer.getByTestId("model-max-output-tokens").fill("8192");
   await drawer.getByTestId("model-supports-image").check();
