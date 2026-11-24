@@ -215,7 +215,7 @@ export function ProvidersPage() {
                       {group.models.map((model) => (
                         <div
                           key={model.id}
-                          className="grid min-w-[760px] grid-cols-[minmax(200px,1.4fr)_minmax(120px,1fr)_80px_minmax(120px,0.8fr)_210px] items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm"
+                          className="grid min-w-[760px] grid-cols-[minmax(180px,1.3fr)_minmax(110px,1fr)_70px_minmax(150px,1fr)_minmax(110px,0.9fr)_minmax(120px,0.8fr)_250px] items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm"
                         >
                           <div className="min-w-0">
                             <div className="truncate font-medium">{model.model_name}</div>
@@ -224,6 +224,15 @@ export function ProvidersPage() {
                           <div className="truncate text-xs text-slate-600">{credentialName.get(model.credential_id) ?? "—"}</div>
                           <div>
                             {model.enabled ? <Badge tone="green">{t("common.enabled")}</Badge> : <Badge>{t("common.disabled")}</Badge>}
+                          </div>
+                          <div className="text-xs">
+                            {model.current_price ? (
+                              <Badge tone="green">{model.currency}</Badge>
+                            ) : model.currency ? (
+                              <span className="text-amber-600">{t("model.noPrice")}</span>
+                            ) : (
+                              <span className="text-slate-400">{t("model.noCurrency")}</span>
+                            )}
                           </div>
                           <div className="truncate font-mono text-xs text-slate-500" title={model.url}>{model.url}</div>
                           <div className="flex justify-end gap-1">
