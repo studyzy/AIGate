@@ -306,7 +306,6 @@ export const en = {
   "model.effortLevelsHint": "Published to clients; no level is enforced either way",
   "model.effort.none": "None selected",
   "model.priceStatus.missing": "No price",
-  "model.priceStatus.unset": "No currency",
   "price.title": "Prices",
   "price.versions": "Price versions",
   "price.empty": "No prices yet",

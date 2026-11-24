@@ -190,3 +190,52 @@ func TestEngine_MissingRateStillReturnsVendorAmount(t *testing.T) {
 		t.Fatalf("vendor amount must survive: %+v", r)
 	}
 }
+
+// TestEngine_ModelCurrencyEmptyUsesPriceSnapshotCurrency 钉住线上真实出现过的缺陷：
+// 模型没配币种（= 不参与金额记账的意图），但价目快照自己带了币种。
+// 此时金额币种必须取快照币种，否则跨币种折算会退化成 "->CNY" 的非法币种对，
+// 解析出来的模型金额照常记账，平台金额却恒为 0。
+func TestEngine_ModelCurrencyEmptyUsesPriceSnapshotCurrency(t *testing.T) {
+	at := offpeakAt
+	src := fakeSource{
+		model:    ModelInfo{Currency: "", UseUpstreamCost: false},
+		prices:   []DatedPrice{{EffectiveAt: at.Add(-time.Hour), Currency: "CNY", Price: Price{OffpeakOutputMicros: 4_000_000}}},
+		platform: "CNY",
+	}
+	r, err := NewEngine(src, time.UTC).Compute(context.Background(), 1, Input{At: at, Tokens: Tokens{Output: 500}})
+	if err != nil {
+		t.Fatalf("同币种不应需要汇率: %v", err)
+	}
+	if r.ModelCurrency != "CNY" {
+		t.Fatalf("ModelCurrency = %q, want the snapshot currency CNY", r.ModelCurrency)
+	}
+	if r.VendorMicros != 2000 {
+		t.Fatalf("VendorMicros = %d, want 2000", r.VendorMicros)
+	}
+	// 快照币种与平台币种一致：平台金额必须等于模型金额，而不是 0。
+	if r.PlatformMicros != 2000 {
+		t.Fatalf("PlatformMicros = %d, want 2000 (same currency as the platform)", r.PlatformMicros)
+	}
+}
+
+// TestEngine_ModelCurrencyEmptyCrossCurrencyUsesSnapshot 验证跨币种时用的也是快照币种：
+// 空模型币种 + 快照 USD + 平台 CNY 且有 USD->CNY 汇率，折算必须成功。
+func TestEngine_ModelCurrencyEmptyCrossCurrencyUsesSnapshot(t *testing.T) {
+	at := offpeakAt
+	src := fakeSource{
+		model:    ModelInfo{Currency: "", UseUpstreamCost: false},
+		prices:   []DatedPrice{{EffectiveAt: at.Add(-time.Hour), Currency: "USD", Price: Price{OffpeakOutputMicros: 4_000_000}}},
+		rate:     []DatedRate{{EffectiveAt: at.Add(-time.Hour), RateMicros: 7_200_000}},
+		platform: "CNY",
+	}
+	r, err := NewEngine(src, time.UTC).Compute(context.Background(), 1, Input{At: at, Tokens: Tokens{Output: 500}})
+	if err != nil {
+		t.Fatalf("cross-currency with a snapshot currency should resolve: %v", err)
+	}
+	if r.ModelCurrency != "USD" || r.VendorMicros != 2000 {
+		t.Fatalf("vendor side = %q/%d, want USD/2000", r.ModelCurrency, r.VendorMicros)
+	}
+	if r.PlatformMicros != 14_400 {
+		t.Fatalf("PlatformMicros = %d, want 14400 (2000 USD micros at 7.2)", r.PlatformMicros)
+	}
+}

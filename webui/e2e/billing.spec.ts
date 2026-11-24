@@ -54,7 +54,8 @@ test("configures model currency, peak pricing and price rows", async ({ page, re
   await expect(drawer).toBeVisible();
   // 计价状态只在列表里露出，模型抽屉里不再重复（避免同一信息出现在两处）。
   await expect(drawer.getByTestId("model-current-price")).toHaveCount(0);
-  await expect(modelRow.getByTestId("model-price-status")).toContainText("No currency");
+  // 币种以价目快照为准，模型币种为空时列表只提示「缺价目」。
+  await expect(modelRow.getByTestId("model-price-status")).toContainText("No price");
   await drawer.getByTestId("model-context-window").fill("128000");
   await drawer.getByTestId("model-max-output-tokens").fill("8192");
   await drawer.getByTestId("model-supports-image").check();

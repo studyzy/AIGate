@@ -109,7 +109,14 @@ func (e *Engine) Compute(ctx context.Context, modelID uint, in Input) (Result, e
 		return Result{}, fmt.Errorf("no effective price for model %d at %s", modelID, in.At.In(e.loc).Format(time.RFC3339))
 	}
 
-	res := Result{ModelCurrency: mi.Currency}
+	// 金额币种取**生效价目快照**的币种，而不是模型当前币种：
+	// 价目快照自带币种（改模型币种不影响历史），且模型币种允许为空（= 不参与金额记账），
+	// 此时若用空串作金额币种，跨币种折算会退化成 "->CNY" 的非法币种对，平台金额必然记 0。
+	// 模型币种仅作为快照没带币种时的兜底。
+	res := Result{ModelCurrency: selected.Currency}
+	if res.ModelCurrency == "" {
+		res.ModelCurrency = mi.Currency
+	}
 	switch {
 	case mi.UseUpstreamCost && in.ReportedCost != nil && *in.ReportedCost > 0:
 		// 上游自报优先：直接采信，跳过自算档位判定。
@@ -139,19 +146,19 @@ func (e *Engine) Compute(ctx context.Context, modelID uint, in Input) (Result, e
 		return res, fmt.Errorf("load platform currency: %w", err)
 	}
 	res.PlatformCurrency = platform
-	if mi.Currency == platform {
+	if res.ModelCurrency == platform {
 		res.PlatformMicros = res.VendorMicros
 		return res, nil
 	}
 
-	rates, err := e.src.Rate(ctx, mi.Currency, platform)
+	rates, err := e.src.Rate(ctx, res.ModelCurrency, platform)
 	if err != nil {
-		return res, fmt.Errorf("load rate %s->%s: %w", mi.Currency, platform, err)
+		return res, fmt.Errorf("load rate %s->%s: %w", res.ModelCurrency, platform, err)
 	}
 	rateMicros, ok := SelectRate(rates, in.At)
 	if !ok {
 		// 汇率缺失：平台金额记 0，模型币种金额照常保留。
-		return res, fmt.Errorf("%w: %s->%s at %s", ErrMissingRate, mi.Currency, platform, in.At.In(e.loc).Format(time.RFC3339))
+		return res, fmt.Errorf("%w: %s->%s at %s", ErrMissingRate, res.ModelCurrency, platform, in.At.In(e.loc).Format(time.RFC3339))
 	}
 	res.PlatformMicros = ConvertMicros(res.VendorMicros, rateMicros)
 	return res, nil

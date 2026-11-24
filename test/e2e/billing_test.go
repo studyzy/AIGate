@@ -558,6 +558,71 @@ func TestE2E_BillingUpstreamReportedCost(t *testing.T) {
 	}
 }
 
+// TestE2E_Billing_ModelCurrencyEmptyUsesPriceCurrency 钉住线上真实出现过的缺陷：
+// 模型的计价币种没配（空串），但价目快照自己带了 CNY。
+//
+// 旧实现用模型币种作金额币种，跨币种折算退化成 "->CNY" 的非法币种对，
+// 结果是 cost_vendor_micros 有值、cost_platform_micros 恒为 0 —— 用量页的
+// 「花费（结算币）」整列都是 0，而「花费（模型币）」看起来一切正常。
+func TestE2E_Billing_ModelCurrencyEmptyUsesPriceCurrency(t *testing.T) {
+	bin := requireEnv(t, envBinKey)
+	dsn := requireEnv(t, envDSNKey)
+
+	mock := newUpstreamMock(kindOpenAI)
+	t.Cleanup(mock.Close)
+	gw := startGateway(t, bin, dsn)
+	db := openE2EDB(t, dsn)
+	waitFor(t, "database reachable", usagePollTimeout, db.Ping)
+
+	// 关键：currency 显式置空，模拟「只在价目里选了币种」的配置。
+	modelRowID := newBillingModel(t, gw.baseURL, mock.URL(), "billing-empty-currency", map[string]any{
+		"currency":            "",
+		"enable_peak_pricing": false,
+		"use_upstream_cost":   false,
+	})
+
+	createPrice(t, gw.baseURL, modelRowID, map[string]any{
+		"currency":              "CNY",
+		"effective_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
+		"offpeak_output_micros": 20_000_000,
+	})
+
+	created := createKey(t, gw.baseURL, map[string]any{
+		"name": "billing-empty-currency", "user_id": 1, "group_id": 0,
+		"bindings": []map[string]any{{"ai_model_id": modelRowID, "role": "primary"}},
+	})
+
+	status, body := postChatCompletion(t, gw.baseURL, created.Token, map[string]any{
+		"model":    "billing-empty-currency",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("the request expected 200, got %d, response: %s", status, body)
+	}
+
+	rows := waitForKeyUsageCosts(t, db, created.ID, 1)
+	row := rows[0]
+	if row.CostVendorMicros <= 0 {
+		t.Fatalf("cost_vendor_micros = %d, want a positive amount billed from the price table", row.CostVendorMicros)
+	}
+	// 核心断言：平台金额必须真的被算出（旧实现在这里恒为 0）。
+	// 平台结算币种可能被前面的用例改成过非 CNY，因此按 settings 动态判定：
+	//   - 与价目同币 → 两列必须相等；
+	//   - 不同币 → 平台列必须 > 0（说明汇率折算真的发生了，而不是被空币种短路成 0）。
+	platform := platformCurrency(t, gw.baseURL)
+	if platform == "CNY" {
+		if row.CostPlatformMicros != row.CostVendorMicros {
+			t.Fatalf("cost_platform_micros = %d, want %d (same currency as the platform): %+v",
+				row.CostPlatformMicros, row.CostVendorMicros, row)
+		}
+		return
+	}
+	if row.CostPlatformMicros <= 0 {
+		t.Fatalf("cost_platform_micros = %d, want a positive converted amount (platform %s): %+v",
+			row.CostPlatformMicros, platform, row)
+	}
+}
+
 // TestE2E_Billing_ModelCapabilitiesInModelList 验证四个能力字段能经管理面往返，
 // 并在数据面 GET /v1/models 下发给下游 Agent。
 //
@@ -691,4 +756,20 @@ func listModels(t *testing.T, baseURL, token string) []map[string]any {
 		t.Fatalf("decode /v1/models: %v", err)
 	}
 	return out.Data
+}
+
+// platformCurrency 读取平台结算币种（设置行）；用于按当前配置而非硬编码取值断言。
+func platformCurrency(t *testing.T, baseURL string) string {
+	t.Helper()
+	status, raw := doRequest(t, http.MethodGet, baseURL+"/admin/settings", adminToken, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/settings expected 200, got %d: %s", status, raw)
+	}
+	var out struct {
+		PlatformCurrency string `json:"platform_currency"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	return out.PlatformCurrency
 }

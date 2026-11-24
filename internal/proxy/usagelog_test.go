@@ -137,10 +137,20 @@ type brokenSource struct{ okSource }
 func (brokenSource) Prices(context.Context, uint) ([]billing.DatedPrice, error) { return nil, nil }
 
 // missingRateSource 只缺汇率：模型币种 USD、平台 CNY 且无汇率，引擎仍返回模型币种金额。
+// missingRateSource 让 Engine 在折算时缺汇率：金额币种是 USD，平台结算币种是 CNY，
+// 且不提供任何 USD->CNY 汇率。
+//
+// 金额币种取**价目快照**的币种（不是模型币种），因此这里必须把快照也配成 USD；
+// 只改 Model() 的币种不会生效——快照币种优先，模型币种只在快照没带币种时兜底。
 type missingRateSource struct{ okSource }
 
 func (missingRateSource) Model(context.Context, uint) (billing.ModelInfo, error) {
 	return billing.ModelInfo{Currency: "USD", UseUpstreamCost: true}, nil
+}
+
+func (missingRateSource) Prices(context.Context, uint) ([]billing.DatedPrice, error) {
+	return []billing.DatedPrice{{EffectiveAt: time.Now().Add(-time.Hour), Currency: "USD",
+		Price: billing.Price{OffpeakOutputMicros: 4_000_000}}}, nil
 }
 
 func TestUsageWriter_StoresTwoCostColumns(t *testing.T) {

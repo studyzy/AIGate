@@ -222,12 +222,11 @@ export function ProvidersPage() {
                             {model.enabled ? <Badge tone="green">{t("common.enabled")}</Badge> : <Badge>{t("common.disabled")}</Badge>}
                           </div>
                           <div className="truncate text-xs" data-testid="model-price-status">
+                            {/* 币种以价目快照为准：快照自带币种，模型币种为空也能正常计价。 */}
                             {model.current_price ? (
-                              <Badge tone="green">{model.currency}</Badge>
-                            ) : model.currency ? (
-                              <span className="text-amber-600">{t("model.priceStatus.missing")}</span>
+                              <Badge tone="green">{model.current_price.currency}</Badge>
                             ) : (
-                              <span className="text-slate-400">{t("model.priceStatus.unset")}</span>
+                              <span className="text-amber-600">{t("model.priceStatus.missing")}</span>
                             )}
                           </div>
                           <div className="truncate font-mono text-xs text-slate-500" title={model.url}>{model.url}</div>

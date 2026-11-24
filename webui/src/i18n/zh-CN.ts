@@ -307,7 +307,6 @@ export const zhCN: Record<MessageKey, string> = {
   "model.effortLevelsHint": "下发给调用方；不按等级校验请求",
   "model.effort.none": "未选择",
   "model.priceStatus.missing": "缺价目",
-  "model.priceStatus.unset": "缺币种",
   "price.title": "价目",
   "price.versions": "价目版本",
   "price.empty": "还没有价目",
