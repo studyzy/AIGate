@@ -81,7 +81,7 @@ func TestE2E_MySQLFreshInit(t *testing.T) {
 			"users": true, "ai_models": true, "api_keys": true, "api_key_models": true,
 			"llm_usage_logs": true, "daily_usage_summaries": true, "user_groups": true,
 			"settings": true, "credentials": true, "webhooks": true, "webhook_deliveries": true,
-			"response_states": true,
+			"response_states": true, "model_routers": true,
 			"ai_model_prices": true, "billing_calendar": true, "currency_rates": true,
 		}
 		rows, err := freshDBHandle.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()")

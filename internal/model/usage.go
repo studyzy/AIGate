@@ -94,7 +94,6 @@ type DailyUsageSummary struct {
 	Currency string `gorm:"size:3;not null;default:''"`
 }
 
-// InsertUsageLog 写入一条请求级用量日志。
 // InsertUsageLog 写入一条用量明细。
 //
 // count_toward_quota 是 bool 指针：nil 时沿用列默认值（true），非 nil 时写入显式值。

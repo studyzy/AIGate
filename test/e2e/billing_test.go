@@ -470,9 +470,13 @@ func TestE2E_BillingCostLoop(t *testing.T) {
 				"the key was rejected on converted amounts, not on tokens", used, wantCostQuotaWindowMicros)
 		}
 
-		// 交叉核对：该密钥的明细行数与日聚合累计的请求数一致（两表由同一次记账写入）。
+		// 交叉核对：该密钥「计入配额」的明细行数与日聚合累计的请求数一致
+		// （两表由同一次记账写入；count_toward_quota = 0 的行只留明细、不进日聚合）。
+		// 记账是异步的，末尾几笔可能尚未消费完，故允许日聚合略少于明细；
+		// 反过来（日聚合大于明细）则说明重复累加，必须报错。
 		var logs, requests int64
-		if err := db.QueryRow(`SELECT COUNT(*) FROM llm_usage_logs WHERE api_key_id = ?`, costQuotaKeyID).
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM llm_usage_logs WHERE api_key_id = ? AND count_toward_quota = 1`, costQuotaKeyID).
 			Scan(&logs); err != nil {
 			t.Fatalf("count llm_usage_logs: %v", err)
 		}
@@ -480,8 +484,9 @@ func TestE2E_BillingCostLoop(t *testing.T) {
 			costQuotaKeyID).Scan(&requests); err != nil {
 			t.Fatalf("sum daily_usage_summaries.request_count: %v", err)
 		}
-		if logs < 2 || requests != logs {
-			t.Errorf("daily_usage_summaries request_count = %d, want it to equal the %d usage rows", requests, logs)
+		if logs < 2 || requests > logs || logs-requests > 3 {
+			t.Errorf("daily_usage_summaries request_count = %d, want it to match the %d quota-counted usage rows "+
+				"(async writer may lag by a few rows)", requests, logs)
 		}
 	})
 
