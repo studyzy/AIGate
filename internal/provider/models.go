@@ -55,6 +55,13 @@ func ListModels(ctx context.Context, modelType, apiKey, apiBase string) ([]strin
 			h.Set("anthropic-version", anthropicVersion)
 		}
 	}
+	if modelType == protocol.TypeGeminiGenerateContent {
+		// url 已含 /v1beta，列表接口就在它的 /models 下。
+		auth = func(h http.Header) {
+			h.Set("x-goog-api-key", apiKey)
+			h.Del("Authorization")
+		}
+	}
 
 	if err := validateOutboundURL(ctx, target); err != nil {
 		return nil, &ConnectivityError{Kind: ErrNetworkUnreachable, Cause: err}
@@ -80,6 +87,10 @@ func ListModels(ctx context.Context, modelType, apiKey, apiBase string) ([]strin
 		return nil, &ConnectivityError{Kind: kind, StatusCode: resp.StatusCode, Snippet: snippetOf(string(body))}
 	}
 
+	if modelType == protocol.TypeGeminiGenerateContent {
+		return geminiModelIDs(body, resp.StatusCode)
+	}
+
 	var parsed modelsResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, &ConnectivityError{Kind: ErrUpstreamClient, StatusCode: resp.StatusCode, Snippet: snippetOf(string(body))}
@@ -88,6 +99,29 @@ func ListModels(ctx context.Context, modelType, apiKey, apiBase string) ([]strin
 	for _, item := range parsed.Data {
 		if strings.TrimSpace(item.ID) != "" {
 			ids = append(ids, item.ID)
+		}
+	}
+	return ids, nil
+}
+
+// geminiModelsResponse 是 Gemini 列表接口的响应体：models[].name 而不是 data[].id。
+type geminiModelsResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+// geminiModelIDs 解析 Gemini 模型列表并去掉 models/ 前缀。
+func geminiModelIDs(body []byte, status int) ([]string, error) {
+	var parsed geminiModelsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, &ConnectivityError{Kind: ErrUpstreamClient, StatusCode: status, Snippet: snippetOf(string(body))}
+	}
+	ids := make([]string, 0, len(parsed.Models))
+	for _, item := range parsed.Models {
+		name := strings.TrimPrefix(strings.TrimSpace(item.Name), "models/")
+		if name != "" {
+			ids = append(ids, name)
 		}
 	}
 	return ids, nil

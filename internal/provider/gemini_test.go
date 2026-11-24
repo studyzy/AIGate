@@ -16,6 +16,7 @@ package provider_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -165,5 +166,38 @@ func TestGeminiProvider_StreamAppendsDone(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
 		t.Fatalf("流末尾应补 [DONE]，got %q", rec.Body.String())
+	}
+}
+
+func TestGeminiProvider_ProbeShape(t *testing.T) {
+	srv, rec := startGeminiUpstream(t, http.StatusOK,
+		`{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}`)
+	p := &provider.GeminiProvider{}
+	latency, out, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL+"/v1beta", "gemini-2.5-flash")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if latency <= 0 || out.Reply != "hello" {
+		t.Fatalf("latency=%v reply=%q", latency, out.Reply)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(rec.body, &sent)
+	gc := sent["generationConfig"].(map[string]any)
+	if gc["maxOutputTokens"] != float64(8) {
+		t.Fatalf("探测应限制输出，maxOutputTokens = %v", gc["maxOutputTokens"])
+	}
+}
+
+// 探测拿到空回复说明没真正调用模型，必须归类为 upstream_client。
+func TestGeminiProvider_ProbeEmptyReply(t *testing.T) {
+	srv, _ := startGeminiUpstream(t, http.StatusOK, `{"candidates":[{"content":{"parts":[]}}]}`)
+	p := &provider.GeminiProvider{}
+	_, _, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL+"/v1beta", "gemini-2.5-flash")
+	if err == nil {
+		t.Fatalf("空回复应报错")
+	}
+	var ce *provider.ConnectivityError
+	if !errors.As(err, &ce) || !errors.Is(ce.Kind, provider.ErrUpstreamClient) {
+		t.Fatalf("err = %v, want ErrUpstreamClient", err)
 	}
 }
