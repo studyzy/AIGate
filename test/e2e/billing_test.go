@@ -558,12 +558,12 @@ func TestE2E_BillingUpstreamReportedCost(t *testing.T) {
 	}
 }
 
-// TestE2E_Billing_ModelOutputCeiling 验证模型级输出上限真的作用到转发的请求上，
-// 并且与密钥级上限取较小者——模型侧配得更松时必须仍被密钥侧收紧。
+// TestE2E_Billing_ModelCapabilitiesInModelList 验证四个能力字段能经管理面往返，
+// 并在数据面 GET /v1/models 下发给下游 Agent。
 //
-// 能力字段本身（context_window / supports_image / effort_levels）只做展示，
-// 此处一并断言它们能经管理面往返，避免「字段加了但写不进去」。
-func TestE2E_Billing_ModelOutputCeiling(t *testing.T) {
+// 这些字段是纯能力声明：网关不据此做任何逻辑处理——因此断言的重点是「如实下发」，
+// 而不是任何转发行为变化。未配置时下发 null / false / null（区别于 0 与空数组）。
+func TestE2E_Billing_ModelCapabilitiesInModelList(t *testing.T) {
 	bin := requireEnv(t, envBinKey)
 	dsn := requireEnv(t, envDSNKey)
 
@@ -571,22 +571,31 @@ func TestE2E_Billing_ModelOutputCeiling(t *testing.T) {
 	t.Cleanup(openAIMock.Close)
 	gw := startGateway(t, bin, dsn)
 
-	// 模型级上限 64，密钥级上限 256：模型侧更严 → 上游必须看到 64。
-	modelID := createModel(t, gw.baseURL, adminToken, map[string]any{
+	// 配了能力的模型。
+	richID := createModel(t, gw.baseURL, adminToken, map[string]any{
 		"provider":          "mock",
-		"model_id":          "ec-model",
-		"model_name":        "ec",
+		"model_id":          "cap-rich",
+		"model_name":        "rich",
 		"url":               openAIMock.URL() + "/v1",
 		"api_key":           upstreamAPIKey,
 		"model_type":        "openai-completions",
-		"max_output_tokens": 64,
-		"context_window":    128000,
+		"context_window":    200000,
+		"max_output_tokens": 64000,
 		"supports_image":    true,
-		"effort_levels":     []string{"high", "low"},
+		"effort_levels":     []string{"medium", "low", "high"},
+	})
+	// 一项能力都没配的模型：用于钉住「未声明」的下发形状。
+	bareID := createModel(t, gw.baseURL, adminToken, map[string]any{
+		"provider":   "mock",
+		"model_id":   "cap-bare",
+		"model_name": "bare",
+		"url":        openAIMock.URL() + "/v1",
+		"api_key":    upstreamAPIKey,
+		"model_type": "openai-completions",
 	})
 
-	// 能力字段经管理面往返，且 effort 由服务端按阶梯升序归一化。
-	status, raw := adminJSON(t, gw.baseURL, http.MethodGet, fmt.Sprintf("/admin/models/%d", modelID), nil)
+	// 管理面往返：effort 由服务端按阶梯升序归一化，而不是照抄入参顺序。
+	status, raw := adminJSON(t, gw.baseURL, http.MethodGet, fmt.Sprintf("/admin/models/%d", richID), nil)
 	if status != http.StatusOK {
 		t.Fatalf("get model expected 200, got %d: %s", status, raw)
 	}
@@ -599,75 +608,57 @@ func TestE2E_Billing_ModelOutputCeiling(t *testing.T) {
 	if err := json.Unmarshal(raw, &model); err != nil {
 		t.Fatalf("decode model: %v", err)
 	}
-	if model.ContextWindow != 128000 || model.MaxOutputTokens != 64 || !model.SupportsImage {
+	if model.ContextWindow != 200000 || model.MaxOutputTokens != 64000 || !model.SupportsImage {
 		t.Fatalf("model capabilities did not round-trip: %s", raw)
 	}
-	if len(model.EffortLevels) != 2 || model.EffortLevels[0] != "low" || model.EffortLevels[1] != "high" {
-		t.Fatalf("effort_levels = %v, want [low high]", model.EffortLevels)
+	if len(model.EffortLevels) != 3 || model.EffortLevels[0] != "low" || model.EffortLevels[2] != "high" {
+		t.Fatalf("effort_levels = %v, want [low medium high]", model.EffortLevels)
 	}
 
-	owner := createUser(t, gw.baseURL, "ceiling-owner", 0)
+	owner := createUser(t, gw.baseURL, "caps-owner", 0)
 	key := createKey(t, gw.baseURL, map[string]any{
-		"name":       "ceiling-key",
-		"user_id":    owner.ID,
-		"max_tokens": 256,
-		"bindings":   []map[string]any{{"ai_model_id": modelID, "role": "primary"}},
+		"name":    "caps-key",
+		"user_id": owner.ID,
+		"bindings": []map[string]any{
+			{"ai_model_id": richID, "role": "primary"},
+			{"ai_model_id": bareID, "role": "fallback"},
+		},
 	})
 
-	for _, tc := range []struct {
-		name    string
-		request map[string]any
-		want    float64
-	}{
-		{
-			name:    "client asks for more than the model ceiling",
-			request: map[string]any{"max_tokens": 4096},
-			want:    64,
-		},
-		{
-			name:    "client omits max_tokens and the ceiling is injected",
-			request: map[string]any{},
-			want:    64,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := map[string]any{"messages": []map[string]string{{"role": "user", "content": "hi"}}}
-			for k, v := range tc.request {
-				body[k] = v
-			}
-			status, respBody := postChatCompletion(t, gw.baseURL, key.Token, body)
-			if status != http.StatusOK {
-				t.Fatalf("forward expected 200, got %d: %s", status, respBody)
-			}
-			var sent map[string]any
-			if err := json.Unmarshal(openAIMock.lastRequest().Body, &sent); err != nil {
-				t.Fatalf("decode upstream body: %v", err)
-			}
-			if got := sent["max_tokens"]; got != tc.want {
-				t.Fatalf("upstream max_tokens = %v, want %v", got, tc.want)
-			}
-		})
+	models := listModels(t, gw.baseURL, key.Token)
+	byID := make(map[string]map[string]any, len(models))
+	for _, m := range models {
+		if id, ok := m["id"].(string); ok {
+			byID[id] = m
+		}
 	}
 
-	// 反过来：模型侧放宽到 1024，密钥级 256 必须仍然收紧。
-	status, raw = adminJSON(t, gw.baseURL, http.MethodPut, fmt.Sprintf("/admin/models/%d", modelID),
-		map[string]any{"max_output_tokens": 1024})
-	if status != http.StatusOK {
-		t.Fatalf("relax model ceiling expected 200, got %d: %s", status, raw)
+	rich, ok := byID["cap-rich"]
+	if !ok {
+		t.Fatalf("/v1/models is missing cap-rich: %v", models)
 	}
-	status, respBody := postChatCompletion(t, gw.baseURL, key.Token, map[string]any{
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-		"max_tokens": 4096,
-	})
-	if status != http.StatusOK {
-		t.Fatalf("forward expected 200, got %d: %s", status, respBody)
+	if rich["context_window"] != float64(200000) || rich["max_output_tokens"] != float64(64000) {
+		t.Fatalf("cap-rich limits = %v / %v", rich["context_window"], rich["max_output_tokens"])
 	}
-	var sent map[string]any
-	if err := json.Unmarshal(openAIMock.lastRequest().Body, &sent); err != nil {
-		t.Fatalf("decode upstream body: %v", err)
+	if rich["supports_image"] != true {
+		t.Fatalf("cap-rich supports_image = %v, want true", rich["supports_image"])
 	}
-	if got := sent["max_tokens"]; got != float64(256) {
-		t.Fatalf("upstream max_tokens = %v, want 256 (the key ceiling must still win)", got)
+	levels, ok := rich["effort_levels"].([]any)
+	if !ok || len(levels) != 3 || levels[0] != "low" || levels[1] != "medium" || levels[2] != "high" {
+		t.Fatalf("cap-rich effort_levels = %v, want [low medium high]", rich["effort_levels"])
+	}
+
+	bare, ok := byID["cap-bare"]
+	if !ok {
+		t.Fatalf("/v1/models is missing cap-bare: %v", models)
+	}
+	for _, field := range []string{"context_window", "max_output_tokens", "effort_levels"} {
+		if v, present := bare[field]; !present || v != nil {
+			t.Fatalf("cap-bare %s = %v (present=%v), want an explicit null", field, v, present)
+		}
+	}
+	if bare["supports_image"] != false {
+		t.Fatalf("cap-bare supports_image = %v, want false", bare["supports_image"])
 	}
 }
 
@@ -684,4 +675,20 @@ func adminJSON(t *testing.T, baseURL, method, path string, body map[string]any) 
 		raw = encoded
 	}
 	return doRequest(t, method, baseURL+path, adminToken, raw)
+}
+
+// listModels 以数据面密钥调用 GET /v1/models，返回 data 数组。
+func listModels(t *testing.T, baseURL, token string) []map[string]any {
+	t.Helper()
+	status, raw := doRequest(t, http.MethodGet, baseURL+"/v1/models", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/models expected 200, got %d: %s", status, raw)
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode /v1/models: %v", err)
+	}
+	return out.Data
 }

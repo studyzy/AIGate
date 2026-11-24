@@ -71,6 +71,12 @@ type BindingInfo struct {
 	Role      string `json:"role"`
 	SortOrder int    `json:"sort_order"`
 	HasKey    bool   `json:"has_key"` // 绑定级密钥是否已配置（user_key_required 模型需要）
+
+	// 以下四个是纯能力声明：只经 /v1/models 告知调用方，不参与任何网关判定。
+	ContextWindow   int    `json:"context_window"`
+	MaxOutputTokens int    `json:"max_output_tokens"`
+	SupportsImage   bool   `json:"supports_image"`
+	EffortLevels    string `json:"effort_levels"`
 }
 
 // Candidate 是 auto 路由的候选模型：该密钥绑定、且当前可解析的模型。
@@ -98,16 +104,6 @@ type Resolved struct {
 	APIKey            string
 	QuotaDay          int
 	CustomHTTPHeaders map[string]string
-	// MaxOutputTokens 模型级输出上限（ai_models.max_output_tokens）；0 表示未配置。
-	MaxOutputTokens int
-}
-
-// OutputCeiling 返回本次请求可用的输出上限：模型级与密钥级取较小者，都未配置时为 0。
-func (r *Resolved) OutputCeiling(key *APIKey) int {
-	if r == nil {
-		return 0
-	}
-	return OutputTokenCeiling(r.MaxOutputTokens, key.MaxTokens)
 }
 
 var (
@@ -285,7 +281,9 @@ func (s *Store) ListKeyModels(ctx context.Context, keyID uint, onlyEnabled bool)
 	var infos []BindingInfo
 	err := q.Select("ai_models.id AS ai_model_id, ai_models.model_id AS model_id, ai_models.model_name AS model_name," +
 		" ai_models.provider AS provider, api_key_models.role AS role, api_key_models.sort_order AS sort_order," +
-		" (api_key_models.api_key <> '') AS has_key").
+		" (api_key_models.api_key <> '') AS has_key," +
+		" ai_models.context_window AS context_window, ai_models.max_output_tokens AS max_output_tokens," +
+		" ai_models.supports_image AS supports_image, ai_models.effort_levels AS effort_levels").
 		Order("api_key_models.sort_order ASC").
 		Scan(&infos).
 		Error
@@ -476,7 +474,6 @@ func (s *Store) resolvedFromAIModel(ctx context.Context, m AIModel, bindingKey s
 		APIKey:            apiKey,
 		QuotaDay:          m.QuotaDay,
 		CustomHTTPHeaders: m.GetCustomHTTPHeaders(),
-		MaxOutputTokens:   m.MaxOutputTokens,
 	}, nil
 }
 

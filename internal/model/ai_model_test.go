@@ -19,29 +19,6 @@ import (
 	"aigate/internal/model"
 )
 
-func TestOutputTokenCeiling(t *testing.T) {
-	cases := []struct {
-		name                       string
-		modelLimit, keyLimit, want int
-	}{
-		{"both unset", 0, 0, 0},
-		{"only model", 1000, 0, 1000},
-		{"only key", 0, 2000, 2000},
-		{"model stricter", 1000, 2000, 1000},
-		{"key stricter", 3000, 2000, 2000},
-		{"equal", 2000, 2000, 2000},
-		// 负数视作未配置：与「未指定」同义，不能当成 0 上限把请求压到 0。
-		{"negative treated as unset", -1, 2000, 2000},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := model.OutputTokenCeiling(c.modelLimit, c.keyLimit); got != c.want {
-				t.Fatalf("OutputTokenCeiling(%d, %d) = %d, want %d", c.modelLimit, c.keyLimit, got, c.want)
-			}
-		})
-	}
-}
-
 func TestJoinEffortLevels(t *testing.T) {
 	cases := []struct {
 		name string

@@ -85,7 +85,7 @@ Tencent Cloud AIGate 是自托管的 LLM API 网关：**纯 API 服务**（无�
 |------|------|------|------|
 | `model` | string | 否 | 目标模型。存在且非空时必须命中该密钥绑定的模型（见解析规则）；缺失或为空串时使用绑定的 `primary`。 |
 | `stream` | bool | 否 | 为 `true` 时走 SSE 流式。 |
-| `max_tokens` | integer | 否 | 被截断至输出上限（模型级与密钥级取较小者，见 §3.10「输出上限」）。 |
+| `max_tokens` | integer | 否 | 当密钥 `max_tokens` 上限 `> 0` 时被截断至该上限。 |
 | `max_completion_tokens` | integer | 否 | 同样受上限截断。 |
 | 其他任意字段 | — | 否 | 原样转发。 |
 
@@ -94,7 +94,7 @@ Tencent Cloud AIGate 是自托管的 LLM API 网关：**纯 API 服务**（无�
 | 改写 | 规则 |
 |------|------|
 | 模型名替换 | body 中的 `model` 被替换为解析命中的上游 `model_id`（保留原始大小写）。客户端原值绝不原样转发。 |
-| `max_tokens` 上限 | 上限为 `min(model.max_output_tokens, key.max_tokens)`，忽略未配置（`<= 0`）的一侧，仅在结果 `> 0` 时生效。若存在 `max_tokens` 与 `max_completion_tokens` 则一并封顶；若**两者都不存在**，则按上限注入 `max_tokens`。两侧都未配置时 body 不做改动。 |
+| `max_tokens` 上限 | 仅在密钥 `max_tokens > 0` 时生效。若存在 `max_tokens` 与 `max_completion_tokens` 则一并封顶；若**两者都不存在**，则按上限注入 `max_tokens`。上限 `<= 0` 时 body 不做改动。模型级 `max_output_tokens` 是能力声明，从不压制请求。 |
 | 参数归一化 | 对 OpenAI 类型上游，GPT-5+ 与 o 系列模型使用 `max_completion_tokens` 而非 `max_tokens`（其余模型相反）。 |
 | 流式 | `stream: true` 时，OpenAI 类型上游还会收到 `stream: true` 与 `stream_options.include_usage: true`。 |
 | 自定义请求头 | 见下文「自定义请求头透传」。 |
@@ -196,7 +196,7 @@ Anthropic 错误信封。
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `model` | string | **是** | 必须非空。解析规则与 `/v1/chat/completions` 完全一致。 |
-| `max_tokens` | integer | **是** | 必须为整数且 `> 0`。被截断至输出上限（模型级与密钥级取较小者）。 |
+| `max_tokens` | integer | **是** | 必须为整数且 `> 0`。当密钥 `max_tokens` 上限 `> 0` 时被截断至该上限。 |
 | `stream` | bool | 否 | 为 `true` 时走 Anthropic SSE 流式。 |
 | `messages` / `system` / `tools` / `tool_choice` / `thinking` / `stop_sequences` | — | 否 | 见下方两条上游路径。 |
 | 其他任意字段 | — | 否 | 直通路径保留；转换路径按可映射范围转发。 |
@@ -285,8 +285,16 @@ curl http://127.0.0.1:8080/v1/messages \
 | `data[].object` | string | 恒为 `"model"`。 |
 | `data[].created` | integer | 请求时刻的 Unix 秒（非存储时间戳）。 |
 | `data[].owned_by` | string | 模型的 `provider`。 |
+| `data[].context_window` | integer \| null | 上下文窗口 token 数，供下游 Agent 估算提示预算；未配置时为 `null`。 |
+| `data[].max_output_tokens` | integer \| null | 模型单次最多能产出的 token 数；未配置时为 `null`。不要与密钥级 `max_tokens`（网关侧上限）混淆。 |
+| `data[].supports_image` | bool | 是否支持图片输入；未配置时为 `false`。 |
+| `data[].effort_levels` | string[] \| null | 支持的 `reasoning_effort` 取值，升序（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）；未配置时为 `null`。 |
 
 只返回**启用**的绑定模型，按小写 `model_id` 去重。
+
+这四个能力字段是**纯声明**：在管理面配置，原样下发，供下游 Agent 自行决定请求规模。
+网关不据此做任何强制——不会因提示过长、含图片或 `reasoning_effort` 不在列表里而拒绝请求；
+输出长度仍只由密钥级 `max_tokens` 限制。
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
@@ -297,7 +305,16 @@ curl http://127.0.0.1:8080/v1/models \
 {
   "object": "list",
   "data": [
-    {"id": "glm-5.1", "object": "model", "created": 1730000000, "owned_by": "zhipu"}
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "created": 1730000000,
+      "owned_by": "zhipu",
+      "context_window": 200000,
+      "max_output_tokens": 128000,
+      "supports_image": true,
+      "effort_levels": ["low", "medium", "high"]
+    }
   ]
 }
 ```
@@ -353,7 +370,7 @@ completions 转换。支持流式与非流式、文本、图片与函数工具�
 | `input` | string \| array | **是** | 字符串，或 input item 数组。转换路径上若无法产出任何 chat 消息则 `400 invalid input`。 |
 | `instructions` | string | 否 | 系统提示。转换路径映射为 system 消息；**不写入**会话历史快照（避免续接时重复注入）。 |
 | `stream` | bool | 否 | 为 `true` 时走 SSE 流式。 |
-| `max_output_tokens` | integer | 否 | 被截断至输出上限（模型级与密钥级取较小者）。 |
+| `max_output_tokens` | integer | 否 | 当密钥 `max_tokens` 上限 `> 0` 时被截断至该上限。 |
 | `tools` | array | 否 | Responses 扁平工具数组；非数组返回 `400 invalid tools`。 |
 | `tool_choice` / `text` / 其他任意字段 | — | 否 | 直通路径原样转发；转换路径按可映射范围转发。 |
 | `store` | bool | 否 | **缺省 `true`**（即缺省落库，见上方警示一）。非布尔值返回 `400 invalid store`。 |
@@ -722,10 +739,10 @@ OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `
 | `currency` | string | 计价币种（ISO 4217）。`""` 表示未配置，该模型不参与金额记账（见 §3.10「计费与金额」）。 |
 | `enable_peak_pricing` | bool | 峰谷定价开关（默认 `false`）。关闭时请求**恒定按空闲价三列**计价。 |
 | `use_upstream_cost` | bool | 是否优先采信上游自报的 `usage.cost`（默认 `true`）。开启且上游自报 `cost > 0` 时直接采用，不再按价目自算。 |
-| `context_window` | integer | 上下文窗口 token 数；`0` 表示未配置。仅作能力声明与展示，不据此拒绝请求。 |
-| `max_output_tokens` | integer | 模型级输出上限；`0` 表示未配置。生效时与密钥级 `max_tokens` 取**较小者**（见 §3.10「输出上限」）。 |
-| `supports_image` | bool | 是否支持图片输入。仅作能力声明与展示，暂不拦截含图请求。 |
-| `effort_levels` | string[] | 支持的 `reasoning_effort` 等级，按阶梯升序归一化（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）；`[]` 表示未配置。仅作能力声明与展示。 |
+| `context_window` | integer | 上下文窗口 token 数；`0` 表示未配置。纯能力声明，经 `GET /v1/models` 下发。 |
+| `max_output_tokens` | integer | 模型单次最多能产出的 token 数；`0` 表示未配置。纯能力声明，经 `GET /v1/models` 下发，**不参与任何强制逻辑**（输出上限只由密钥级 `max_tokens` 决定）。 |
+| `supports_image` | bool | 是否支持图片输入。纯能力声明，不拦截含图请求。 |
+| `effort_levels` | string[] | 支持的 `reasoning_effort` 等级，按阶梯升序归一化（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）；`[]` 表示未配置。纯能力声明，不按等级校验请求。 |
 | `current_price` | object \| null | 当前生效的价目快照（`effective_at` 不晚于当前时刻的最新一条）；无价目时为 `null`。形状同价目行（见 §3.10）。 |
 | `created_at` / `updated_at` | string | RFC 3339 时间戳。 |
 
@@ -1676,13 +1693,6 @@ API 里所有金额都是**整数微元**（字段后缀 `_micros`），1 微元
 用量行不冗余币种：`cost_vendor_micros` 的币种要去 `ai_models.currency` 取。这也是为什么
 汇总行的 `currency` 只描述 `cost_platform_micros`（以及 `group_by=model` 时的模型币种金额），
 以及为什么 `cost_vendor_micros` 在 `group_by=model` 之外恒为 `0`。
-
-#### 输出上限
-
-一次请求的输出上限是 `min(model.max_output_tokens, key.max_tokens)`，任一侧 `<= 0` 视为
-未配置并忽略；两侧都未配置时不设上限。模型侧声明上游模型能产出多少，密钥侧是运维的
-安全闸——用 `min` 合并意味着任何一侧都无法放松另一侧。上限作用于 `max_tokens` /
-`max_completion_tokens`（chat）与 `max_output_tokens`（Responses），客户端未给该字段时按上限注入。
 
 #### 价目快照与六列原始价
 

@@ -77,14 +77,15 @@ type AIModel struct {
 	EnablePeakPricing bool `gorm:"not null;default:false"`
 	// UseUpstreamCost 是否优先采信上游自报的 usage.cost（>0 时直接采信，不再自算）。
 	UseUpstreamCost bool `gorm:"not null;default:true"`
-	// ContextWindow 上下文窗口 token 数；0 表示未配置（仅展示，不参与转发判定）。
+	// ContextWindow 上下文窗口 token 数；0 表示未配置。纯能力声明，不参与转发判定。
 	ContextWindow int `gorm:"not null;default:0"`
-	// MaxOutputTokens 模型级输出上限：>0 时与密钥级 api_keys.max_tokens 取较小者压制请求的
-	// max_tokens / max_output_tokens，并作为未指定时的默认值下发；0 表示未配置（只剩密钥级）。
+	// MaxOutputTokens 模型单次最多能产出多少 token；0 表示未配置。
+	// 纯能力声明：经 /v1/models 告知调用方，不参与网关的任何强制逻辑（输出上限只由密钥级决定）。
 	MaxOutputTokens int `gorm:"not null;default:0"`
-	// SupportsImage 是否支持图片输入；仅作能力声明用于展示，当前不拦截含图请求。
+	// SupportsImage 是否支持图片输入；纯能力声明，不拦截含图请求。
 	SupportsImage bool `gorm:"not null;default:false"`
 	// EffortLevels 支持的 reasoning_effort 等级，逗号分隔（如 "low,medium,high"）；空串表示未配置。
+	// 纯能力声明，不按等级校验请求。
 	EffortLevels string    `gorm:"size:128;not null;default:''"`
 	CreatedAt    time.Time `gorm:"not null"`
 	UpdatedAt    time.Time `gorm:"not null"`
@@ -293,19 +294,4 @@ func SplitEffortLevels(stored string) []string {
 		}
 	}
 	return out
-}
-
-// OutputTokenCeiling 返回模型级与密钥级输出上限的较小者；两者都未配置（<=0）时返回 0。
-// 密钥级是安全闸，模型级是对上游声明的能力边界，任何一方生效都只能收紧。
-func OutputTokenCeiling(modelLimit, keyLimit int) int {
-	switch {
-	case modelLimit <= 0:
-		return keyLimit
-	case keyLimit <= 0:
-		return modelLimit
-	case modelLimit < keyLimit:
-		return modelLimit
-	default:
-		return keyLimit
-	}
 }

@@ -654,6 +654,7 @@ function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => vo
 
         <div className="space-y-2 rounded-lg border border-slate-200 p-3">
           <div className="text-sm font-medium text-slate-700">{t("model.capabilities")}</div>
+          <p className="text-xs text-slate-500">{t("model.capabilitiesHint")}</p>
           <Field label={t("model.contextWindow")} hint={t("model.contextWindowHint")}>
             <Input
               type="number"

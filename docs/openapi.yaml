@@ -2692,7 +2692,27 @@ components:
               owned_by:
                 type: string
                 description: 模型的 `provider`
-            required: [id, object, created, owned_by]
+              context_window:
+                type: integer
+                nullable: true
+                description: 上下文窗口 token 数；未配置时为 `null`。纯能力声明，网关不据此拒绝请求。
+              max_output_tokens:
+                type: integer
+                nullable: true
+                description: |
+                  模型单次最多能产出的 token 数；未配置时为 `null`。
+                  纯能力声明，不压制请求——输出长度只由密钥级 `max_tokens` 限制。
+              supports_image:
+                type: boolean
+                description: 是否支持图片输入；未配置时为 `false`。纯能力声明，不拦截含图请求。
+              effort_levels:
+                type: array
+                nullable: true
+                items:
+                  type: string
+                  enum: [none, minimal, low, medium, high, xhigh, max]
+                description: 支持的 `reasoning_effort` 取值（升序）；未配置时为 `null`。纯能力声明。
+            required: [id, object, created, owned_by, supports_image]
       required: [object, data]
 
     AnthropicMessagesRequest:
@@ -3018,8 +3038,8 @@ components:
         max_output_tokens:
           type: integer
           description: |
-            模型级输出上限；`0` 表示未配置。与密钥级 `max_tokens` 取较小者作为本次请求的
-            输出上限，两者都未配置时不设上限。
+            模型单次最多能产出的 token 数；`0` 表示未配置。纯能力声明，经 `GET /v1/models`
+            下发给下游 Agent，**不参与任何强制逻辑**（输出上限只由密钥级 `max_tokens` 决定）。
         supports_image:
           type: boolean
           description: 是否支持图片输入；仅作能力声明与展示，暂不拦截含图请求。
@@ -3159,7 +3179,7 @@ components:
         max_output_tokens:
           type: integer
           minimum: 0
-          description: 置 `0` 清除模型级上限（密钥级上限仍然生效）。
+          description: 置 `0` 清除该能力声明。
         supports_image:
           type: boolean
         effort_levels:

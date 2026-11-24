@@ -208,17 +208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Model capability fields** — `ai_models` gains `context_window`,
-  `max_output_tokens`, `supports_image` and `effort_levels` (plus the matching
-  fields on `POST`/`PUT /admin/models` and in the model response). The model edit
-  drawer in the WebUI now edits these instead of the pricing switches.
-  `max_output_tokens` is enforced: the output ceiling of a request is
-  `min(model.max_output_tokens, key.max_tokens)` (an unset `<= 0` side is
-  ignored), applied to `max_tokens` / `max_completion_tokens` and
-  `max_output_tokens` and injected when the client omits it — a model-level
-  ceiling can therefore only tighten the existing key-level brake, never loosen
-  it. `context_window`, `supports_image` and `effort_levels` are declared
-  capabilities shown to operators only; no request is rejected on them yet.
+- **Model capability declarations** — `ai_models` gains `context_window`,
+  `max_output_tokens`, `supports_image` and `effort_levels` (also on
+  `POST`/`PUT /admin/models` and in the model response), and `GET /v1/models`
+  now includes all four per entry so a downstream agent can size its own
+  requests: `context_window` and `max_output_tokens` as integers (or `null` when
+  unconfigured), `supports_image` as a boolean, `effort_levels` as an ascending
+  array (or `null`). They are **declarations only** — the gateway performs no
+  logic on them: long prompts, image input and an unlisted `reasoning_effort`
+  are all forwarded unchanged, and output length is still capped solely by the
+  key's `max_tokens`. The model edit drawer in the WebUI edits them.
   `effort_levels` is validated (known levels, no duplicates) and stored in
   ascending ladder order. Upgrade path: `sql/20261124-model-capabilities.sql`.
 

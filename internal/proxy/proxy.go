@@ -238,7 +238,7 @@ func (h *Handler) prepareForward(
 	}
 
 	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
-	enforceMaxTokens(reqBody, res.OutputCeiling(key))
+	enforceMaxTokens(reqBody, key.MaxTokens)
 	reqBody["model"] = res.ModelID
 	modifiedBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -377,6 +377,39 @@ func (h *Handler) checkQuota(
 	return true
 }
 
+// modelEntry 组装 /v1/models 里的一个模型项。
+//
+// 除 OpenAI 的标准字段（id/object/created/owned_by）外，额外下发四个能力声明：
+// context_window、max_output_tokens、supports_image、effort_levels。它们只供下游 Agent
+// 判断「这个模型能装多少、能不能收图、有哪些 effort 可选」，网关自身不据此做任何逻辑
+// 处理（未配置时分别下发 null / false / null，语义是「未声明」，区别于 0 / 空数组）。
+func modelEntry(id string, created int64, m model.BindingInfo) map[string]any {
+	entry := map[string]any{
+		"id":       id,
+		"object":   "model",
+		"created":  created,
+		"owned_by": m.Provider,
+	}
+	if m.ContextWindow > 0 {
+		entry["context_window"] = m.ContextWindow
+	} else {
+		entry["context_window"] = nil
+	}
+	if m.MaxOutputTokens > 0 {
+		entry["max_output_tokens"] = m.MaxOutputTokens
+	} else {
+		entry["max_output_tokens"] = nil
+	}
+	entry["supports_image"] = m.SupportsImage
+	if levels := model.SplitEffortLevels(m.EffortLevels); len(levels) > 0 {
+		entry["effort_levels"] = levels
+	} else {
+		entry["effort_levels"] = nil
+	}
+	return entry
+}
+
+// handleModels 列出该密钥可用的模型。
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	key := h.authKey(w, r)
 	if key == nil {
@@ -414,12 +447,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[id] = struct{}{}
-		data = append(data, map[string]any{
-			"id":       id,
-			"object":   "model",
-			"created":  created,
-			"owned_by": m.Provider,
-		})
+		data = append(data, modelEntry(id, created, m))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
