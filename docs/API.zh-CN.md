@@ -1782,6 +1782,47 @@ curl -X POST http://127.0.0.1:8080/admin/currency-rates \
 `unit` 恒出现（`token` 或 `cost`；没写 `unit` 的规则报 `token`）。`currency` 只在金额
 规则下出现，为平台结算币种。`/v1/messages` 仍是 Anthropic 信封，不带这两个键。
 
+### 3.11 模型路由
+
+一条**模型路由**就是一条规则：名称、**策略**、策略私有的 `config` JSON、**作用域**
+（含作用域 ID）、**优先级**与启用开关。只有请求 `model: "auto"` 的调用会走路由；
+指名真实模型的请求完全不受影响。
+
+**哪条规则生效。** 作用域越具体越优先——`key` > `user` > `group` > `global`；
+同一作用域内 `priority` 数字小者优先，重复的 `(scope, scope_id, priority)` 在写入时就
+被拒绝，不会变成运行期的随机命中。未分组的密钥（`group_id = 0`）不匹配任何 `group`
+规则。没有任何规则适用时，`auto` 返回 `400 model auto is not available`。
+
+**策略是可插拔的。** `GET /admin/model-routers/strategies` 下发每种策略的配置字段，
+客户端据此渲染表单，不需要硬编码任何策略。字段含 `key`、`type`
+（`string` | `int` | `bool` | `enum` | `model`）、`title`、`description`、`default`、
+`enum`、`min`、`max`、`required`。
+
+| 路由 | 说明 |
+|------|------|
+| `GET /admin/model-routers` | 按匹配顺序列出规则：`{"routers": [...]}`。 |
+| `GET /admin/model-routers/strategies` | 可用策略及其配置字段：`{"strategies": [...]}`；数据面未装配时返回 `503`。 |
+| `POST /admin/model-routers` | 新建：`{"name", "strategy", "config", "scope", "scope_id", "priority", "enabled"}` → `201`。`enabled` 缺省为 `true`；`config` 可为对象或它的 JSON 字符串。 |
+| `GET /admin/model-routers/{id}` | 读取单条规则。 |
+| `PUT /admin/model-routers/{id}` | 局部更新；未提供的字段保持不变。仅改 `enabled` 不会扰动作用域与优先级。 |
+| `DELETE /admin/model-routers/{id}` | 删除：`204`。由它路由的请求回退到各自密钥的主模型。 |
+| `POST /admin/model-routers/{id}/preview` | 用一个真实密钥跑一次本规则的策略判断，不向上游发请求：`{"api_key_id", "request": {...}}` → `{"router_id", "strategy", "ai_model_id", "model_id", "cause", "fallback"}`。 |
+
+**校验。** 结构性校验（名称与策略必填、作用域合法、非全局作用域必须给 scope id、
+同作用域优先级唯一）在管理面完成；配置本身由策略的校验器检查（必填项、未知字段、
+取值范围）。两者都通过才落库，因此配错的规则是 `400`，而不是运行期的意外。写入时
+策略会规范化 `config`，落库的 JSON 自解释。
+
+**策略。** `decision`：用一个决策协议模型判断候选里哪个最便宜且仍能胜任。其配置项为
+`decision_model_id`（必填，须是 `model_type` 为决策协议的 `ai_models` id）、
+`max_candidates`、`max_short_tokens`、`max_context_tokens`、`max_chars`、
+`timeout_ms`、`cooldown_seconds`、`short_circuit_enabled`。
+
+**计费与可观测性。** 决策调用以 `count_toward_quota = 0` 记入用量明细：成本可见，
+但不消耗用户配额。`llm_usage_logs.router_id` 记录承接该请求的规则；实际路由到的模型
+与命中的规则分别通过 `X-AIGate-Routed-Model` 与 `X-AIGate-Router-Id` 响应头返回。
+响应体仍按客户端所问回显 `"auto"`。
+
 ## 4. 用户面
 
 前缀 `/api/user/*`。任意启用用户 token（`user` 或 `admin`）均可访问。`user` 角色 token

@@ -1772,6 +1772,52 @@ the measurement:
 `currency` is present only for `cost` rules and is the platform settlement currency. On
 `/v1/messages` the envelope stays Anthropic-shaped and carries no extra keys.
 
+### 3.11 Model routing
+
+A **model router** is one routing rule: a name, a **strategy**, strategy-private
+`config` JSON, a **scope** plus scope id, a **priority**, and an enabled flag. Only
+requests naming `model: "auto"` are routed; a request naming a real model is never
+touched.
+
+**Which rule applies.** The most specific scope wins — `key` > `user` > `group` >
+`global`; within one scope the lowest `priority` wins and duplicates are rejected at
+write time. An ungrouped key (`group_id = 0`) never matches a `group` rule. If no rule
+applies, `auto` returns `400 model auto is not available`.
+
+**Strategies are pluggable.** `GET /admin/model-routers/strategies` publishes each
+strategy's config field list so a client can render a form without hardcoding any
+strategy. Fields carry `key`, `type` (`string` | `int` | `bool` | `enum` | `model`),
+`title`, `description`, `default`, `enum`, `min`, `max` and `required`.
+
+| Route | Purpose |
+|-------|---------|
+| `GET /admin/model-routers` | List rules in match order: `{"routers": [...]}`. |
+| `GET /admin/model-routers/strategies` | Available strategies and their config fields: `{"strategies": [...]}`. `503` when the data plane is not wired. |
+| `POST /admin/model-routers` | Create: `{"name", "strategy", "config", "scope", "scope_id", "priority", "enabled"}` → `201`. `enabled` defaults to `true`. `config` may be an object or its JSON string. |
+| `GET /admin/model-routers/{id}` | One rule. |
+| `PUT /admin/model-routers/{id}` | Partial update; `null`/absent fields are unchanged. Updating `enabled` alone does not disturb scope or priority. |
+| `DELETE /admin/model-routers/{id}` | Delete: `204`. Requests it routed fall back to their key's primary model. |
+| `POST /admin/model-routers/{id}/preview` | Run this rule's strategy for a real key without sending anything upstream: `{"api_key_id", "request": {...}}` → `{"router_id", "strategy", "ai_model_id", "model_id", "cause", "fallback"}`. |
+
+**Validation.** Structural checks (name and strategy present, legal scope, scope id
+required for non-global scopes, unique `(scope, scope_id, priority)`) happen in the
+admin plane; the strategy's own validator checks the config (required fields, unknown
+fields, ranges). Both run before the row is written, so a misconfigured rule is a `400`
+rather than a runtime surprise. `config` is normalized by the strategy on write, so the
+stored JSON is self-describing.
+
+**Strategies.** `decision` asks a decision-protocol model which bound candidate is the
+cheapest that can still handle the request. Its config: `decision_model_id` (required,
+an `ai_models` id whose `model_type` is a decision protocol), `max_candidates`,
+`max_short_tokens`, `max_context_tokens`, `max_chars`, `timeout_ms`,
+`cooldown_seconds`, `short_circuit_enabled`.
+
+**Billing and observability.** The decision call is recorded in usage detail with
+`count_toward_quota = 0`: its cost is visible but it does not consume the user's quota.
+`llm_usage_logs.router_id` records which rule served a request, and the routed model and
+rule are returned in the `X-AIGate-Routed-Model` and `X-AIGate-Router-Id` response
+headers. The response body still echoes `"auto"` as asked.
+
 ## 4. User plane
 
 Prefix `/api/user/*`. Any enabled user token (`user` or `admin`) may authenticate. A `user`-role token is forced to act on its own data (its `user_id` is ignored); an `admin`-role token may target another user with `?user_id=`.

@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`auto` pseudo-model (cost-aware routing)** — `GET /v1/models` now lists an `auto`
+  entry (owned_by `aigate`) when enabled, and `model: "auto"` on
+  `/v1/chat/completions`, `/v1/messages` and `/v1/responses` is routed to the cheapest
+  bound model that can handle the request. Candidates are the key's own bindings, using
+  the same resolvability filter as `/v1/models` (a `user_key_required` binding with no
+  key is excluded, so a routed request never fails for a reason the caller did not
+  cause); decision-protocol models are always excluded. Short, single-turn requests that
+  hit a local "this is simple" signal skip the classifier and take the cheapest priced
+  candidate; everything else asks the configured decision model (a `choice` question
+  built from the candidate list, described only by *relative* price tier, never absolute
+  numbers). Every failure — no decision model, timeout, non-200, an unknown or
+  out-of-pool choice — falls back to the key's primary model, so `auto` never turns a
+  normal request into an error. A process-local circuit breaker (30s default cooldown)
+  stops repeated timeouts. The response body still echoes `auto`; the model actually used
+  is reported in the `X-AIGate-Routed-Model` header. If a key binds a real model named
+  `auto`, that explicit binding wins over the pseudo-model. **Billing**: the decision
+  call is recorded in usage detail but does *not* count toward quota — a new
+  `llm_usage_logs.count_toward_quota` column (default `1`) excludes such rows from the
+  global/user/key/group token sums and the cost sum, and the daily rollup is skipped for
+  them, so `quota_day` is unaffected too. Existing rows default to `1`, so upgrading
+  changes no current behavior. MySQL deployments need
+  `sql/20261124-auto-routing.sql`.
+
+- **Model routers (configurable routing rules)** — routing is now a first-class
+  resource rather than a single site-wide switch. A new `model_routers` table holds one
+  row per rule: a name, a **strategy**, strategy-private `config` JSON, a **scope**
+  (`global` / `group` / `user` / `key`) plus scope id, a `priority`, and an enabled
+  flag. Adding a strategy needs no schema change, no data-plane change and no page
+  change: it is one Go type implementing the `Strategy` interface (`Name`, `Describe`,
+  `ValidateConfig`, `Select`) registered in an `init`, and the admin API publishes each
+  strategy's field list so the console renders its form from the server's descriptor.
+  `decision` (the previous `auto` behavior) is the first strategy. A request is matched
+  to exactly one rule: the most specific scope wins (`key` > `user` > `group` >
+  `global`), and within one scope the lowest `priority` wins; duplicate
+  `(scope, scope_id, priority)` is rejected at write time rather than resolving
+  randomly at run time. Only requests naming `model: "auto"` are routed — a request
+  naming a real model is untouched. The circuit breaker is per router, so one dead
+  decision model does not stop the others. `llm_usage_logs` gains `router_id` so usage
+  can be aggregated per rule, and the routed model and matched rule are returned in the
+  `X-AIGate-Routed-Model` and `X-AIGate-Router-Id` response headers. Upgrading migrates
+  an existing `settings.auto_router_*` configuration into one `global` `decision` rule
+  named `auto` (only when it was enabled), so behavior is unchanged after the upgrade;
+  the old settings columns are kept for one release as a rollback path and are no
+  longer read. MySQL deployments need `sql/20261124-auto-routing.sql`.
+
+- **Model routing admin API and console page** — seven admin endpoints manage rules:
+  list, create, read, update, delete, plus `GET /admin/model-routers/strategies` and
+  `POST /admin/model-routers/{id}/preview`. The strategies endpoint publishes each
+  strategy's config field list (`string`/`int`/`bool`/`enum`/`model`, with defaults,
+  ranges and required flags) so a client renders a strategy's form without hardcoding
+  it; the preview endpoint runs a rule's strategy for a real key and reports the model
+  and cause it would pick without sending anything upstream — including the case where
+  it would fall back to the key's primary model. Structural validation (name, strategy,
+  legal scope, scope id, unique priority) lives in the admin plane and config validation
+  is delegated to the strategy, so a misconfigured rule is a `400` rather than a runtime
+  surprise; the strategy normalizes `config` on write. The console gains a **Model
+  routing** page (`/ui/model-routers`) with a rules table, an edit drawer whose strategy
+  fields come from the server, and a preview panel. `aigatectl routers` is still to
+  come.
+
 - **Gemini upstream protocol** — `ai_models.model_type` gains `gemini-generate-content`,
   so a model can be backed by the Google Generative Language API
   (`https://generativelanguage.googleapis.com/v1beta`). All three chat ingresses reach it,

@@ -146,6 +146,13 @@ There is no `GET /admin/users/{id}`, so no `users get` command exists.
 | 60 | `self keys usage` | `GET /api/user/keys/{id}/usage` → GET `/api/user/keys/{id}/usage` | `aigatectl self keys usage --id 1` |
 | 61 | `health` | `GET /healthz` → GET `/healthz` | `aigatectl health` |
 | 62 | `build-info` | `GET /version` → GET `/version` | `aigatectl build-info` |
+| 63 | `routers list` | `GET /admin/model-routers` → GET `/admin/model-routers` | `aigatectl routers list` |
+| 64 | `routers strategies` | `GET /admin/model-routers/strategies` → GET `/admin/model-routers/strategies` | `aigatectl routers strategies` |
+| 65 | `routers get` | `GET /admin/model-routers/{id}` → GET `/admin/model-routers/{id}` | `aigatectl routers get --id 1` |
+| 66 | `routers create` | `POST /admin/model-routers` → POST `/admin/model-routers` | `aigatectl routers create --data @router.json` |
+| 67 | `routers update` | `PUT /admin/model-routers/{id}` → PUT `/admin/model-routers/{id}` | `aigatectl routers update --id 1 --data @router.json` |
+| 68 | `routers delete` | `DELETE /admin/model-routers/{id}` → DELETE `/admin/model-routers/{id}` | `aigatectl routers delete --id 1` |
+| 69 | `routers preview` | `POST /admin/model-routers/{id}/preview` → POST `/admin/model-routers/{id}/preview` | `aigatectl routers preview --id 1 --data @preview.json` |
 
 `health` is a single-token command (`aigatectl health`) and needs no credentials; every
 other command uses two tokens `<resource> <command>` (three for `self` subgroups). The

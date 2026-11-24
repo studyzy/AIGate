@@ -769,6 +769,148 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/model-routers:
+    get:
+      tags: [admin]
+      summary: 列出模型路由规则（按匹配顺序）
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 规则列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routers:
+                    type: array
+                    items: { $ref: '#/components/schemas/ModelRouter' }
+    post:
+      tags: [admin]
+      summary: 新建模型路由规则
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelRouterInput' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelRouter' }
+        '400':
+          description: 校验失败（缺字段、非法作用域、未知策略、配置非法、优先级冲突）
+  /admin/model-routers/strategies:
+    get:
+      tags: [admin]
+      summary: 可用策略及其配置字段
+      description: |
+        下发每种策略的配置字段，供客户端渲染表单（不必硬编码策略）。
+        数据面未装配策略能力时返回 503。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 策略列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  strategies:
+                    type: array
+                    items: { $ref: '#/components/schemas/RouterStrategy' }
+        '503':
+          description: 策略能力未装配
+  /admin/model-routers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      tags: [admin]
+      summary: 读取单条模型路由规则
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 规则
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelRouter' }
+        '404':
+          description: 不存在
+    put:
+      tags: [admin]
+      summary: 更新模型路由规则（局部更新）
+      description: 未提供的字段保持不变；仅改 enabled 不会扰动作用域与优先级。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelRouterInput' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelRouter' }
+        '400':
+          description: 校验失败
+        '404':
+          description: 不存在
+    delete:
+      tags: [admin]
+      summary: 删除模型路由规则
+      description: 由它路由的请求将回退到各自密钥的主模型。
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          description: 不存在
+  /admin/model-routers/{id}/preview:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    post:
+      tags: [admin]
+      summary: 预览一条规则的路由结果
+      description: 用一个真实密钥跑一次该规则的策略判断，不向上游发送请求。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key_id]
+              properties:
+                api_key_id: { type: integer, minimum: 1 }
+                request:
+                  type: object
+                  description: 一段请求体（通常含 messages），用于判断请求形态
+      responses:
+        '200':
+          description: 预览结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RouterPreview' }
+        '400':
+          description: 参数非法或规则/密钥不存在
+        '503':
+          description: 预览能力未装配
   /admin/billing-calendar:
     get:
       tags: [admin]
@@ -3928,6 +4070,92 @@ components:
             $ref: '#/components/schemas/BillingCalendarDay'
       required: [days]
 
+    ModelRouter:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        strategy:
+          type: string
+          description: 策略名（落库字面量）；当前为 decision
+        config:
+          type: string
+          description: 策略私有配置的 JSON 字符串；形状由策略决定（见 RouterStrategy.fields）
+        scope:
+          type: string
+          enum: [global, group, user, key]
+          description: 作用域；越具体越优先（key > user > group > global）
+        scope_id:
+          type: integer
+          description: 作用域实体 id；global 恒为 0
+        priority:
+          type: integer
+          description: 同作用域内数字小者优先；同一 (scope, scope_id, priority) 不得重复
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ModelRouterInput:
+      type: object
+      required: [name, strategy, config, scope, scope_id, priority]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        strategy: { type: string }
+        config:
+          type: string
+          description: 策略配置 JSON 字符串；写入时由策略校验并规范化
+        scope:
+          type: string
+          enum: [global, group, user, key]
+        scope_id:
+          type: integer
+          description: 非 global 作用域必须 > 0；global 忽略并按 0 落库
+        priority: { type: integer }
+        enabled:
+          type: boolean
+          description: 缺省为 true
+    RouterStrategy:
+      type: object
+      properties:
+        name: { type: string }
+        title: { type: string }
+        description: { type: string }
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              type:
+                type: string
+                enum: [string, int, bool, enum, model]
+              title: { type: string }
+              description: { type: string }
+              default: {}
+              enum:
+                type: array
+                items: { type: string }
+              min: { type: integer }
+              max: { type: integer }
+              required: { type: boolean }
+    RouterPreview:
+      type: object
+      properties:
+        router_id: { type: integer }
+        strategy: { type: string }
+        ai_model_id: { type: integer }
+        model_id: { type: string }
+        model_name: { type: string }
+        cause:
+          type: string
+          description: 判定原因（single_candidate / short_circuit / llm_classifier / fallback_primary）
+        detail:
+          type: object
+          additionalProperties: true
+        fallback:
+          type: boolean
+          description: true 表示策略未能决定，预览的是「回退到 primary」这一结果
     CurrencyRate:
       type: object
       description: |
