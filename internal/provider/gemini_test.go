@@ -145,15 +145,51 @@ func TestGeminiProvider_RejectsInvalidRequest(t *testing.T) {
 }
 
 // 流内出现 {"error":{...}} 必须返回错误，不能当空帧吞掉（Review Focus #5）。
+// 状态码必须非 0，否则 proxy 不会记账，上游已产生的 token 就被漏掉了。
 func TestGeminiProvider_StreamInStreamError(t *testing.T) {
 	srv, _ := startGeminiUpstream(t, http.StatusOK,
 		"data: {\"error\":{\"code\":429,\"message\":\"RESOURCE_EXHAUSTED\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n")
 	p := &provider.GeminiProvider{}
 	rec := httptest.NewRecorder()
-	_, _, err := p.ChatCompletionStream(context.Background(), "sk", srv.URL+"/v1beta",
+	_, status, err := p.ChatCompletionStream(context.Background(), "sk", srv.URL+"/v1beta",
 		"gemini-2.5-flash", []byte(`{"messages":[{"role":"user","content":"hi"}]}`), rec, rec, nil)
 	if err == nil {
 		t.Fatalf("流内 error 帧应返回错误")
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429（必须带状态码，否则 proxy 不记账）", status)
+	}
+}
+
+// 错误帧不带 code 时回落 502，而不是 0。
+func TestGeminiProvider_StreamInStreamErrorWithoutCode(t *testing.T) {
+	srv, _ := startGeminiUpstream(t, http.StatusOK,
+		"data: {\"error\":{\"message\":\"boom\"}}\n\n")
+	p := &provider.GeminiProvider{}
+	rec := httptest.NewRecorder()
+	_, status, err := p.ChatCompletionStream(context.Background(), "sk", srv.URL+"/v1beta",
+		"gemini-2.5-flash", []byte(`{"messages":[{"role":"user","content":"hi"}]}`), rec, rec, nil)
+	if err == nil {
+		t.Fatalf("流内 error 帧应返回错误")
+	}
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", status)
+	}
+}
+
+// SSE 的冒号后空格是可选语法，上游不写空格时不能把整条流都跳过。
+func TestGeminiProvider_StreamAcceptsDataWithoutSpace(t *testing.T) {
+	srv, _ := startGeminiUpstream(t, http.StatusOK,
+		"data:{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}]}\n\n")
+	p := &provider.GeminiProvider{}
+	rec := httptest.NewRecorder()
+	_, _, err := p.ChatCompletionStream(context.Background(), "sk", srv.URL+"/v1beta",
+		"gemini-2.5-flash", []byte(`{"messages":[{"role":"user","content":"hi"}]}`), rec, rec, nil)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"hi"`) {
+		t.Fatalf("data: 无空格时帧不应被丢弃，got %q", rec.Body.String())
 	}
 }
 
@@ -189,6 +225,22 @@ func TestGeminiProvider_ProbeShape(t *testing.T) {
 	gc := sent["generationConfig"].(map[string]any)
 	if gc["maxOutputTokens"] != float64(8) {
 		t.Fatalf("探测应限制输出，maxOutputTokens = %v", gc["maxOutputTokens"])
+	}
+}
+
+// 2.5 Pro 这类"总是思考"的模型可能把全部探测预算花在 thought 上：
+// 只有一个 thought part、没有可见正文，仍说明模型真的跑了，不能报成不可用。
+func TestGeminiProvider_ProbeThoughtOnlyReply(t *testing.T) {
+	srv, _ := startGeminiUpstream(t, http.StatusOK,
+		`{"candidates":[{"content":{"parts":[{"text":"let me think","thought":true}]},`+
+			`"finishReason":"MAX_TOKENS"}]}`)
+	p := &provider.GeminiProvider{}
+	_, out, err := p.CheckConnectivityWithChat(context.Background(), "sk", srv.URL+"/v1beta", "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("只有 thought part 也应算连通，got err = %v", err)
+	}
+	if out.Reply == "" {
+		t.Fatalf("探测回复不应为空")
 	}
 }
 

@@ -15,6 +15,7 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -437,5 +438,45 @@ func TestGeminiModelName(t *testing.T) {
 		if got := geminiModelName(in); got != want {
 			t.Fatalf("geminiModelName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// 畸形 n（字符串、小数）应报「请求不合法」，而不是解码失败被当成上游故障 502。
+func TestBuildGeminiRequest_MalformedNIsRequestError(t *testing.T) {
+	for _, body := range []string{
+		`{"messages":[{"role":"user","content":"x"}],"n":"2"}`,
+		`{"messages":[{"role":"user","content":"x"}],"n":2.5}`,
+		`{"messages":[{"role":"user","content":"x"}],"n":true}`,
+	} {
+		_, err := buildGeminiRequest("gemini-2.5-flash", []byte(body))
+		if err == nil {
+			t.Fatalf("body=%s 应报错", body)
+		}
+		var reqErr *geminiRequestError
+		if !errors.As(err, &reqErr) {
+			t.Fatalf("body=%s 应归为请求不合法（400），got %T = %v", body, err, err)
+		}
+	}
+}
+
+// 工具结果必须紧跟发起它的 model 轮：若其间夹了一条 user 文本，
+// functionResponse 仍要先于该文本落到上游，否则 Gemini 关联不上调用。
+func TestBuildGeminiRequest_ToolResponsePrecedesTrailingUserText(t *testing.T) {
+	got := buildGeminiRequestBody(t, "gemini-2.5-flash", `{
+		"messages":[
+			{"role":"user","content":"x"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"w","arguments":"{}"}}]},
+			{"role":"user","content":"note"},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+
+	contents := got["contents"].([]any)
+	// 期望顺序：user / model(functionCall) / user(functionResponse) / user(text)
+	if len(contents) < 3 {
+		t.Fatalf("contents = %v", contents)
+	}
+	third := contents[2].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	if _, ok := third["functionResponse"]; !ok {
+		t.Fatalf("第 3 条应是 functionResponse，got %v", contents)
 	}
 }

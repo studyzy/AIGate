@@ -43,7 +43,7 @@ func (p *GeminiProvider) prepare(model string, reqBody []byte) (body []byte, rej
 	}
 	var reqErr *geminiRequestError
 	if !errors.As(err, &reqErr) {
-		// 非请求性问题（解码失败等）：按不可用的请求头处理，交给上层 502。
+		// 兜底：其余构造期错误也按 400 回给调用方（它们同样源于请求体）。
 		return nil, &geminiRejected{
 			status: http.StatusBadRequest,
 			body:   errorBody(reqErrMessage(err), http.StatusBadRequest),
@@ -152,7 +152,7 @@ func (p *GeminiProvider) ChatCompletion(
 		return &CompletionResult{Body: respBytes}, resp.StatusCode, nil
 	}
 
-	oaiBody, usage, err := geminiToOpenAI(respBytes)
+	oaiBody, usage, err := geminiToOpenAIForModel(respBytes, model)
 	if err != nil {
 		// 上游 2xx 但响应体无法解析：原样回传给调用方，不凭空造结果。
 		return &CompletionResult{Body: respBytes}, resp.StatusCode, nil
@@ -200,7 +200,9 @@ func (p *GeminiProvider) ChatCompletionStream(
 
 	translator := newGeminiStreamTranslator(w, flusher)
 	for scanner.Scan() {
-		data, ok := strings.CutPrefix(scanner.Text(), "data: ")
+		// SSE 的冒号后空格是可选的（规范允许 data:xxx），两种都要认。
+		line := scanner.Text()
+		data, ok := strings.CutPrefix(line, "data:")
 		if !ok {
 			continue
 		}
@@ -209,7 +211,12 @@ func (p *GeminiProvider) ChatCompletionStream(
 			continue
 		}
 		if err := translator.handleFrame(data); err != nil {
-			return nil, 0, err
+			status := http.StatusBadGateway
+			var streamErr *geminiStreamError
+			if errors.As(err, &streamErr) {
+				status = streamErr.statusCode()
+			}
+			return nil, status, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -256,15 +263,24 @@ func geminiProbeReply(body []byte) (ProbeOutcome, error) {
 		return ProbeOutcome{}, errors.New("response has no text content")
 	}
 	var parts []string
+	var thoughts []string
 	for _, part := range parsed.Candidates[0].Content.Parts {
-		if part.FunctionCall != nil || part.Thought {
+		if part.FunctionCall != nil || part.Text == "" {
 			continue
 		}
-		if text := strings.TrimSpace(part.Text); text != "" {
-			parts = append(parts, text)
+		text := strings.TrimSpace(part.Text)
+		if part.Thought {
+			thoughts = append(thoughts, text)
+			continue
 		}
+		parts = append(parts, text)
 	}
 	reply := strings.TrimSpace(strings.Join(parts, " "))
+	if reply == "" {
+		// 2.5 Pro 等"总是思考"的模型可能把全部探测预算花在 thought 上：
+		// 只有思考内容也说明模型真的跑了，按可用处理（与 anthropic 探测同口径）。
+		reply = strings.TrimSpace(strings.Join(thoughts, " "))
+	}
 	if reply == "" {
 		return ProbeOutcome{}, errors.New("response has no text content")
 	}

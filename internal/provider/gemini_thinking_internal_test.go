@@ -119,3 +119,18 @@ func TestGeminiBudgetRange(t *testing.T) {
 		t.Fatalf("3.x 不应有 budget 区间")
 	}
 }
+
+// 钳制不能把预算压到模型下限之下：flash-lite 下限 512，maxOutputTokens=500
+// 钳成 499 后仍非法，应整个不发 thinkingConfig 而不是发一个上游会 400 的值。
+func TestGeminiThinkingConfig_DoesNotClampBelowModelFloor(t *testing.T) {
+	for _, effort := range []string{"minimal", "low", "medium", "high"} {
+		if cfg := geminiThinkingConfig("gemini-2.5-flash-lite", effort, 500); cfg != nil {
+			t.Fatalf("effort=%s maxOutputTokens=500：低于模型下限应不发，got %v", effort, cfg)
+		}
+	}
+	// 边界：maxOutputTokens 刚好容得下下限时仍应发出下限值。
+	cfg := geminiThinkingConfig("gemini-2.5-flash-lite", "minimal", 513)
+	if cfg == nil || cfg["thinkingBudget"] != 512 {
+		t.Fatalf("maxOutputTokens=513 应发下限 512，got %v", cfg)
+	}
+}

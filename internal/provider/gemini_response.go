@@ -125,8 +125,14 @@ func (u *geminiUsageMetadata) usage() *Usage {
 		u.ThoughtsTokenCount, u.CachedContentTokenCount, u.TotalTokenCount)
 }
 
-// geminiToOpenAI 把 Gemini 非流式响应转成 chat 形状。
+// geminiToOpenAI 把 Gemini 非流式响应转成 chat 形状（model 字段留空）。
 func geminiToOpenAI(resp []byte) ([]byte, *Usage, error) {
+	return geminiToOpenAIForModel(resp, "")
+}
+
+// geminiToOpenAIForModel 同上，并把请求命中的模型名回填到响应的 model 字段：
+// 上游的 modelVersion 与请求用的模型名不一定一致，回填请求值更符合调用方预期。
+func geminiToOpenAIForModel(resp []byte, model string) ([]byte, *Usage, error) {
 	var gr geminiResponse
 	if err := json.Unmarshal(resp, &gr); err != nil {
 		return nil, nil, richErrorf(err, "failed to decode upstream response")
@@ -156,7 +162,7 @@ func geminiToOpenAI(resp []byte) ([]byte, *Usage, error) {
 		"id":      gr.ResponseID,
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
-		"model":   "",
+		"model":   model,
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       message,

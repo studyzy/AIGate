@@ -101,8 +101,9 @@ func geminiThinkingConfig(model, effort string, maxOutputTokens int) map[string]
 	if maxOutputTokens <= 0 || budget >= maxOutputTokens {
 		budget = maxOutputTokens - 1
 	}
-	if budget < 1 {
-		// 容不下任何预算：整个 config 不发，而不是发一个非法值。
+	if budget < 1 || budget < minB {
+		// 钳制后越过了模型下限（例如 flash-lite 下限 512、maxOutputTokens=500）：
+		// 整个 config 不发，而不是发一个上游会 400 的值。
 		return nil
 	}
 	return map[string]any{

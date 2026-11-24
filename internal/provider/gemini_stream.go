@@ -24,6 +24,23 @@ import (
 	"time"
 )
 
+// geminiStreamError 是流内嵌错误帧。status 非 0 才能让 proxy 记一条失败用量行
+// （proxy.go 仅在 result != nil || statusCode != 0 时记账）。
+type geminiStreamError struct {
+	status int
+	msg    string
+}
+
+func (e *geminiStreamError) Error() string { return e.msg }
+
+// statusCode 返回上游错误码；缺失时回落 502。
+func (e *geminiStreamError) statusCode() int {
+	if e.status >= http.StatusBadRequest {
+		return e.status
+	}
+	return http.StatusBadGateway
+}
+
 // geminiStreamTranslator 逐帧转换并写出分片。
 type geminiStreamTranslator struct {
 	w             http.ResponseWriter
@@ -61,9 +78,11 @@ func (t *geminiStreamTranslator) handleFrame(data string) error {
 		return nil
 	}
 	if frame.Error != nil {
-		return richErrorf(fmt.Errorf("upstream stream error"),
-			"gemini stream error (status %d): %s %s",
-			frame.Error.Code, frame.Error.Status, frame.Error.Message)
+		return &geminiStreamError{
+			status: frame.Error.Code,
+			msg: fmt.Sprintf("gemini stream error (status %d): %s %s",
+				frame.Error.Code, frame.Error.Status, frame.Error.Message),
+		}
 	}
 
 	if frame.ResponseID != "" {

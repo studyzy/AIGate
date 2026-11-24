@@ -24,6 +24,7 @@ package provider
 import (
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"strings"
 )
 
@@ -63,39 +64,68 @@ func buildGeminiRequest(model string, reqBody []byte) ([]byte, error) {
 
 // checkUnsupportedChatParams 拒绝 n>1：响应侧只读 candidates[0]，
 // 放行会让多出来的候选被静默丢弃（design §4.3.2）。
+// n 用 json.Number 读出，畸形的 n（字符串、小数、布尔）归为调用方请求错误，
+// 而不是解码失败被上层当成上游故障返回 502。
 func checkUnsupportedChatParams(reqBody []byte) error {
 	var probe struct {
-		N *int `json:"n"`
+		N json.Number `json:"n"`
 	}
 	if err := json.Unmarshal(reqBody, &probe); err != nil {
-		return richErrorf(err, "failed to decode request body")
+		return &geminiRequestError{msg: "invalid n: " + err.Error()}
 	}
-	if probe.N != nil && *probe.N > 1 {
+	if probe.N == "" {
+		return nil
+	}
+	n, err := probe.N.Float64()
+	if err != nil {
+		return &geminiRequestError{msg: "invalid n: " + probe.N.String()}
+	}
+	if n > 1 {
 		return &geminiRequestError{msg: "gemini-generate-content upstream supports a single candidate"}
 	}
 	return nil
 }
 
 // buildGeminiMessages 填充 gr 的 contents 与 systemInstruction。
+//
+// 工具结果的落位是这里最容易出错的地方：Gemini 要求 functionResponse 紧跟
+// 发起它的 model 轮，而 OpenAI 的 tool 消息可以出现在任何位置。做法是记下
+// 每个 assistant(tool_calls) 轮的下标，tool 结果到了以后插到"对应调用轮之后
+// 的第一个位置"——若下一轮已经是 user，就插在它前面。
 func buildGeminiMessages(oai *oaiChatRequest, gr map[string]any) error {
 	var systemParts []any
 	var contents []any
 	var pendingToolParts []any
 	// callID → 工具名。键用完整 id（客户端回传的就是完整 id）。
 	callNames := map[string]string{}
-	// seenNonSystem 标记首条非 system 消息是否已出现。出现之后的 system 消息
-	// 不再进 systemInstruction（那条指令渲染在所有消息之前，中段提醒放进去会
-	// 破坏前缀缓存），而是按 user 轮内联。
+	// callID → 该 functionCall 所在 contents 下标。
+	callTurns := map[string]int{}
+	// pendingAfter 是待落地工具结果应插入的下标；-1 表示追加到末尾。
+	pendingAfter := -1
 	seenNonSystem := false
 
 	flushTools := func() {
-		if len(pendingToolParts) > 0 {
-			contents = append(contents, map[string]any{"role": "user", "parts": pendingToolParts})
-			pendingToolParts = nil
+		if len(pendingToolParts) == 0 {
+			return
+		}
+		turn := map[string]any{"role": "user", "parts": pendingToolParts}
+		pendingToolParts = nil
+		at := pendingAfter
+		pendingAfter = -1
+		if at < 0 || at > len(contents) {
+			contents = append(contents, turn)
+			return
+		}
+		contents = append(contents, nil)
+		copy(contents[at+1:], contents[at:])
+		contents[at] = turn
+		// 插入后，已记录的调用轮下标要顺延。
+		for id, idx := range callTurns {
+			if idx >= at {
+				callTurns[id] = idx + 1
+			}
 		}
 	}
-	// appendTurn 追加一条轮次；与前一条同角色且前一不是 functionResponse 轮时合并，
-	// 满足 Gemini 的角色交替要求。
 	appendTurn := func(role string, parts []any) {
 		if len(parts) == 0 {
 			return
@@ -125,11 +155,25 @@ func buildGeminiMessages(oai *oaiChatRequest, gr map[string]any) error {
 			systemParts = append(systemParts, map[string]any{"text": text})
 		case "tool":
 			pendingToolParts = append(pendingToolParts, geminiFunctionResponse(m, callNames))
+			if pendingAfter < 0 {
+				// 定位到对应调用轮之后、且在任何新轮之前。
+				if idx, ok := callTurns[stripGeminiCallID(m.ToolCallID)]; ok {
+					pendingAfter = idx + 1
+				} else if idx, ok := callTurns[m.ToolCallID]; ok {
+					pendingAfter = idx + 1
+				}
+			}
 		default:
 			seenNonSystem = true
 			flushTools()
 			if m.Role == "assistant" {
+				before := len(contents)
 				appendTurn("model", geminiAssistantParts(m, callNames))
+				if len(contents) > before {
+					for _, tc := range m.ToolCalls {
+						callTurns[stripGeminiCallID(tc.ID)] = len(contents) - 1
+					}
+				}
 				continue
 			}
 			parts, err := geminiUserParts(m.Content)
@@ -258,7 +302,11 @@ func geminiUserParts(content any) ([]any, error) {
 func geminiFunctionResponse(m oaiInputMessage, callNames map[string]string) map[string]any {
 	name := callNames[m.ToolCallID]
 	if name == "" {
+		// 客户端只发了最近几轮、或从 previous_response_id 续接时拿不到前序 tool_calls，
+		// 只能回落 base id。记一条 warn，否则工具调用降级会无迹可循（design §4.2 规则 4）。
 		name = stripGeminiCallID(m.ToolCallID)
+		slog.Warn("gemini functionResponse name unresolved, falling back to base id",
+			"tool_call_id", m.ToolCallID)
 	}
 	fr := map[string]any{
 		"name":     name,
