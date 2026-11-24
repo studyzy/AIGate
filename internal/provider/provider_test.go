@@ -322,3 +322,14 @@ func TestAnthropicProbe_DefaultBaseWhenEmpty(t *testing.T) {
 		t.Fatalf("err = %v, want *ConnectivityError (probe must reach an upstream attempt)", err)
 	}
 }
+
+// TestGetProvider_Gemini 验证 gemini-generate-content 分发到 *GeminiProvider。
+func TestGetProvider_Gemini(t *testing.T) {
+	p := provider.GetProvider(protocol.TypeGeminiGenerateContent)
+	if p == nil {
+		t.Fatalf("GetProvider returned nil for %q", protocol.TypeGeminiGenerateContent)
+	}
+	if got, want := fmt.Sprintf("%T", p), "*provider.GeminiProvider"; got != want {
+		t.Fatalf("GetProvider(%q) returned %s, want %s", protocol.TypeGeminiGenerateContent, got, want)
+	}
+}

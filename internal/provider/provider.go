@@ -197,6 +197,8 @@ func GetProvider(modelType string) Provider {
 	switch modelType {
 	case protocol.TypeAnthropicMessages:
 		return &AnthropicProvider{}
+	case protocol.TypeGeminiGenerateContent:
+		return &GeminiProvider{}
 	case protocol.TypeOpenAIResponses:
 		return &OpenAIResponsesProvider{}
 	default:
