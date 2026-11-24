@@ -159,6 +159,10 @@ func TestGeminiProvider_StreamInStreamError(t *testing.T) {
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429（必须带状态码，否则 proxy 不记账）", status)
 	}
+	// 异常终止不补 [DONE]：补了客户端会把截断流当成正常结束。
+	if strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Fatalf("异常终止不应补 [DONE]，got %q", rec.Body.String())
+	}
 }
 
 // 错误帧不带 code 时回落 502，而不是 0。

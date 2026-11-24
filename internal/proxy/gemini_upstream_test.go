@@ -20,7 +20,6 @@ package proxy_test
 import (
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -452,4 +451,76 @@ func TestGemini_AnthropicIngress_Stream(t *testing.T) {
 // 因此 n>1 的拒绝只在 /v1/chat/completions 上可观测，由
 // TestGemini_NGreaterThanOneRejected 覆盖。
 
-var _ = net.Dial // 保留 net 导入以便将来扩展连接断言
+// 13. 流式工具调用同样必须带签名：客户端回传后上游应收到原签名而非哨兵。
+// 非流式路径由用例 5 覆盖，流式是独立的一条代码路径（gemini_stream.go）。
+func TestGemini_StreamingToolCallCarriesSignature(t *testing.T) {
+	const streamToolReply = "data: {\"responseId\":\"r1\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[" +
+		"{\"functionCall\":{\"id\":\"call_1\",\"name\":\"get_weather\",\"args\":{\"city\":\"A\"}}," +
+		"\"thoughtSignature\":\"AQID\"}]},\"finishReason\":\"STOP\"}]," +
+		"\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"totalTokenCount\":15}}\n\n"
+	g := startGeminiEnv(t, streamToolReply, geminiHello)
+
+	resp := g.post(t, "/v1/chat/completions", `{"model":"gemini-2.5-flash","stream":true,
+		"messages":[{"role":"user","content":"weather?"}],
+		"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`)
+	body := readAll(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "_ts_") {
+		t.Fatalf("流式 tool_call.id 必须带签名后缀: %s", body)
+	}
+
+	var callID string
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						ID string `json:"id"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(data)), &chunk) != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			for _, tc := range c.Delta.ToolCalls {
+				if tc.ID != "" {
+					callID = tc.ID
+				}
+			}
+		}
+	}
+	if callID == "" {
+		t.Fatalf("流里没有 tool_call: %s", body)
+	}
+
+	second := `{"model":"gemini-2.5-flash","messages":[
+		{"role":"user","content":"weather?"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"` + callID + `","type":"function",
+		 "function":{"name":"get_weather","arguments":"{\"city\":\"A\"}"}}]},
+		{"role":"tool","tool_call_id":"` + callID + `","content":"{}"}],
+		"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`
+	resp2 := g.post(t, "/v1/chat/completions", second)
+	_ = readAll(t, resp2)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("第二次 status = %d", resp2.StatusCode)
+	}
+	for _, raw := range contentsOf(t, g.rec.Body()) {
+		for _, p := range raw.(map[string]any)["parts"].([]any) {
+			pm := p.(map[string]any)
+			if _, ok := pm["functionCall"]; !ok {
+				continue
+			}
+			if pm["thoughtSignature"] != "AQID" {
+				t.Fatalf("原始签名必须原样回传，got %v（哨兵说明流式丢了签名）", pm["thoughtSignature"])
+			}
+		}
+	}
+}

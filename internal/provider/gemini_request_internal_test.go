@@ -67,6 +67,35 @@ func TestBuildGeminiRequest_SystemOnlyBecomesUser(t *testing.T) {
 	}
 }
 
+// 合并连续 assistant 轮时，tool_calls 必须保留在合并后的 model 轮里。
+func TestBuildGeminiRequest_MergedAssistantKeepsToolCalls(t *testing.T) {
+	got := buildGeminiRequestBody(t, "gemini-2.5-flash", `{
+		"messages":[
+			{"role":"user","content":"x"},
+			{"role":"assistant","content":"let me check"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"w","arguments":"{}"}}]}]}`)
+
+	contents := got["contents"].([]any)
+	if len(contents) != 2 {
+		t.Fatalf("两条 assistant 应合并成一条 model 轮，got %d 条", len(contents))
+	}
+	parts := contents[1].(map[string]any)["parts"].([]any)
+	var sawCall bool
+	for _, p := range parts {
+		if _, ok := p.(map[string]any)["functionCall"]; ok {
+			sawCall = true
+		}
+	}
+	if !sawCall {
+		t.Fatalf("合并后丢失了 functionCall: %v", parts)
+	}
+	// text 必须排在 functionCall 之前（functionCall 收尾 model 轮）。
+	if _, ok := parts[0].(map[string]any)["text"]; !ok {
+		t.Fatalf("text 应排在 functionCall 之前，got %v", parts)
+	}
+}
+
 func TestBuildGeminiRequest_MergesConsecutiveSameRole(t *testing.T) {
 	got := buildGeminiRequestBody(t, "gemini-2.5-flash", `{
 		"messages":[
