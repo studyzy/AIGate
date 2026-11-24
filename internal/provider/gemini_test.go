@@ -127,16 +127,20 @@ func TestGeminiProvider_NonOKPassthrough(t *testing.T) {
 	}
 }
 
-// 请求不可用（n>1、非法图片）时在发请求前就失败。
+// 请求不可用（n>1）时在发请求前就失败，且按网关既有约定返回 400 响应体
+// 而不是 502——调用方需要知道是自己的请求有问题。
 func TestGeminiProvider_RejectsInvalidRequest(t *testing.T) {
 	p := &provider.GeminiProvider{}
-	_, status, err := p.ChatCompletion(context.Background(), "sk", "https://example.com/v1beta",
+	res, status, err := p.ChatCompletion(context.Background(), "sk", "https://example.com/v1beta",
 		"gemini-2.5-flash", []byte(`{"messages":[{"role":"user","content":"x"}],"n":2}`), nil)
-	if err == nil {
-		t.Fatalf("n=2 应报错")
+	if err != nil {
+		t.Fatalf("无效请求不应走 error 分支（那会被映射成 502），got %v", err)
 	}
-	if status != 0 {
-		t.Fatalf("status = %d, want 0", status)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if res == nil || !strings.Contains(string(res.Body), "single candidate") {
+		t.Fatalf("响应体应说明只支持单候选，got %v", res)
 	}
 }
 

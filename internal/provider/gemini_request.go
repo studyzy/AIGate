@@ -24,7 +24,6 @@ package provider
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"strings"
 )
 
@@ -72,7 +71,7 @@ func checkUnsupportedChatParams(reqBody []byte) error {
 		return richErrorf(err, "failed to decode request body")
 	}
 	if probe.N != nil && *probe.N > 1 {
-		return errors.New("gemini-generate-content upstream supports a single candidate")
+		return &geminiRequestError{msg: "gemini-generate-content upstream supports a single candidate"}
 	}
 	return nil
 }

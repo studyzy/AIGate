@@ -34,6 +34,58 @@ type GeminiProvider struct{}
 
 var _ Provider = (*GeminiProvider)(nil)
 
+// prepare 构造上游请求体。请求本身不合法（如 n>1）时返回可直接回传的
+// 400 响应，而不是当成上游故障——调用方需要知道是自己的请求有问题。
+func (p *GeminiProvider) prepare(model string, reqBody []byte) (body []byte, rejected *geminiRejected) {
+	body, err := buildGeminiRequest(model, reqBody)
+	if err == nil {
+		return body, nil
+	}
+	var reqErr *geminiRequestError
+	if !errors.As(err, &reqErr) {
+		// 非请求性问题（解码失败等）：按不可用的请求头处理，交给上层 502。
+		return nil, &geminiRejected{
+			status: http.StatusBadRequest,
+			body:   errorBody(reqErrMessage(err), http.StatusBadRequest),
+		}
+	}
+	return nil, &geminiRejected{
+		status: http.StatusBadRequest,
+		body:   errorBody(reqErr.Error(), http.StatusBadRequest),
+	}
+}
+
+// errorBody 构造与入口一致的错误体。
+func errorBody(message string, status int) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "invalid_request_error",
+			"code":    status,
+		},
+	})
+	return raw
+}
+
+// reqErrMessage 取错误的可读文案。
+func reqErrMessage(err error) string {
+	if err == nil {
+		return "invalid request"
+	}
+	return err.Error()
+}
+
+// geminiRequestError 标记「调用方请求不合法」，与上游/网络故障区分。
+type geminiRequestError struct{ msg string }
+
+func (e *geminiRequestError) Error() string { return e.msg }
+
+// geminiRejected 是可直接回传给调用方的错误响应。
+type geminiRejected struct {
+	status int
+	body   []byte
+}
+
 const (
 	// geminiDefaultBase 是未配置 url 时的默认端点。
 	geminiDefaultBase = "https://generativelanguage.googleapis.com/v1beta"
@@ -76,9 +128,10 @@ func (p *GeminiProvider) ChatCompletion(
 	reqBody []byte,
 	customHeaders map[string]string,
 ) (*CompletionResult, int, error) {
-	body, err := buildGeminiRequest(model, reqBody)
-	if err != nil {
-		return nil, 0, err
+	body, rejected := p.prepare(model, reqBody)
+	if rejected != nil {
+		// 调用方请求不合法：按上游非 2xx 的既有约定回传状态码与响应体。
+		return &CompletionResult{Body: rejected.body}, rejected.status, nil
 	}
 	httpReq, err := newUpstreamRequest(ctx, p.endpoint(apiBase, model, "generateContent"),
 		body, geminiAuthHeaders(apiKey), customHeaders)
@@ -116,9 +169,12 @@ func (p *GeminiProvider) ChatCompletionStream(
 	flusher http.Flusher,
 	customHeaders map[string]string,
 ) (*StreamResult, int, error) {
-	body, err := buildGeminiRequest(model, reqBody)
-	if err != nil {
-		return nil, 0, err
+	body, rejected := p.prepare(model, reqBody)
+	if rejected != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(rejected.status)
+		_, _ = w.Write(rejected.body)
+		return nil, rejected.status, nil
 	}
 	url := p.endpoint(apiBase, model, "streamGenerateContent") + "?alt=sse"
 	httpReq, err := newUpstreamRequest(ctx, url, body, geminiAuthHeaders(apiKey), customHeaders)
