@@ -481,6 +481,7 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
             <option value="openai-completions">openai-completions</option>
             <option value="anthropic-messages">anthropic-messages</option>
             <option value="openai-responses">openai-responses</option>
+            <option value="gemini-generate-content">gemini-generate-content</option>
             <option value="openai-decisions">openai-decisions</option>
             <option value="systemone">systemone</option>
           </Select>

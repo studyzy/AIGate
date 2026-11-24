@@ -28,3 +28,14 @@ func TestDecisionTypeConstants(t *testing.T) {
 		t.Fatalf("TypeSystemOne = %q", protocol.TypeSystemOne)
 	}
 }
+
+// TestGeminiTypeConstant 钉死 gemini-generate-content 的字面量：
+// 它同时出现在 ai_models.model_type 落库值、管理面校验与文档三处。
+func TestGeminiTypeConstant(t *testing.T) {
+	if protocol.TypeGeminiGenerateContent != "gemini-generate-content" {
+		t.Fatalf("TypeGeminiGenerateContent = %q", protocol.TypeGeminiGenerateContent)
+	}
+	if len(protocol.TypeGeminiGenerateContent) > 32 {
+		t.Fatalf("model_type 超出 ai_models.model_type 的 VARCHAR(32): %d", len(protocol.TypeGeminiGenerateContent))
+	}
+}

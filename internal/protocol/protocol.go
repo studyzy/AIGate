@@ -28,6 +28,9 @@ const (
 	TypeOpenAIDecisions = "openai-decisions"
 	// TypeSystemOne 是 TypeSafe System One 决策协议（URL 含 /v1，转发时拼 /systemone）。
 	TypeSystemOne = "systemone"
+	// TypeGeminiGenerateContent 是 Google 生成式语言 API（URL 含 /v1beta，
+	// 转发时拼 /models/{model}:generateContent；流式用 :streamGenerateContent?alt=sse）。
+	TypeGeminiGenerateContent = "gemini-generate-content"
 )
 
 // DecisionFormat 标识上游决策协议说哪种线上格式。

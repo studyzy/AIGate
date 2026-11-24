@@ -714,7 +714,7 @@ OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `
 | `model_name` | string | 展示名。 |
 | `url` | string | 上游基础地址。 |
 | `credential_id` | integer | 引用的凭据 ID；`0` 表示未引用（使用 `api_key`）。 |
-| `model_type` | string | 上游协议：`openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions` 或 `systemone`。同时决定 `url` 的拼接方式（见 §6「运行须知」）。 |
+| `model_type` | string | 上游协议：`openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions`、`systemone` 或 `gemini-generate-content`。同时决定 `url` 的拼接方式（见 §6「运行须知」）。 |
 | `billing_mode` | string | 计费口径：`per_token`（默认，如实记账）或 `input_only`（completion 记 0）。决策类 `model_type` 创建时缺省为 `input_only`。 |
 | `custom_http_headers` | object \| null | 允许透传的头（字符串值）。 |
 | `quota_day` | integer | 模型级日 token 配额；`-1` 表示不限。 |
@@ -737,7 +737,7 @@ OpenAI 入口返回 `{"type":"refusal","name":...}`；System One 上游的 422 `
 | `url` | string | **是** | — | 去空白后必须非空。 |
 | `api_key` | string | 否 | `""` | 上游凭据（`credential_id` 为 `0` 时使用）。 |
 | `credential_id` | integer | 否 | `0` | 必须引用存在的凭据，否则 `400 credential <id> not found`。 |
-| `model_type` | string | **是** | — | 必须为 `openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions` 或 `systemone`。 |
+| `model_type` | string | **是** | — | 必须为 `openai-completions`、`anthropic-messages`、`openai-responses`、`openai-decisions`、`systemone` 或 `gemini-generate-content`。 |
 | `billing_mode` | string | 否 | 按 `model_type` 推 | `per_token` 或 `input_only`；决策类模型缺省为 `input_only`。 |
 | `custom_http_headers` | object | 否 | 无 | 字符串值的 JSON 对象；`null` 存为空值。 |
 | `quota_day` | integer | 否 | `-1` | |
@@ -883,7 +883,7 @@ curl -X PUT http://127.0.0.1:8080/admin/models/1 \
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `model_type` | string，必填 | `openai-completions` 或 `anthropic-messages`。 |
+| `model_type` | string，必填 | `openai-completions`、`anthropic-messages` 或 `gemini-generate-content`。 |
 | `url` | string，必填 | 与 `model.url` 语义一致：`openai-completions` 是带 `/v1` 的 base，`anthropic-messages` 是 host。 |
 | `api_key` | string，可选 | 直接使用（适用于尚未落库的新密钥）。 |
 | `credential_id` | number，可选 | 改用已保存凭据的第一个 header 密钥。 |
@@ -1590,7 +1590,7 @@ curl -X POST http://127.0.0.1:8080/admin/webhooks \
 | `models[].provider` / `model_id` | string | `model_id` 必填；`(provider, model_id)` 为幂等键。 |
 | `models[].url` | string | 必填。 |
 | `models[].api_key` | string | 可选。 |
-| `models[].model_type` | string | `openai-completions`、`anthropic-messages` 或 `openai-responses`。 |
+| `models[].model_type` | string | `openai-completions`、`anthropic-messages`、`openai-responses` 或 `gemini-generate-content`。 |
 | `models[].quota_day` / `enabled` | integer / bool | 可选。 |
 | `keys[].token` | string | **明文**，必填。导入时哈希，明文不落库、不回显。 |
 | `keys[].user` | string | 属主**名**，必填且必须可解析。 |
@@ -2091,12 +2091,25 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 | `anthropic-messages` | `<host>`（**不含** `/v1`） | `<url>/v1/messages` |
 | `openai-decisions` | `<host>/v1` | `<url>/decisions` |
 | `systemone` | `<host>/v1` | `<url>/systemone` |
+| `gemini-generate-content` | `https://generativelanguage.googleapis.com/v1beta` | `<url>/models/{model}:generateContent`（流式 `<url>/models/{model}:streamGenerateContent?alt=sse`） |
 
 `url` 末尾的斜杠会被去除。因此：
 `https://api.openai.com/v1` 配 `openai-responses` → `https://api.openai.com/v1/responses`；
 同一条 `url` 配 `anthropic-messages` → 变成 `https://api.openai.com/v1/v1/messages`（错误）。
 
 `model_type` 为空或未知取值时按 `openai-completions` 处理（兼容历史数据）；新建模型建议显式填写。
+
+#### Gemini 上游（`gemini-generate-content`）的限制
+
+- **只支持单候选**：`n > 1` 返回 400。
+- **图片**：`image_url` 只能是 `https://` 且带文件扩展名（`.png`/`.jpg`/`.jpeg`/`.webp`/`.gif`/`.heic`/`.heif`），
+  或 base64 data URI。网关**不会下载**图片，`https` URL 由 Google 抓取；
+  扩展名缺失或 `http://` 直接 400。
+- **思考签名**：Gemini 3.x / 2.5 的多轮工具调用依赖 `thoughtSignature`，网关把它编进
+  返回的 `tool_calls[].id`（形如 `call_xxx_ts_<签名>`）。客户端回传时需原样带回 `id`。
+  经 `/v1/responses` 入口时签名会降级为 Gemini 的跳过哨兵（该入口不保留 reasoning）。
+- **不支持**：音频、视频、PDF 输入；`googleSearch` / `codeExecution` 等 Google 侧工具；
+  Vertex AI 端点；`cachedContents` 显式缓存管理。
 
 #### Responses 有状态能力与保留期
 

@@ -29,11 +29,12 @@ import (
 
 // 模型接口类型。
 const (
-	ModelTypeOpenAI    = protocol.TypeOpenAICompletions // OpenAI 兼容端点（URL 含 /v1，转发时拼 /chat/completions）
-	ModelTypeAnthropic = protocol.TypeAnthropicMessages // Anthropic Messages（URL 为 host，转发时拼 /v1/messages）
-	ModelTypeResponses = protocol.TypeOpenAIResponses   // OpenAI Responses（URL 含 /v1，转发时拼 /responses）
-	ModelTypeDecisions = protocol.TypeOpenAIDecisions   // OpenAI Decisions（URL 含 /v1，转发时拼 /decisions）
-	ModelTypeSystemOne = protocol.TypeSystemOne         // TypeSafe System One（URL 含 /v1，转发时拼 /systemone）
+	ModelTypeOpenAI    = protocol.TypeOpenAICompletions     // OpenAI 兼容端点（URL 含 /v1，转发时拼 /chat/completions）
+	ModelTypeAnthropic = protocol.TypeAnthropicMessages     // Anthropic Messages（URL 为 host，转发时拼 /v1/messages）
+	ModelTypeResponses = protocol.TypeOpenAIResponses       // OpenAI Responses（URL 含 /v1，转发时拼 /responses）
+	ModelTypeDecisions = protocol.TypeOpenAIDecisions       // OpenAI Decisions（URL 含 /v1，转发时拼 /decisions）
+	ModelTypeSystemOne = protocol.TypeSystemOne             // TypeSafe System One（URL 含 /v1，转发时拼 /systemone）
+	ModelTypeGemini    = protocol.TypeGeminiGenerateContent // Google Gemini（URL 含 /v1beta，转发时拼 /models/{model}:generateContent）
 )
 
 // 计费口径（ai_models.billing_mode）。

@@ -366,6 +366,9 @@ type oaiInputMessage struct {
 	Content    interface{}        `json:"content"`
 	ToolCalls  []oaiInputToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string             `json:"tool_call_id,omitempty"`
+	// ReasoningContent 是上游回传、客户端原样带回的思考文本（Gemini 的 thought part
+	// 需要连同思考内容一起回放，不能只带签名）。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // oaiInputTool 是输入工具定义（OpenAI 请求子集）。
