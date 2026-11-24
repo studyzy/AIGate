@@ -375,3 +375,64 @@ export interface BuildInfo {
   go_version: string;
   started_at: string;
 }
+
+/** 路由作用域：越具体越优先（key > user > group > global）。 */
+export type RouterScope = "global" | "group" | "user" | "key";
+
+/** 一条模型路由规则。config 是策略私有的 JSON 字符串，形状由策略决定。 */
+export interface ModelRouter {
+  id: ID;
+  name: string;
+  description: string;
+  strategy: string;
+  config: string;
+  scope: RouterScope;
+  scope_id: number;
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelRouterInput {
+  name: string;
+  description?: string;
+  strategy: string;
+  config: string;
+  scope: RouterScope;
+  scope_id: number;
+  priority: number;
+  enabled: boolean;
+}
+
+/** 策略配置字段；type 决定控件类型（string/int/bool/enum/model）。 */
+export interface RouterStrategyField {
+  key: string;
+  type: "string" | "int" | "bool" | "enum" | "model";
+  title: string;
+  description?: string;
+  default?: unknown;
+  enum?: string[];
+  min?: number;
+  max?: number;
+  required?: boolean;
+}
+
+export interface RouterStrategy {
+  name: string;
+  title: string;
+  description?: string;
+  fields: RouterStrategyField[];
+}
+
+export interface RouterPreview {
+  router_id: ID;
+  strategy: string;
+  ai_model_id: ID;
+  model_id: string;
+  model_name?: string;
+  cause: string;
+  detail?: Record<string, unknown>;
+  /** true 表示策略未能决定，预览的是「会回退到 primary」这一结果。 */
+  fallback: boolean;
+}

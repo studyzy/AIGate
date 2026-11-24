@@ -31,6 +31,9 @@ const SettingsPage = lazy(() =>
 const WebhooksPage = lazy(() =>
   import("./pages/webhooks").then((m) => ({ default: m.WebhooksPage })),
 );
+const ModelRouterPage = lazy(() =>
+  import("./pages/routers").then((m) => ({ default: m.ModelRouterPage })),
+);
 const BillingCalendarPage = lazy(() =>
   import("./pages/billing/calendar").then((m) => ({ default: m.BillingCalendarPage })),
 );
@@ -63,6 +66,7 @@ export const router = createBrowserRouter(
             { index: true, element: page(DashboardPage) },
             { path: "usage", element: page(UsagePage) },
             { path: "providers", element: page(ProvidersPage) },
+            { path: "model-routers", element: page(ModelRouterPage) },
             { path: "billing-calendar", element: page(BillingCalendarPage) },
             { path: "currency-rates", element: page(CurrencyRatePage) },
             { path: "models", element: <Navigate to="/providers" replace /> },
