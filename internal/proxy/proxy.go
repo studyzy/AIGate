@@ -61,6 +61,13 @@ type Handler struct {
 	// （见 responses_background.go 顶部的「在途后台任务的注册表」一节）。
 	backgroundMu   sync.Mutex
 	backgroundRuns map[string]context.CancelFunc
+
+	// autoPrices 是路由取价目的来源（与记账共用同一个 billing.StoreSource，复用其缓存）。
+	// 装配阶段由 SetAutoPriceSource 设置，运行期只读，故不需要加锁；为 nil 时策略无法比价。
+	autoPrices PriceSource
+
+	// routerBreakers 是按 router 隔离的进程内熔断器（自带锁，并发安全）。
+	routerBreakers breakerStates
 }
 
 // NewHandler 创建数据面处理器。quotaExceededStatus 非 429/403 时回退 429。
@@ -255,6 +262,18 @@ func (h *Handler) resolveAndCheckQuota(
 ) (*model.Resolved, bool) {
 	// 解析密钥绑定的目标模型（显式未绑定 → 400；未指定 → primary）。
 	reqModelName := extractRequestedModel(reqBody)
+
+	// auto 伪模型：先确认该密钥没有真的绑定名为 auto 的模型（显式配置优先），
+	// 再路由出真正的目标模型，之后走与显式指定完全相同的解析与配额路径。
+	// 必须排在 ResolveModelForKey 之前——"auto" 不是任何真实模型名，直接解析会 400。
+	if isAutoModelName(reqModelName) && !h.keyBindsRealAuto(r.Context(), key.ID) {
+		res, ok := h.resolveAutoIngress(w, r, key, reqBody)
+		if !ok {
+			return nil, false
+		}
+		return res, h.checkQuota(w, r, key, res)
+	}
+
 	res, err := h.store.ResolveModelForKey(r.Context(), key, reqModelName)
 	if err != nil {
 		switch {
@@ -271,12 +290,91 @@ func (h *Handler) resolveAndCheckQuota(
 		return nil, false
 	}
 
+	return res, h.checkQuota(w, r, key, res)
+}
+
+// resolveAutoIngress 处理 model="auto" 的模型解析，失败时已写出错误响应并返回 ok=false。
+//
+// 三点约定（design §7.5）：
+//   - auto 未启用或未配置决策模型 → 400，这是配置型错误，不静默降级；
+//   - 无任何可路由候选 → 沿用现有 ErrNoResolvableModel 文案，400；
+//   - 决策失败 / 熔断 / 返回非法值 → 回退 primary，请求照常继续。
+func (h *Handler) resolveAutoIngress(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	reqBody map[string]any,
+) (*model.Resolved, bool) {
+	target, router, cause, status, message := h.resolveAutoRoute(r.Context(), key, reqBody)
+	if status != 0 {
+		if status >= 500 {
+			slog.Error("model router produced no usable candidate",
+				"key_id", key.ID, "cause", cause, "router_id", routerIDOf(router))
+		}
+		h.writeIngressError(w, r, status, message)
+		return nil, false
+	}
+	if target == nil {
+		// 回退 primary：显式解析，不能用请求里的 "auto" 去解析。
+		primary, perr := h.store.ResolvePrimaryForKey(r.Context(), key)
+		if perr != nil {
+			slog.Warn("auto router fallback to primary failed", "error", perr, "key_id", key.ID)
+			switch {
+			case errors.Is(perr, model.ErrNoResolvableModel):
+				h.writeIngressError(w, r, http.StatusBadRequest, msgNoResolvableModel)
+			case errors.Is(perr, model.ErrBindingKeyMissing):
+				h.writeIngressError(w, r, http.StatusBadRequest, msgBindingKeyMissing)
+			default:
+				h.writeIngressError(w, r, http.StatusInternalServerError, msgInternalError)
+			}
+			return nil, false
+		}
+		target = primary
+	}
+
+	// 协议守卫：路由结果不能是决策模型（否则会被下游入口当成 chat 发给上游）。
+	if provider.IsDecisionModelType(target.ModelType) {
+		slog.Error("auto router selected a decision model, this should be filtered",
+			"key_id", key.ID, "ai_model_id", target.AIModelID)
+		h.writeIngressError(w, r, http.StatusInternalServerError, msgInternalError)
+		return nil, false
+	}
+
+	slog.Info("model router decision",
+		"key_id", key.ID, "cause", string(cause), "router_id", routerIDOf(router),
+		"ai_model_id", target.AIModelID, "model", target.ModelID)
+
+	// 响应体仍回显客户端所问的 "auto"（保持"回显请求"不变量），
+	// 实际路由到的模型与命中的规则另经响应头告知，用户可据此判断这次是否被降级。
+	w.Header().Set(autoRoutedHeader, target.ModelID)
+	if router != nil {
+		w.Header().Set(routerIDHeader, strconv.FormatUint(uint64(router.ID), 10))
+	}
+
+	return target, true
+}
+
+// routerIDOf 返回 router 的 ID（nil 时为 0），用于日志字段。
+func routerIDOf(r *model.ModelRouter) uint {
+	if r == nil {
+		return 0
+	}
+	return r.ID
+}
+
+// checkQuota 做配额检查；超限时已写出错误响应并返回 false。
+func (h *Handler) checkQuota(
+	w http.ResponseWriter,
+	r *http.Request,
+	key *model.APIKey,
+	res *model.Resolved,
+) bool {
 	// 配额检查（全局 → 模型日配额 → 用户 → 密钥；首个超限即拒绝，带 Retry-After）。
 	if st := quota.CheckRequest(r.Context(), h.store, key, res, time.Now()); st.Exceeded {
 		h.writeIngressQuotaExceeded(w, r, key, res, st)
-		return nil, false
+		return false
 	}
-	return res, true
+	return true
 }
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -291,8 +389,22 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := make(map[string]struct{}, len(infos))
-	data := make([]map[string]any, 0, len(infos))
+	data := make([]map[string]any, 0, len(infos)+1)
 	created := time.Now().Unix()
+
+	// auto 伪模型排在最前（客户端通常取列表第一项作为默认）。
+	// 仅在启用且已配置决策模型时出现——未配置时列出 auto 只会换成一个 400。
+	// 若该密钥确实绑定了名为 auto 的真实模型则不列出伪模型：显式配置优先，见 hasRealAutoBinding。
+	if h.autoRouterAvailable(r.Context()) && !hasRealAutoBinding(infos) {
+		data = append(data, map[string]any{
+			"id":       autoModelName,
+			"object":   "model",
+			"created":  created,
+			"owned_by": "aigate",
+		})
+		seen[autoModelName] = struct{}{}
+	}
+
 	for _, m := range infos {
 		id := strings.ToLower(m.ModelID)
 		if id == "" {
@@ -440,6 +552,8 @@ func (h *Handler) logUsage(
 		// 上游自报成本只做传输：由 UsageWriter 消费时按 use_upstream_cost 决定是否采信，不落库。
 		entry.ReportedCost = usage.ReportedCost
 	}
+	// 普通请求一律计入配额；auto 路由的决策调用另走 logAutoUsage 显式置 false。
+	entry.SetCountTowardQuota(true)
 	h.usage.Submit(entry)
 
 	event.Emit(event.TypeRequestCompleted, map[string]any{

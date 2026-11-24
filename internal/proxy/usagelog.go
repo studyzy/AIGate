@@ -69,6 +69,13 @@ func (w *UsageWriter) Start() {
 				if err := w.store.InsertUsageLog(ctx, &entry); err != nil {
 					slog.Error("write usage log failed", "error", err)
 				}
+				// 不计配额的用量（auto 路由的决策调用）只留明细、不累加日聚合：
+				// 模型日配额（quota_day）读的正是日聚合表，跳过它即不占模型配额；
+				// 用户/密钥/全局四类 token 规则与 cost 规则读明细表，由查询侧按
+				// count_toward_quota 过滤（见 model.Sum*InWindow）。
+				if !entry.CountsTowardQuota() {
+					continue
+				}
 				if err := w.store.UpsertDailyUsage(ctx, &entry); err != nil {
 					slog.Error("upsert daily usage failed", "error", err)
 				}

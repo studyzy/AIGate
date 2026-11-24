@@ -37,4 +37,7 @@ const (
 	msgDecisionOnChatRoute   = "model type %s does not support chat completions"
 	msgInvalidDecisionInput  = "invalid decisions request: %s"
 	msgInvalidSystemOneInput = "invalid system one request: %s"
+
+	// auto 伪模型路由。
+	msgAutoUnavailable = "model auto is not available"
 )

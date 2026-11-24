@@ -39,6 +39,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"aigate/internal/billing"
 	"aigate/internal/model"
 	"aigate/internal/provider"
 	"aigate/internal/proxy"
@@ -287,7 +288,10 @@ func newEnv(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) 
 	usage.Start()
 
 	mux := http.NewServeMux()
-	proxy.NewHandler(store, usage, 429).Register(mux)
+	// 与生产装配一致：auto 路由与记账共用同一个价目来源。
+	handler := proxy.NewHandler(store, usage, 429)
+	handler.SetAutoPriceSource(billing.NewStoreSource(store))
+	handler.Register(mux)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
