@@ -41,13 +41,26 @@ func (Group) TableName() string { return "user_groups" }
 
 // Setting 全局设置（单行，id=1）。
 type Setting struct {
-	ID                     uint      `gorm:"primaryKey"`
-	DefaultTokenQuotaRules string    `gorm:"type:text;not null"` // 全局默认用户配额规则（M2）
-	GlobalTokenQuotaRules  string    `gorm:"type:text;not null"` // 全站/按组全局配额规则（M2）
-	GlobalQuotaScope       string    `gorm:"size:16;not null;default:'site'"`
-	UserKeyLimit           int       `gorm:"not null;default:5"`            // 普通用户可创建的密钥数上限；0 = 不限
-	PlatformCurrency       string    `gorm:"size:3;not null;default:'CNY'"` // 平台结算币种（ISO 4217），全局唯一
-	UpdatedAt              time.Time `gorm:"not null"`
+	ID                     uint   `gorm:"primaryKey"`
+	DefaultTokenQuotaRules string `gorm:"type:text;not null"` // 全局默认用户配额规则（M2）
+	GlobalTokenQuotaRules  string `gorm:"type:text;not null"` // 全站/按组全局配额规则（M2）
+	GlobalQuotaScope       string `gorm:"size:16;not null;default:'site'"`
+	UserKeyLimit           int    `gorm:"not null;default:5"`            // 普通用户可创建的密钥数上限；0 = 不限
+	PlatformCurrency       string `gorm:"size:3;not null;default:'CNY'"` // 平台结算币种（ISO 4217），全局唯一
+
+	// ---- 已废弃：路由配置已迁到 model_routers（见 internal/model/router.go） ----
+	// 这些列只作为升级时的迁移来源与回滚依据保留一个版本，**代码不再读取**。
+	// 保留在结构体里是为了让 AutoMigrate 建出的表与 sql/init.sql 保持一致
+	// （schema parity 测试双向比对列集合）；删除它们需要同时改 init.sql 与迁移脚本。
+	AutoRouterEnabled          bool      `gorm:"not null;default:false"`
+	AutoRouterModelID          uint      `gorm:"not null;default:0"`
+	AutoRouterMaxCandidates    int       `gorm:"not null;default:8"`
+	AutoRouterMaxShortTokens   int       `gorm:"not null;default:200"`
+	AutoRouterMaxContextTokens int       `gorm:"not null;default:8000"`
+	AutoRouterMaxChars         int       `gorm:"not null;default:8000"`
+	AutoRouterTimeoutMs        int       `gorm:"not null;default:2000"`
+	AutoRouterCooldownSeconds  int       `gorm:"not null;default:30"`
+	UpdatedAt                  time.Time `gorm:"not null"`
 }
 
 // 用户密钥数上限默认值（0 表示不限）。
@@ -55,6 +68,17 @@ const DefaultUserKeyLimit = 5
 
 // DefaultPlatformCurrency 平台结算币种默认值（人民币）。
 const DefaultPlatformCurrency = "CNY"
+
+// 路由策略的默认值：由 decision 策略的配置默认值使用
+// （路由配置存于 model_routers.config，不再来自 settings 列）。
+const (
+	DefaultAutoRouterMaxCandidates    = 8
+	DefaultAutoRouterMaxShortTokens   = 200
+	DefaultAutoRouterMaxContextTokens = 8000
+	DefaultAutoRouterMaxChars         = 8000
+	DefaultAutoRouterTimeoutMs        = 2000
+	DefaultAutoRouterCooldownSeconds  = 30
+)
 
 // GetSettings 读取全局设置（不存在时以默认值创建；并发首建冲突时回读）。
 func (s *Store) GetSettings(ctx context.Context) (*Setting, error) {

@@ -334,3 +334,82 @@ func TestSumUsageCostMicrosInWindow(t *testing.T) {
 		t.Fatalf("sum for unknown user = %d err=%v, want 0", got, err)
 	}
 }
+
+// count_toward_quota=false 的用量（网关内部开销，如 auto 路由的决策调用）必须：
+//   - 排除出四类 token 求和与 cost 求和（这些规则读 llm_usage_logs 明细表）；
+//   - 不进入日聚合表（模型日配额读 daily_usage_summaries）。
+//
+// 这是 design §7.7 方案 a 的核心不变量，也是这次改动最大的回归面（§9）。
+func TestCountTowardQuota_ExcludedFromAllQuotaSums(t *testing.T) {
+	s, dsn := newTestStoreAt(t)
+	ctx := testCtx()
+	base := time.Now().UTC().Add(-time.Hour)
+
+	const (
+		userID  = 7
+		keyID   = 11
+		groupID = 13
+		modelID = 17
+	)
+	// 两条用量：一条普通请求（计入），一条网关内部开销（不计入）。
+	counted := &model.LLMUsageLog{
+		UserID: userID, APIKeyID: keyID, GroupID: groupID, AIModelID: modelID,
+		TotalTokens: 100, PromptTokens: 100,
+		CostPlatformMicros: 500, CostVendorMicros: 400,
+		CreatedAt: base,
+	}
+	counted.SetCountTowardQuota(true)
+	internal := &model.LLMUsageLog{
+		UserID: userID, APIKeyID: keyID, GroupID: groupID, AIModelID: modelID,
+		TotalTokens: 900, PromptTokens: 900,
+		CostPlatformMicros: 5000, CostVendorMicros: 4000,
+		CreatedAt: base.Add(time.Minute),
+	}
+	internal.SetCountTowardQuota(false)
+
+	for _, e := range []*model.LLMUsageLog{counted, internal} {
+		if err := s.InsertUsageLog(ctx, e); err != nil {
+			t.Fatalf("insert usage: %v", err)
+		}
+		// 与 UsageWriter 的消费行为一致：不计配额的行跳过日聚合。
+		if e.CountsTowardQuota() {
+			if err := s.UpsertDailyUsage(ctx, e); err != nil {
+				t.Fatalf("upsert daily: %v", err)
+			}
+		}
+	}
+
+	from := base.Add(-time.Minute)
+	cases := []struct {
+		name string
+		run  func() (int64, error)
+		want int64
+	}{
+		{"user tokens", func() (int64, error) { return s.SumUserTokensInWindow(ctx, userID, 0, from, nil) }, 100},
+		{"key tokens", func() (int64, error) { return s.SumKeyTokensInWindow(ctx, keyID, from, nil) }, 100},
+		{"group tokens", func() (int64, error) { return s.SumGroupTokensInWindow(ctx, groupID, from, nil) }, 100},
+		{"global tokens", func() (int64, error) { return s.SumGlobalTokensInWindow(ctx, from, nil) }, 100},
+		{"cost micros", func() (int64, error) {
+			return s.SumUsageCostMicrosInWindow(ctx, model.UsageFilter{UserID: userID}, from, nil)
+		}, 500},
+		{"model daily tokens", func() (int64, error) { return s.SumModelDailyTokens(ctx, modelID) }, 100},
+	}
+	for _, tc := range cases {
+		got, err := tc.run()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s = %d, want %d (gateway-internal usage must not be counted)", tc.name, got, tc.want)
+		}
+	}
+
+	// 明细表仍保留两行：成本可查，只是不计配额。
+	db := openReadDB(t, dsn)
+	if got := countRows(t, db, &model.LLMUsageLog{}, ""); got != 2 {
+		t.Fatalf("usage detail rows = %d, want 2 (both rows must remain auditable)", got)
+	}
+	if got := countRows(t, db, &model.DailyUsageSummary{}, ""); got != 1 {
+		t.Fatalf("daily summary rows = %d, want 1 (uncounted rows skip the rollup)", got)
+	}
+}

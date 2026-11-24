@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS `llm_usage_logs` (
     -- cost_platform_micros: amount in settings.platform_currency, fixed at accounting time.
     `cost_vendor_micros`        BIGINT          NOT NULL DEFAULT 0,
     `cost_platform_micros`      BIGINT          NOT NULL DEFAULT 0,
+    -- router_id: the model router this request was matched by (0 = no routing applied).
+    `router_id`                 BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    -- count_toward_quota: 1 = normal request, counted toward user/key/group/global quota.
+    -- 0 = gateway-internal overhead (auto-router decision calls): cost is recorded, quota is not consumed.
+    `count_toward_quota`        TINYINT(1)      NOT NULL DEFAULT 1,
     `created_at`                DATETIME(3)     NOT NULL,
     PRIMARY KEY (`id`),
     KEY `idx_llm_usage_logs_api_key_id` (`api_key_id`),
@@ -150,6 +155,15 @@ CREATE TABLE IF NOT EXISTS `settings` (
     `user_key_limit`            INT             NOT NULL DEFAULT 5,
     -- platform_currency: single settlement currency for monetary quotas and reports
     `platform_currency`         VARCHAR(3)      NOT NULL DEFAULT 'CNY',
+    -- auto pseudo-model routing (see docs/superpowers/specs/2026-11-24-auto-routing-design.md)
+    `auto_router_enabled`            TINYINT(1)  NOT NULL DEFAULT 0,
+    `auto_router_model_id`           BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    `auto_router_max_candidates`     INT         NOT NULL DEFAULT 8,
+    `auto_router_max_short_tokens`   INT         NOT NULL DEFAULT 200,
+    `auto_router_max_context_tokens` INT         NOT NULL DEFAULT 8000,
+    `auto_router_max_chars`          INT         NOT NULL DEFAULT 8000,
+    `auto_router_timeout_ms`         INT         NOT NULL DEFAULT 2000,
+    `auto_router_cooldown_seconds`   INT         NOT NULL DEFAULT 30,
     `updated_at`                DATETIME(3)     NOT NULL,
     PRIMARY KEY (`id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
@@ -275,4 +289,22 @@ CREATE TABLE IF NOT EXISTS `currency_rates` (
     `created_at`    DATETIME(3)     NOT NULL,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_currency_rates_effective` (`from_currency`, `to_currency`, `effective_at`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+-- Model routers: one routing rule per row (name + strategy + config + scope + priority).
+-- Config is strategy-private JSON: the table shape does not change when a strategy is added.
+CREATE TABLE IF NOT EXISTS `model_routers` (
+    `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `name`        VARCHAR(128)    NOT NULL DEFAULT '',
+    `description` VARCHAR(512)    NOT NULL DEFAULT '',
+    `strategy`    VARCHAR(32)     NOT NULL DEFAULT '',
+    `config`      TEXT            NOT NULL,
+    `scope`       VARCHAR(16)     NOT NULL DEFAULT 'global',
+    `scope_id`    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    `priority`    INT             NOT NULL DEFAULT 0,
+    `enabled`     TINYINT(1)      NOT NULL DEFAULT 1,
+    `created_at`  DATETIME(3)     NOT NULL,
+    `updated_at`  DATETIME(3)     NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_model_routers_scope_id` (`scope_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

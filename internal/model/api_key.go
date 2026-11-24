@@ -73,6 +73,19 @@ type BindingInfo struct {
 	HasKey    bool   `json:"has_key"` // 绑定级密钥是否已配置（user_key_required 模型需要）
 }
 
+// Candidate 是 auto 路由的候选模型：该密钥绑定、且当前可解析的模型。
+// 与 BindingInfo 分开定义，是因为候选池需要 ModelType（排除决策协议）与 Currency（比价），
+// 而 BindingInfo 是对外展示视图，不应因路由需求而膨胀。
+type Candidate struct {
+	AIModelID uint
+	ModelID   string
+	ModelName string
+	Provider  string
+	ModelType string
+	Currency  string
+	SortOrder int
+}
+
 // Resolved 是一次数据面请求解析出的目标模型。
 type Resolved struct {
 	AIModelID         uint
@@ -270,6 +283,52 @@ func (s *Store) ListKeyModels(ctx context.Context, keyID uint, onlyEnabled bool)
 		return nil, fmt.Errorf("list key models: %w", err)
 	}
 	return infos, nil
+}
+
+// ListKeyCandidates 返回 auto 路由的候选池：该密钥绑定、且当前可解析的模型，按 sort_order 升序。
+//
+// 口径刻意对齐 /v1/models 的可见集（ListKeyModels 的 onlyEnabled 分支）：
+// 跳过 user_key_required 但绑定行缺密钥的模型。这类模型 ResolveModelForKey 能匹配到、
+// 却会在 resolvedFromAIModel 处以 ErrBindingKeyMissing 失败——若放进候选池，决策模型
+// 可能选中它，用户发出一条正常请求却因网关内部选择而报错。
+//
+// 决策协议模型由调用方（proxy）按 ModelType 排除，不在本层过滤：model 包不 import provider。
+func (s *Store) ListKeyCandidates(ctx context.Context, keyID uint) ([]Candidate, error) {
+	var out []Candidate
+	err := s.db.WithContext(ctx).Model(&AIModel{}).
+		Joins("JOIN api_key_models ON api_key_models.ai_model_id = ai_models.id").
+		Where("api_key_models.api_key_id = ?", keyID).
+		Where("ai_models.enabled = ?", true).
+		Where("ai_models.user_key_required = ? OR api_key_models.api_key <> ?", false, "").
+		Select("ai_models.id AS ai_model_id, ai_models.model_id AS model_id, ai_models.model_name AS model_name," +
+			" ai_models.provider AS provider, ai_models.model_type AS model_type, ai_models.currency AS currency," +
+			" api_key_models.sort_order AS sort_order").
+		Order("api_key_models.sort_order ASC").
+		Scan(&out).Error
+	if err != nil {
+		return nil, fmt.Errorf("list key candidates: %w", err)
+	}
+	return out, nil
+}
+
+// ResolvePrimaryForKey 解析密钥的主模型（primary 角色），用于 auto 路由失败时兜底。
+//
+// 不能复用 ResolveModelForKey(ctx, key, <请求的模型名>)：显式名未命中时它会返回
+// ErrModelNotBound（"auto" 正是未命中），兜底必须显式表达"给我 primary"。
+func (s *Store) ResolvePrimaryForKey(ctx context.Context, key *APIKey) (*Resolved, error) {
+	return s.ResolveModelForKey(ctx, key, "")
+}
+
+// ResolveAIModelByID 按模型 ID 直接解析转发目标，不检查密钥绑定。
+//
+// 供 auto 路由调用站点级决策模型使用：决策模型属于网关配置，不要求绑定到每个用户密钥。
+// 只适用于不依赖用户自备密钥的模型（user_key_required 会返回 ErrBindingKeyMissing）。
+func (s *Store) ResolveAIModelByID(ctx context.Context, id uint) (*Resolved, error) {
+	m, err := s.GetAIModel(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get ai model %d: %w", id, err)
+	}
+	return s.resolvedFromAIModel(ctx, *m, "")
 }
 
 // ResolveModelForKey 解析请求命中的目标模型：

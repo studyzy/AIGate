@@ -42,14 +42,36 @@ type LLMUsageLog struct {
 	// CostVendorMicros 模型币种金额（微元）；币种不在此表冗余，报表关联 ai_models.currency。
 	CostVendorMicros int64 `gorm:"not null;default:0"`
 	// CostPlatformMicros 平台结算币种金额（微元）；记账时刻按汇率定死，之后改汇率不影响历史行。
-	CostPlatformMicros int64     `gorm:"not null;default:0"`
-	CreatedAt          time.Time `gorm:"not null;index"`
+	CostPlatformMicros int64 `gorm:"not null;default:0"`
+	// RouterID 是本次请求命中的路由规则（0 表示未经路由，或路由未命中）。
+	// 用于按 router 聚合命中量与成本；决策调用那行填的是它所属的 router。
+	RouterID uint `gorm:"not null;default:0;index"`
+	// CountTowardQuota 标记本次用量是否计入用户/密钥/全局配额。
+	//   - true：普通请求（默认，与升级前一致）；
+	//   - false：网关自身的内部开销（如 auto 路由的决策调用），成本照记、配额不算。
+	// 必须持久化：配额的四类 token 规则与 cost 规则都直接扫本表（SumUsageCostMicrosInWindow 等），
+	// 仅靠内存标志无法把它们排除出配额统计。
+	// 用指针承载，是为了能在插入时表达「显式 false」：GORM 对带 default 标记的布尔字段
+	// 在取零值（false）时会改用列默认值（true），使「不计配额」的行被静默写成「计配额」。
+	// 指针非 nil 即视为显式值，写入语义成立。读取时用 CountsTowardQuota() 取默认值 true。
+	CountTowardQuota *bool     `gorm:"not null;default:true;column:count_toward_quota"`
+	CreatedAt        time.Time `gorm:"not null;index"`
 	// ReportedCost 是上游自报的本次请求成本（usage.cost），非持久化：
 	// logUsage 用它把自报值带给 UsageWriter 计价，不落库。
 	ReportedCost *float64 `gorm:"-"`
 	// Currency 是本次请求计价所用币种，非持久化（明细表不冗余币种）：
 	// 仅用于把模型币种带给日聚合的 Currency 列，日聚合按聚合键币种唯一。
 	Currency string `gorm:"-"`
+}
+
+// CountsTowardQuota 报告该用量是否计入配额；未显式设置时按 true（与列默认值一致）。
+func (e LLMUsageLog) CountsTowardQuota() bool {
+	return e.CountTowardQuota == nil || *e.CountTowardQuota
+}
+
+// SetCountTowardQuota 显式设置是否计入配额（nil 不可见，用此方法避免调用方散落指针操作）。
+func (e *LLMUsageLog) SetCountTowardQuota(v bool) {
+	e.CountTowardQuota = &v
 }
 
 // DailyUsageSummary 按（日期，用户，密钥，模型）聚合的日用量，配额实时查询的数据源。
@@ -73,6 +95,9 @@ type DailyUsageSummary struct {
 }
 
 // InsertUsageLog 写入一条请求级用量日志。
+// InsertUsageLog 写入一条用量明细。
+//
+// count_toward_quota 是 bool 指针：nil 时沿用列默认值（true），非 nil 时写入显式值。
 func (s *Store) InsertUsageLog(ctx context.Context, entry *LLMUsageLog) error {
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now().UTC()
@@ -136,6 +161,7 @@ func (s *Store) SumUserTokensInWindow(
 	to *time.Time,
 ) (int64, error) {
 	q := s.db.WithContext(ctx).Model(&LLMUsageLog{}).Where("user_id = ? AND created_at >= ?", userID, from)
+	q = q.Where("count_toward_quota = ?", true)
 	if to != nil {
 		q = q.Where("created_at < ?", *to)
 	}
@@ -152,6 +178,7 @@ func (s *Store) SumUserTokensInWindow(
 // SumKeyTokensInWindow 统计指定密钥在 [from, to) 的 token 总量（密钥级配额检查用）。
 func (s *Store) SumKeyTokensInWindow(ctx context.Context, apiKeyID uint, from time.Time, to *time.Time) (int64, error) {
 	q := s.db.WithContext(ctx).Model(&LLMUsageLog{}).Where("api_key_id = ? AND created_at >= ?", apiKeyID, from)
+	q = q.Where("count_toward_quota = ?", true)
 	if to != nil {
 		q = q.Where("created_at < ?", *to)
 	}
@@ -170,6 +197,7 @@ func (s *Store) SumGroupTokensInWindow(
 	to *time.Time,
 ) (int64, error) {
 	q := s.db.WithContext(ctx).Model(&LLMUsageLog{}).Where("group_id = ? AND created_at >= ?", groupID, from)
+	q = q.Where("count_toward_quota = ?", true)
 	if to != nil {
 		q = q.Where("created_at < ?", *to)
 	}
@@ -183,6 +211,7 @@ func (s *Store) SumGroupTokensInWindow(
 // SumGlobalTokensInWindow 统计全站在 [from, to) 的 token 总量。
 func (s *Store) SumGlobalTokensInWindow(ctx context.Context, from time.Time, to *time.Time) (int64, error) {
 	q := s.db.WithContext(ctx).Model(&LLMUsageLog{}).Where("created_at >= ?", from)
+	q = q.Where("count_toward_quota = ?", true)
 	if to != nil {
 		q = q.Where("created_at < ?", *to)
 	}
@@ -207,9 +236,13 @@ func (s *Store) SumModelDailyTokens(ctx context.Context, aiModelID uint) (int64,
 
 // SumUsageCostMicrosInWindow 统计过滤条件命中的用量明细在 [from, to) 的平台结算币种金额（微元）。
 // 明细表的金额列即记账时刻定死的值，配额路径据此与 cost 限额比较。
+//
+// 只统计 count_toward_quota 的行：网关自身的内部开销（如 auto 路由的决策调用）照记账、
+// 但不消耗用户配额（见 count_toward_quota 字段注释）。
 func (s *Store) SumUsageCostMicrosInWindow(ctx context.Context, f UsageFilter, from time.Time, to *time.Time) (int64, error) {
 	q := s.applyUsageFilter(s.db.WithContext(ctx).Model(&LLMUsageLog{}), f, "created_at").
-		Where("created_at >= ?", from)
+		Where("created_at >= ?", from).
+		Where("count_toward_quota = ?", true)
 	if to != nil {
 		q = q.Where("created_at < ?", *to)
 	}
