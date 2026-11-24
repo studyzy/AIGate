@@ -28,7 +28,7 @@ import (
 
 // Version 是网关语义版本号，默认值即未注入时的版本；发布构建由链接器覆盖，
 // 能力变更时仍需与 CHANGELOG.md 同步递增。
-var Version = "0.3.0"
+var Version = "0.4.0"
 
 // Commit 与 BuildTime 是链接器注入的 commit 与构建时间；为空时回退到 VCS 元数据。
 var (

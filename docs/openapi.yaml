@@ -2820,7 +2820,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone, gemini-generate-content]
           description: |
             上游协议（`ai_models.model_type` 的单一事实源）。它同时决定 `url` 的拼接方式：
 
@@ -2829,6 +2829,9 @@ components:
             - `anthropic-messages`：转发到 `<url>/v1/messages`（`url` 只到 host）
             - `openai-decisions`：转发到 `<url>/decisions`（`url` 须含 `/v1`）
             - `systemone`：转发到 `<url>/systemone`（`url` 须含 `/v1`）
+            - `gemini-generate-content`：转发到 `<url>/models/{model}:generateContent`
+              （`url` 须含 `/v1beta`，如 `https://generativelanguage.googleapis.com/v1beta`；
+              流式走 `:streamGenerateContent?alt=sse`）
 
             `url` 末尾的斜杠会被去除。未知或空值按 `openai-completions` 处理（兼容历史数据）。
         custom_http_headers:
@@ -2906,7 +2909,7 @@ components:
           description: 上游凭据（不会出现在任何响应中）
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone, gemini-generate-content]
         custom_http_headers:
           type: object
           nullable: true
@@ -2953,7 +2956,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone, gemini-generate-content]
         custom_http_headers:
           type: object
           nullable: true
@@ -4184,7 +4187,7 @@ components:
           type: string
         model_type:
           type: string
-          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone]
+          enum: [openai-completions, anthropic-messages, openai-responses, openai-decisions, systemone, gemini-generate-content]
         quota_day:
           type: integer
           default: -1

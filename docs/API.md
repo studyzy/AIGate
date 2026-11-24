@@ -699,7 +699,7 @@ Model objects returned by the API:
 | `model_name` | string | Display name. |
 | `url` | string | Upstream base URL. |
 | `credential_id` | integer | Credential referenced for the upstream key; `0` means none (use `api_key`). |
-| `model_type` | string | Upstream protocol: `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. It also determines how `url` is joined (see "Upstream URL joining" in §6). |
+| `model_type` | string | Upstream protocol: `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions`, `systemone` or `gemini-generate-content`. It also determines how `url` is joined (see "Upstream URL joining" in §6). |
 | `billing_mode` | string | Billing basis: `per_token` (default, recorded as reported) or `input_only` (completion recorded as 0). Decision `model_type`s default to `input_only` on creation. |
 | `custom_http_headers` | object \| null | Allowed headers for passthrough (string values). |
 | `quota_day` | integer | Model-level daily token quota; `-1` means unlimited. |
@@ -722,7 +722,7 @@ Model objects returned by the API:
 | `url` | string | **yes** | — | Must be non-empty after trimming. |
 | `api_key` | string | no | `""` | Upstream credential (used when `credential_id` is `0`). |
 | `credential_id` | integer | no | `0` | Must reference an existing credential, else `400 credential <id> not found`. |
-| `model_type` | string | **yes** | — | Must be `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. |
+| `model_type` | string | **yes** | — | Must be `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions`, `systemone` or `gemini-generate-content`. |
 | `billing_mode` | string | no | derived | `per_token` or `input_only`; decision models default to `input_only`. |
 | `custom_http_headers` | object | no | none | JSON object of string values; `null` stores an empty value. |
 | `quota_day` | integer | no | `-1` | |
@@ -868,7 +868,7 @@ Request body:
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `model_type` | string, required | `openai-completions` or `anthropic-messages`. |
+| `model_type` | string, required | `openai-completions`, `anthropic-messages` or `gemini-generate-content`. |
 | `url` | string, required | Same semantics as `model.url`: `openai-completions` is a base ending in `/v1`, `anthropic-messages` is the host. |
 | `api_key` | string, optional | Used directly — for a key that has not been stored yet. |
 | `credential_id` | number, optional | Resolve the credential's first header secret instead of passing a key. |
@@ -1566,7 +1566,7 @@ Import existing data (groups, users, models, keys) in one call.
 | `models[].provider` / `model_id` | string | `model_id` required; `(provider, model_id)` is the key. |
 | `models[].url` | string | Required. |
 | `models[].api_key` | string | Optional. |
-| `models[].model_type` | string | `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions` or `systemone`. |
+| `models[].model_type` | string | `openai-completions`, `anthropic-messages`, `openai-responses`, `openai-decisions`, `systemone` or `gemini-generate-content`. |
 | `models[].quota_day` / `enabled` | integer / bool | Optional. |
 | `keys[].token` | string | **Plaintext**; required. Hashed on import and never stored or echoed. |
 | `keys[].user` | string | Owner **name**; required and must resolve. |
@@ -2067,6 +2067,7 @@ check them one by one when configuring a model:
 | `anthropic-messages` | `<host>` (**without** `/v1`) | `<url>/v1/messages` |
 | `openai-decisions` | `<host>/v1` | `<url>/decisions` |
 | `systemone` | `<host>/v1` | `<url>/systemone` |
+| `gemini-generate-content` | `https://generativelanguage.googleapis.com/v1beta` | `<url>/models/{model}:generateContent` (streaming: `<url>/models/{model}:streamGenerateContent?alt=sse`) |
 
 Trailing slashes on `url` are trimmed. Hence `https://api.openai.com/v1` with `openai-responses`
 becomes `https://api.openai.com/v1/responses`, while the same `url` with `anthropic-messages`
@@ -2074,6 +2075,21 @@ becomes `https://api.openai.com/v1/v1/messages` (wrong).
 
 An empty or unknown `model_type` is treated as `openai-completions` (for compatibility with
 historical data); set it explicitly when creating a model.
+
+#### Gemini upstream (`gemini-generate-content`) limits
+
+- **Single candidate only**: `n > 1` returns 400.
+- **Images**: `image_url` must be an `https://` URL with a file extension
+  (`.png`/`.jpg`/`.jpeg`/`.webp`/`.gif`/`.heic`/`.heif`) or a base64 data URI. The gateway
+  never downloads the image; an `https` URL is fetched by Google. A missing extension or
+  an `http://` URL returns 400.
+- **Thought signature**: multi-turn tool calling on Gemini 3.x / 2.5 depends on
+  `thoughtSignature`. The gateway encodes it into the returned `tool_calls[].id`
+  (as `call_xxx_ts_<signature>`); clients must echo that `id` back unchanged. Through the
+  `/v1/responses` ingress the signature degrades to Gemini's skip sentinel, because that
+  ingress does not carry reasoning items.
+- **Not supported**: audio, video and PDF input; Google-side tools (`googleSearch`,
+  `codeExecution`); Vertex AI endpoints; explicit `cachedContents` management.
 
 #### Responses stateful options and retention
 

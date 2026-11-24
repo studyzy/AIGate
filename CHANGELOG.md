@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gemini upstream protocol** — `ai_models.model_type` gains `gemini-generate-content`,
+  so a model can be backed by the Google Generative Language API
+  (`https://generativelanguage.googleapis.com/v1beta`). All three chat ingresses reach it,
+  cross-protocol translated as usual: text (single and multi-turn), tool calling
+  (single-round and multi-round with `thoughtSignature` round-tripping), streaming, and
+  images. Images become `inlineData` for base64 data URIs and `fileData` for `https` URLs
+  with a known extension; the gateway never downloads an image itself, so the user-supplied
+  URL is fetched by Google instead of becoming a new outbound request from the gateway.
+  `thoughtSignature` rides on the returned tool-call `id` as `call_xxx_ts_<signature>` and is
+  stripped back to the base id before the request reaches Gemini, with Gemini's
+  `skip_thought_signature_validator` sentinel covering clients that do not echo the id.
+  `reasoning_effort` maps to `thinkingBudget` on the 2.5 family (per-model ranges) and to
+  `thinkingLevel` on Gemini 3 and later, because `thinkingBudget` was removed there; an
+  unrecognised model name omits `thinkingConfig` rather than guessing a budget that would be
+  rejected. `n > 1` returns 400, since only the first candidate would otherwise be returned.
+  Known degradation: through `/v1/responses` the signature always falls back to the sentinel,
+  because that ingress does not carry reasoning items.
+
 - **Decision models (both protocols)** — the gateway now serves decision models, which
   answer typed questions with calibrated probabilities instead of text, on two new
   data-plane routes: `POST /v1/decisions` (OpenAI Decisions, aliases `/decisions`) and
