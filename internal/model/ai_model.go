@@ -76,9 +76,18 @@ type AIModel struct {
 	// EnablePeakPricing 是否启用峰谷定价；关闭时所有请求都按 offpeak_* 三列计价。
 	EnablePeakPricing bool `gorm:"not null;default:false"`
 	// UseUpstreamCost 是否优先采信上游自报的 usage.cost（>0 时直接采信，不再自算）。
-	UseUpstreamCost bool      `gorm:"not null;default:true"`
-	CreatedAt       time.Time `gorm:"not null"`
-	UpdatedAt       time.Time `gorm:"not null"`
+	UseUpstreamCost bool `gorm:"not null;default:true"`
+	// ContextWindow 上下文窗口 token 数；0 表示未配置（仅展示，不参与转发判定）。
+	ContextWindow int `gorm:"not null;default:0"`
+	// MaxOutputTokens 模型级输出上限：>0 时与密钥级 api_keys.max_tokens 取较小者压制请求的
+	// max_tokens / max_output_tokens，并作为未指定时的默认值下发；0 表示未配置（只剩密钥级）。
+	MaxOutputTokens int `gorm:"not null;default:0"`
+	// SupportsImage 是否支持图片输入；仅作能力声明用于展示，当前不拦截含图请求。
+	SupportsImage bool `gorm:"not null;default:false"`
+	// EffortLevels 支持的 reasoning_effort 等级，逗号分隔（如 "low,medium,high"）；空串表示未配置。
+	EffortLevels string    `gorm:"size:128;not null;default:''"`
+	CreatedAt    time.Time `gorm:"not null"`
+	UpdatedAt    time.Time `gorm:"not null"`
 }
 
 // GetCustomHTTPHeaders 解析自定义请求头配置。
@@ -228,4 +237,75 @@ func (s *Store) CountAIModelBindings(ctx context.Context, id uint) (int64, error
 		return 0, fmt.Errorf("count model bindings: %w", err)
 	}
 	return n, nil
+}
+
+// effortLevelLadder 是 reasoning_effort 的合法等级，升序；用于校验与归一化顺序。
+// 参考 OpenAI / DeepSeek 的公开取值；"none" 表示关闭推理，同样是合法取值。
+var effortLevelLadder = map[string]bool{
+	"none": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
+
+// effortLevelOrder 固定归一化后的输出顺序（与 effortLevelLadder 一致），避免「配的顺序」影响展示。
+var effortLevelOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// ValidateEffortLevels 校验 effort 等级列表：每个值必须是合法等级且不重复；空列表表示未配置。
+// 返回错误消息（英文，供对外 API 使用），空串表示通过。
+func ValidateEffortLevels(levels []string) string {
+	seen := make(map[string]bool, len(levels))
+	for _, raw := range levels {
+		level := strings.ToLower(strings.TrimSpace(raw))
+		if level == "" {
+			continue
+		}
+		if !effortLevelLadder[level] {
+			return "effort_levels contains an unknown level: " + level
+		}
+		if seen[level] {
+			return "effort_levels contains a duplicate level: " + level
+		}
+		seen[level] = true
+	}
+	return ""
+}
+
+// JoinEffortLevels 把等级列表归一化为存储用的逗号分隔串（小写、按阶梯升序、去空值）。
+// 入参应先经 ValidateEffortLevels 校验；非法值在此被丢弃而不是落库。
+func JoinEffortLevels(levels []string) string {
+	seen := make(map[string]bool, len(levels))
+	for _, raw := range levels {
+		seen[strings.ToLower(strings.TrimSpace(raw))] = true
+	}
+	out := make([]string, 0, len(seen))
+	for _, level := range effortLevelOrder {
+		if seen[level] {
+			out = append(out, level)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// SplitEffortLevels 把存储串拆成等级列表；未配置时返回空切片（非 nil，便于 JSON 序列化为 []）。
+func SplitEffortLevels(stored string) []string {
+	out := []string{}
+	for _, part := range strings.Split(stored, ",") {
+		if level := strings.TrimSpace(part); level != "" {
+			out = append(out, level)
+		}
+	}
+	return out
+}
+
+// OutputTokenCeiling 返回模型级与密钥级输出上限的较小者；两者都未配置（<=0）时返回 0。
+// 密钥级是安全闸，模型级是对上游声明的能力边界，任何一方生效都只能收紧。
+func OutputTokenCeiling(modelLimit, keyLimit int) int {
+	switch {
+	case modelLimit <= 0:
+		return keyLimit
+	case keyLimit <= 0:
+		return modelLimit
+	case modelLimit < keyLimit:
+		return modelLimit
+	default:
+		return keyLimit
+	}
 }

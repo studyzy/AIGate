@@ -20,6 +20,14 @@ export interface AIGateModel {
   enable_peak_pricing: boolean;
   /** 是否优先采信上游自报的 usage.cost。 */
   use_upstream_cost: boolean;
+  /** 上下文窗口 token 数；0 表示未配置（仅展示）。 */
+  context_window: number;
+  /** 模型级输出上限；0 表示未配置，>0 时与密钥级上限取较小者。 */
+  max_output_tokens: number;
+  /** 是否支持图片输入（能力声明，当前不拦截）。 */
+  supports_image: boolean;
+  /** 支持的 reasoning_effort 等级（升序）；未配置时为空数组。 */
+  effort_levels: string[];
   /** 当前生效的价目快照；无价目时为 null。 */
   current_price: AIModelPrice | null;
   created_at: string;
@@ -41,6 +49,10 @@ export interface ModelInput {
   currency?: string;
   enable_peak_pricing?: boolean;
   use_upstream_cost?: boolean;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_image?: boolean;
+  effort_levels?: string[];
 }
 
 /** PeakWindow 是一个高峰时段窗口；days 用 Go time.Weekday 编号（0=周日 … 6=周六）。 */

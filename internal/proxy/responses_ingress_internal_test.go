@@ -207,7 +207,7 @@ func TestPrepareResponsesTokens_OnlyHandlesResponsesShape(t *testing.T) {
 
 	t.Run("responses shape is capped", func(t *testing.T) {
 		body := map[string]any{"model": "m", "input": "hi", "max_output_tokens": float64(9000)}
-		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, body)
+		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, &model.Resolved{}, body)
 		if got := body["max_output_tokens"]; got != float64(limit) {
 			t.Fatalf("max_output_tokens = %v, want %d", got, limit)
 		}
@@ -220,12 +220,29 @@ func TestPrepareResponsesTokens_OnlyHandlesResponsesShape(t *testing.T) {
 			"model":    "m",
 			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 		}
-		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, body)
+		prepareResponsesTokens(&model.APIKey{MaxTokens: limit}, &model.Resolved{}, body)
 		if _, injected := body["max_output_tokens"]; injected {
 			t.Fatalf("chat shape must not gain max_output_tokens, got %v", body)
 		}
 		if _, injected := body["max_tokens"]; injected {
 			t.Fatalf("this step must not inject chat max_tokens, got %v", body)
+		}
+	})
+
+	// 模型级上限与密钥级取较小者：模型侧更严时按模型侧压，未配置时按密钥侧。
+	t.Run("model ceiling wins when stricter", func(t *testing.T) {
+		body := map[string]any{"model": "m", "input": "hi", "max_output_tokens": float64(9000)}
+		prepareResponsesTokens(&model.APIKey{MaxTokens: 800}, &model.Resolved{MaxOutputTokens: 100}, body)
+		if got := body["max_output_tokens"]; got != float64(100) {
+			t.Fatalf("max_output_tokens = %v, want 100 (model ceiling)", got)
+		}
+	})
+
+	t.Run("key ceiling wins when stricter", func(t *testing.T) {
+		body := map[string]any{"model": "m", "input": "hi", "max_output_tokens": float64(9000)}
+		prepareResponsesTokens(&model.APIKey{MaxTokens: 100}, &model.Resolved{MaxOutputTokens: 800}, body)
+		if got := body["max_output_tokens"]; got != float64(100) {
+			t.Fatalf("max_output_tokens = %v, want 100 (key ceiling)", got)
 		}
 	})
 }

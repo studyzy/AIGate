@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS `ai_models` (
     `enable_peak_pricing` TINYINT(1)      NOT NULL DEFAULT 0,
     -- use_upstream_cost: trust usage.cost reported by the upstream when > 0
     `use_upstream_cost`   TINYINT(1)      NOT NULL DEFAULT 1,
+    -- context_window: context window in tokens (display only); 0 = not configured
+    `context_window`      BIGINT          NOT NULL DEFAULT 0,
+    -- max_output_tokens: per-model output ceiling; min() with api_keys.max_tokens; 0 = not configured
+    `max_output_tokens`   BIGINT          NOT NULL DEFAULT 0,
+    -- supports_image: capability flag (display only, not enforced); 0 = not configured
+    `supports_image`      TINYINT(1)      NOT NULL DEFAULT 0,
+    -- effort_levels: accepted reasoning_effort ladder, comma separated; '' = not configured
+    `effort_levels`       VARCHAR(128)    NOT NULL DEFAULT '',
     `created_at`          DATETIME(3)     NOT NULL,
     `updated_at`          DATETIME(3)     NOT NULL,
     PRIMARY KEY (`id`),

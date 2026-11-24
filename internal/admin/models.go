@@ -46,6 +46,14 @@ type modelResponse struct {
 	EnablePeakPricing bool `json:"enable_peak_pricing"`
 	// UseUpstreamCost 是否优先采信上游自报的 usage.cost。
 	UseUpstreamCost bool `json:"use_upstream_cost"`
+	// ContextWindow 上下文窗口 token 数；0 表示未配置（仅展示）。
+	ContextWindow int `json:"context_window"`
+	// MaxOutputTokens 模型级输出上限；0 表示未配置。
+	MaxOutputTokens int `json:"max_output_tokens"`
+	// SupportsImage 是否支持图片输入（能力声明，当前不拦截）。
+	SupportsImage bool `json:"supports_image"`
+	// EffortLevels 支持的 reasoning_effort 等级（升序）；未配置时为空数组。
+	EffortLevels []string `json:"effort_levels"`
 	// CurrentPrice 当前生效的价目快照；无价目时为 null。
 	CurrentPrice *priceResponse `json:"current_price"`
 	CreatedAt    time.Time      `json:"created_at"`
@@ -70,6 +78,10 @@ type modelCreateRequest struct {
 	Currency          string           `json:"currency"`
 	EnablePeakPricing *bool            `json:"enable_peak_pricing"`
 	UseUpstreamCost   *bool            `json:"use_upstream_cost"`
+	ContextWindow     *int             `json:"context_window"`
+	MaxOutputTokens   *int             `json:"max_output_tokens"`
+	SupportsImage     *bool            `json:"supports_image"`
+	EffortLevels      *[]string        `json:"effort_levels"`
 }
 
 // modelUpdateRequest 是局部更新请求：指针字段用于区分「未传」与「零值」。
@@ -89,6 +101,10 @@ type modelUpdateRequest struct {
 	Currency          *string          `json:"currency"`
 	EnablePeakPricing *bool            `json:"enable_peak_pricing"`
 	UseUpstreamCost   *bool            `json:"use_upstream_cost"`
+	ContextWindow     *int             `json:"context_window"`
+	MaxOutputTokens   *int             `json:"max_output_tokens"`
+	SupportsImage     *bool            `json:"supports_image"`
+	EffortLevels      *[]string        `json:"effort_levels"`
 }
 
 // handleCreateModel 创建模型；成功后失效该模型的计价缓存（币种/开关即刻对数据面生效）。
@@ -159,6 +175,18 @@ func handleCreateModel(store *model.Store, src *billing.StoreSource) http.Handle
 			m.Enabled = *req.Enabled
 		}
 		m.UserKeyRequired = userKeyRequired
+		if req.ContextWindow != nil {
+			m.ContextWindow = *req.ContextWindow
+		}
+		if req.MaxOutputTokens != nil {
+			m.MaxOutputTokens = *req.MaxOutputTokens
+		}
+		if req.SupportsImage != nil {
+			m.SupportsImage = *req.SupportsImage
+		}
+		if req.EffortLevels != nil {
+			m.EffortLevels = model.JoinEffortLevels(*req.EffortLevels)
+		}
 		if err := store.CreateAIModel(r.Context(), m); err != nil {
 			writeInternalError(w, err)
 			return
@@ -333,6 +361,10 @@ func toModelResponse(m *model.AIModel) modelResponse {
 		Currency:          m.Currency,
 		EnablePeakPricing: m.EnablePeakPricing,
 		UseUpstreamCost:   m.UseUpstreamCost,
+		ContextWindow:     m.ContextWindow,
+		MaxOutputTokens:   m.MaxOutputTokens,
+		SupportsImage:     m.SupportsImage,
+		EffortLevels:      model.SplitEffortLevels(m.EffortLevels),
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}
@@ -370,6 +402,17 @@ func validateModelCreate(req *modelCreateRequest) string {
 			return "user_key_required models must not reference a credential"
 		}
 	}
+	if req.ContextWindow != nil && *req.ContextWindow < 0 {
+		return "context_window must not be negative"
+	}
+	if req.MaxOutputTokens != nil && *req.MaxOutputTokens < 0 {
+		return "max_output_tokens must not be negative"
+	}
+	if req.EffortLevels != nil {
+		if msg := model.ValidateEffortLevels(*req.EffortLevels); msg != "" {
+			return msg
+		}
+	}
 	return ""
 }
 
@@ -386,6 +429,17 @@ func validateModelUpdate(req *modelUpdateRequest, before *model.AIModel) string 
 		}
 		if req.CredentialID != nil && *req.CredentialID > 0 {
 			return "user_key_required models must not reference a credential"
+		}
+	}
+	if req.ContextWindow != nil && *req.ContextWindow < 0 {
+		return "context_window must not be negative"
+	}
+	if req.MaxOutputTokens != nil && *req.MaxOutputTokens < 0 {
+		return "max_output_tokens must not be negative"
+	}
+	if req.EffortLevels != nil {
+		if msg := model.ValidateEffortLevels(*req.EffortLevels); msg != "" {
+			return msg
 		}
 	}
 	return ""
@@ -448,6 +502,18 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 	}
 	if req.UseUpstreamCost != nil {
 		fields["use_upstream_cost"] = *req.UseUpstreamCost
+	}
+	if req.ContextWindow != nil {
+		fields["context_window"] = *req.ContextWindow
+	}
+	if req.MaxOutputTokens != nil {
+		fields["max_output_tokens"] = *req.MaxOutputTokens
+	}
+	if req.SupportsImage != nil {
+		fields["supports_image"] = *req.SupportsImage
+	}
+	if req.EffortLevels != nil {
+		fields["effort_levels"] = model.JoinEffortLevels(*req.EffortLevels)
 	}
 	return fields, ""
 }

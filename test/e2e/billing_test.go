@@ -557,3 +557,131 @@ func TestE2E_BillingUpstreamReportedCost(t *testing.T) {
 		t.Errorf("completion_tokens = %d, want 100 (the usage of this mock)", row.CompletionTokens)
 	}
 }
+
+// TestE2E_Billing_ModelOutputCeiling 验证模型级输出上限真的作用到转发的请求上，
+// 并且与密钥级上限取较小者——模型侧配得更松时必须仍被密钥侧收紧。
+//
+// 能力字段本身（context_window / supports_image / effort_levels）只做展示，
+// 此处一并断言它们能经管理面往返，避免「字段加了但写不进去」。
+func TestE2E_Billing_ModelOutputCeiling(t *testing.T) {
+	bin := requireEnv(t, envBinKey)
+	dsn := requireEnv(t, envDSNKey)
+
+	openAIMock := newUpstreamMock(kindOpenAI)
+	t.Cleanup(openAIMock.Close)
+	gw := startGateway(t, bin, dsn)
+
+	// 模型级上限 64，密钥级上限 256：模型侧更严 → 上游必须看到 64。
+	modelID := createModel(t, gw.baseURL, adminToken, map[string]any{
+		"provider":          "mock",
+		"model_id":          "ec-model",
+		"model_name":        "ec",
+		"url":               openAIMock.URL() + "/v1",
+		"api_key":           upstreamAPIKey,
+		"model_type":        "openai-completions",
+		"max_output_tokens": 64,
+		"context_window":    128000,
+		"supports_image":    true,
+		"effort_levels":     []string{"high", "low"},
+	})
+
+	// 能力字段经管理面往返，且 effort 由服务端按阶梯升序归一化。
+	status, raw := adminJSON(t, gw.baseURL, http.MethodGet, fmt.Sprintf("/admin/models/%d", modelID), nil)
+	if status != http.StatusOK {
+		t.Fatalf("get model expected 200, got %d: %s", status, raw)
+	}
+	var model struct {
+		ContextWindow   int      `json:"context_window"`
+		MaxOutputTokens int      `json:"max_output_tokens"`
+		SupportsImage   bool     `json:"supports_image"`
+		EffortLevels    []string `json:"effort_levels"`
+	}
+	if err := json.Unmarshal(raw, &model); err != nil {
+		t.Fatalf("decode model: %v", err)
+	}
+	if model.ContextWindow != 128000 || model.MaxOutputTokens != 64 || !model.SupportsImage {
+		t.Fatalf("model capabilities did not round-trip: %s", raw)
+	}
+	if len(model.EffortLevels) != 2 || model.EffortLevels[0] != "low" || model.EffortLevels[1] != "high" {
+		t.Fatalf("effort_levels = %v, want [low high]", model.EffortLevels)
+	}
+
+	owner := createUser(t, gw.baseURL, "ceiling-owner", 0)
+	key := createKey(t, gw.baseURL, map[string]any{
+		"name":       "ceiling-key",
+		"user_id":    owner.ID,
+		"max_tokens": 256,
+		"bindings":   []map[string]any{{"ai_model_id": modelID, "role": "primary"}},
+	})
+
+	for _, tc := range []struct {
+		name    string
+		request map[string]any
+		want    float64
+	}{
+		{
+			name:    "client asks for more than the model ceiling",
+			request: map[string]any{"max_tokens": 4096},
+			want:    64,
+		},
+		{
+			name:    "client omits max_tokens and the ceiling is injected",
+			request: map[string]any{},
+			want:    64,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"messages": []map[string]string{{"role": "user", "content": "hi"}}}
+			for k, v := range tc.request {
+				body[k] = v
+			}
+			status, respBody := postChatCompletion(t, gw.baseURL, key.Token, body)
+			if status != http.StatusOK {
+				t.Fatalf("forward expected 200, got %d: %s", status, respBody)
+			}
+			var sent map[string]any
+			if err := json.Unmarshal(openAIMock.lastRequest().Body, &sent); err != nil {
+				t.Fatalf("decode upstream body: %v", err)
+			}
+			if got := sent["max_tokens"]; got != tc.want {
+				t.Fatalf("upstream max_tokens = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// 反过来：模型侧放宽到 1024，密钥级 256 必须仍然收紧。
+	status, raw = adminJSON(t, gw.baseURL, http.MethodPut, fmt.Sprintf("/admin/models/%d", modelID),
+		map[string]any{"max_output_tokens": 1024})
+	if status != http.StatusOK {
+		t.Fatalf("relax model ceiling expected 200, got %d: %s", status, raw)
+	}
+	status, respBody := postChatCompletion(t, gw.baseURL, key.Token, map[string]any{
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+		"max_tokens": 4096,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("forward expected 200, got %d: %s", status, respBody)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(openAIMock.lastRequest().Body, &sent); err != nil {
+		t.Fatalf("decode upstream body: %v", err)
+	}
+	if got := sent["max_tokens"]; got != float64(256) {
+		t.Fatalf("upstream max_tokens = %v, want 256 (the key ceiling must still win)", got)
+	}
+}
+
+// adminJSON 以管理员身份发一次管理面 HTTP 请求，返回状态码与响应体。
+// 只用于「读回形状」与「故意失败」的契约断言；写操作仍优先走 aigatectl。
+func adminJSON(t *testing.T, baseURL, method, path string, body map[string]any) (int, []byte) {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode %s %s body: %v", method, path, err)
+		}
+		raw = encoded
+	}
+	return doRequest(t, method, baseURL+path, adminToken, raw)
+}

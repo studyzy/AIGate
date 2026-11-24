@@ -3012,6 +3012,23 @@ components:
           description: |
             是否优先采信上游自报的 `usage.cost`（默认 `true`）。开启且上游自报
             `cost > 0` 时直接采用该值，不再按价目自算；未报或 `<= 0` 时回退自算。
+        context_window:
+          type: integer
+          description: 上下文窗口 token 数；`0` 表示未配置。仅作能力声明与展示，不据此拒绝请求。
+        max_output_tokens:
+          type: integer
+          description: |
+            模型级输出上限；`0` 表示未配置。与密钥级 `max_tokens` 取较小者作为本次请求的
+            输出上限，两者都未配置时不设上限。
+        supports_image:
+          type: boolean
+          description: 是否支持图片输入；仅作能力声明与展示，暂不拦截含图请求。
+        effort_levels:
+          type: array
+          items:
+            type: string
+            enum: [none, minimal, low, medium, high, xhigh, max]
+          description: 支持的 reasoning_effort 等级（按阶梯升序）；空数组表示未配置。仅作能力声明与展示。
         current_price:
           allOf:
             - $ref: '#/components/schemas/ModelPrice'
@@ -3024,7 +3041,7 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, provider, model_id, model_name, url, model_type, quota_day, enabled, user_key_required, credential_id, currency, enable_peak_pricing, use_upstream_cost, created_at, updated_at]
+      required: [id, provider, model_id, model_name, url, model_type, quota_day, enabled, user_key_required, credential_id, currency, enable_peak_pricing, use_upstream_cost, context_window, max_output_tokens, supports_image, effort_levels, created_at, updated_at]
 
     ModelList:
       type: object
@@ -3080,6 +3097,23 @@ components:
         use_upstream_cost:
           type: boolean
           default: true
+        context_window:
+          type: integer
+          minimum: 0
+          default: 0
+        max_output_tokens:
+          type: integer
+          minimum: 0
+          default: 0
+        supports_image:
+          type: boolean
+          default: false
+        effort_levels:
+          type: array
+          items:
+            type: string
+            enum: [none, minimal, low, medium, high, xhigh, max]
+          description: 未知取值或重复取值返回 400；大小写不敏感，按阶梯升序落库。
       required: [model_id, url, model_type]
 
     ModelUpdateRequest:
@@ -3119,6 +3153,21 @@ components:
           type: boolean
         use_upstream_cost:
           type: boolean
+        context_window:
+          type: integer
+          minimum: 0
+        max_output_tokens:
+          type: integer
+          minimum: 0
+          description: 置 `0` 清除模型级上限（密钥级上限仍然生效）。
+        supports_image:
+          type: boolean
+        effort_levels:
+          type: array
+          items:
+            type: string
+            enum: [none, minimal, low, medium, high, xhigh, max]
+          description: 整体替换；空数组清除。
 
     ConnectivityResult:
       type: object

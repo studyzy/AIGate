@@ -98,6 +98,16 @@ type Resolved struct {
 	APIKey            string
 	QuotaDay          int
 	CustomHTTPHeaders map[string]string
+	// MaxOutputTokens 模型级输出上限（ai_models.max_output_tokens）；0 表示未配置。
+	MaxOutputTokens int
+}
+
+// OutputCeiling 返回本次请求可用的输出上限：模型级与密钥级取较小者，都未配置时为 0。
+func (r *Resolved) OutputCeiling(key *APIKey) int {
+	if r == nil {
+		return 0
+	}
+	return OutputTokenCeiling(r.MaxOutputTokens, key.MaxTokens)
 }
 
 var (
@@ -466,6 +476,7 @@ func (s *Store) resolvedFromAIModel(ctx context.Context, m AIModel, bindingKey s
 		APIKey:            apiKey,
 		QuotaDay:          m.QuotaDay,
 		CustomHTTPHeaders: m.GetCustomHTTPHeaders(),
+		MaxOutputTokens:   m.MaxOutputTokens,
 	}, nil
 }
 

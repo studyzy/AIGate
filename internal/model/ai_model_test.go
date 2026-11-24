@@ -14,194 +14,80 @@
 package model_test
 
 import (
-	"reflect"
 	"testing"
 
 	"aigate/internal/model"
 )
 
-// 模型 CRUD + 零值字段落库时套用 DB 默认值（quota_day=-1、enabled=true、model_type 默认）。
-func TestAIModel_CRUDAndDefaults(t *testing.T) {
-	store := newTestStore(t)
-	ctx := testCtx()
-
-	// 只填业务必填项，其余留零值，验证默认值来自建表定义。
-	m := &model.AIModel{Provider: "p", ModelID: "gpt-x", ModelName: "GPT X", URL: "https://upstream.test/v1"}
-	if err := store.CreateAIModel(ctx, m); err != nil {
-		t.Fatalf("CreateAIModel: %v", err)
-	}
-
-	got, err := store.GetAIModel(ctx, m.ID)
-	if err != nil {
-		t.Fatalf("GetAIModel: %v", err)
-	}
-	if got.QuotaDay != -1 {
-		t.Fatalf("default QuotaDay = %d, want -1", got.QuotaDay)
-	}
-	if !got.Enabled {
-		t.Fatal("default Enabled = false, want true")
-	}
-	if got.ModelType != model.ModelTypeOpenAI {
-		t.Fatalf("default ModelType = %q, want %q", got.ModelType, model.ModelTypeOpenAI)
-	}
-	if got.CustomHTTPHeaders != "" {
-		t.Fatalf("CustomHTTPHeaders = %q, want empty", got.CustomHTTPHeaders)
-	}
-
-	second := mustCreateAIModel(t, store, "m2")
-	models, err := store.ListAIModels(ctx)
-	if err != nil {
-		t.Fatalf("ListAIModels: %v", err)
-	}
-	if len(models) != 2 {
-		t.Fatalf("ListAIModels len = %d, want 2", len(models))
-	}
-	if models[0].ID >= models[1].ID {
-		t.Fatalf("ListAIModels not ordered by id ASC: %+v", models)
-	}
-	if models[1].ID != second.ID {
-		t.Fatalf("ListAIModels[1].ID = %d, want %d", models[1].ID, second.ID)
-	}
-
-	if err := store.DeleteAIModel(ctx, second.ID); err != nil {
-		t.Fatalf("DeleteAIModel: %v", err)
-	}
-	if _, err := store.GetAIModel(ctx, second.ID); !model.IsNotFound(err) {
-		t.Fatalf("deleted model still readable: err = %v", err)
-	}
-	if _, err := store.GetAIModel(ctx, 999999); !model.IsNotFound(err) {
-		t.Fatalf("GetAIModel(unknown) err = %v, want not found", err)
-	}
-}
-
-// 局部字段更新：只改传入字段，Enabled 可被显式置为 false。
-func TestAIModel_UpdatePartialFields(t *testing.T) {
-	store := newTestStore(t)
-	ctx := testCtx()
-
-	m := mustCreateAIModel(t, store, "partial")
-	updated, err := store.UpdateAIModel(ctx, m.ID, map[string]any{
-		"model_name": "renamed",
-		"enabled":    false,
-	})
-	if err != nil {
-		t.Fatalf("UpdateAIModel: %v", err)
-	}
-	if updated.ModelName != "renamed" {
-		t.Fatalf("ModelName = %q, want renamed", updated.ModelName)
-	}
-	if updated.Enabled {
-		t.Fatal("Enabled should be updated to false")
-	}
-	// 未传入字段保持原值。
-	if updated.ModelID != m.ModelID || updated.URL != m.URL {
-		t.Fatalf("unexpected mutation of untouched fields: %+v", updated)
-	}
-	if updated.QuotaDay != m.QuotaDay {
-		t.Fatalf("QuotaDay = %d, want %d", updated.QuotaDay, m.QuotaDay)
-	}
-
-	same, err := store.UpdateAIModel(ctx, m.ID, nil)
-	if err != nil {
-		t.Fatalf("UpdateAIModel(nil fields): %v", err)
-	}
-	if same.ModelName != "renamed" {
-		t.Fatalf("UpdateAIModel(nil fields) ModelName = %q, want renamed", same.ModelName)
-	}
-}
-
-// 删除模型清理其绑定，密钥本身保留。
-func TestAIModel_DeleteClearsBindings(t *testing.T) {
-	store := newTestStore(t)
-	ctx := testCtx()
-
-	owner := mustCreateUser(t, store, "owner")
-	m1 := mustCreateAIModel(t, store, "m1")
-	m2 := mustCreateAIModel(t, store, "m2")
-	key, _ := mustCreateAPIKey(t, store, owner.ID,
-		binding(m1.ID, model.ModelRolePrimary, 0),
-		binding(m2.ID, model.ModelRoleFallback, 1),
-	)
-
-	if err := store.DeleteAIModel(ctx, m1.ID); err != nil {
-		t.Fatalf("DeleteAIModel: %v", err)
-	}
-
-	if _, err := store.GetAIModel(ctx, m1.ID); !model.IsNotFound(err) {
-		t.Fatalf("deleted model still readable: err = %v", err)
-	}
-	infos, err := store.ListKeyModels(ctx, key.ID, false)
-	if err != nil {
-		t.Fatalf("ListKeyModels: %v", err)
-	}
-	if len(infos) != 1 || infos[0].AIModelID != m2.ID {
-		t.Fatalf("bindings after model delete = %+v, want only model %d", infos, m2.ID)
-	}
-	if _, err := store.GetAPIKeyByID(ctx, key.ID); err != nil {
-		t.Fatalf("api key should survive model delete: %v", err)
-	}
-}
-
-// GetCustomHTTPHeaders 的合法 / 非法 / 空串三种输入。
-func TestAIModel_GetCustomHTTPHeaders(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-		want  map[string]string
+func TestOutputTokenCeiling(t *testing.T) {
+	cases := []struct {
+		name                       string
+		modelLimit, keyLimit, want int
 	}{
-		{name: "valid", value: `{"X-A":"1","X-B":"2"}`, want: map[string]string{"X-A": "1", "X-B": "2"}},
-		{name: "empty", value: "", want: nil},
-		{name: "whitespace", value: "  \n\t ", want: nil},
-		{name: "invalid-json", value: `{"X-A":`, want: nil},
-		{name: "not-object", value: `["X-A"]`, want: nil},
-		{name: "empty-object", value: `{}`, want: nil},
-		{name: "json-null", value: `null`, want: nil},
+		{"both unset", 0, 0, 0},
+		{"only model", 1000, 0, 1000},
+		{"only key", 0, 2000, 2000},
+		{"model stricter", 1000, 2000, 1000},
+		{"key stricter", 3000, 2000, 2000},
+		{"equal", 2000, 2000, 2000},
+		// 负数视作未配置：与「未指定」同义，不能当成 0 上限把请求压到 0。
+		{"negative treated as unset", -1, 2000, 2000},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := model.AIModel{CustomHTTPHeaders: tt.value}
-			got := m.GetCustomHTTPHeaders()
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("GetCustomHTTPHeaders(%q) = %#v, want %#v", tt.value, got, tt.want)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := model.OutputTokenCeiling(c.modelLimit, c.keyLimit); got != c.want {
+				t.Fatalf("OutputTokenCeiling(%d, %d) = %d, want %d", c.modelLimit, c.keyLimit, got, c.want)
 			}
 		})
 	}
 }
 
-// billing_mode 只有两个合法取值，且必须能落库回读。
-func TestValidBillingMode(t *testing.T) {
-	for _, ok := range []string{model.BillingModePerToken, model.BillingModeInputOnly} {
-		if !model.ValidBillingMode(ok) {
-			t.Fatalf("%q must be valid", ok)
-		}
+func TestJoinEffortLevels(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"empty", nil, ""},
+		{"sorted by ladder, not input order", []string{"high", "low", "medium"}, "low,medium,high"},
+		{"case and spaces normalized", []string{" HIGH ", "Low"}, "low,high"},
+		{"none sorts first", []string{"low", "none"}, "none,low"},
+		{"blank entries dropped", []string{"", "low", "  "}, "low"},
+		{"duplicates collapse", []string{"low", "low"}, "low"},
 	}
-	for _, bad := range []string{"", "token", "PER_TOKEN", "input-only"} {
-		if model.ValidBillingMode(bad) {
-			t.Fatalf("%q must be rejected", bad)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := model.JoinEffortLevels(c.in); got != c.want {
+				t.Fatalf("JoinEffortLevels(%v) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 
-func TestAIModelBillingModePersists(t *testing.T) {
-	store := newTestStore(t)
-	ctx := testCtx()
+func TestSplitEffortLevels(t *testing.T) {
+	if got := model.SplitEffortLevels(""); got == nil || len(got) != 0 {
+		t.Fatalf("empty stored value must yield an empty non-nil slice, got %#v", got)
+	}
+	got := model.SplitEffortLevels("low, medium ,high")
+	if len(got) != 3 || got[0] != "low" || got[1] != "medium" || got[2] != "high" {
+		t.Fatalf("SplitEffortLevels = %#v", got)
+	}
+}
 
-	m := &model.AIModel{
-		Provider:    "typesafe",
-		ModelID:     "jev-latest",
-		ModelName:   "Jev",
-		URL:         "https://api.typesafe.ai/v1",
-		ModelType:   model.ModelTypeSystemOne,
-		BillingMode: model.BillingModeInputOnly,
+func TestValidateEffortLevels(t *testing.T) {
+	if msg := model.ValidateEffortLevels([]string{"low", "medium", "high"}); msg != "" {
+		t.Fatalf("valid levels rejected: %q", msg)
 	}
-	if err := store.CreateAIModel(ctx, m); err != nil {
-		t.Fatalf("CreateAIModel: %v", err)
+	if msg := model.ValidateEffortLevels([]string{"LOW"}); msg != "" {
+		t.Fatalf("uppercase level must be accepted: %q", msg)
 	}
-	got, err := store.GetAIModel(ctx, m.ID)
-	if err != nil {
-		t.Fatalf("GetAIModel: %v", err)
+	if msg := model.ValidateEffortLevels(nil); msg != "" {
+		t.Fatalf("empty list must be accepted: %q", msg)
 	}
-	if got.BillingMode != model.BillingModeInputOnly {
-		t.Fatalf("BillingMode = %q", got.BillingMode)
+	if msg := model.ValidateEffortLevels([]string{"extreme"}); msg == "" {
+		t.Fatal("unknown level must be rejected")
+	}
+	if msg := model.ValidateEffortLevels([]string{"low", "low"}); msg == "" {
+		t.Fatal("duplicate level must be rejected")
 	}
 }

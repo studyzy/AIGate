@@ -22,29 +22,50 @@ test("configures model currency, peak pricing and price rows", async ({ page, re
   await expect(modelRow).toBeVisible();
   await modelRow.getByRole("button", { name: "Edit" }).click();
 
+  // 模型编辑抽屉只编辑模型能力：上下文窗口、输出上限、图片、effort 等级。
   const drawer = page.getByRole("dialog", { name: "Edit model" });
   await expect(drawer).toBeVisible();
   await expect(drawer.getByTestId("model-current-price")).toContainText("Set a pricing currency first");
-
-  await drawer.getByTestId("model-currency-select").selectOption("CNY");
-  await drawer.getByTestId("model-peak-pricing").check();
-  await drawer.getByTestId("model-upstream-cost").uncheck();
+  await drawer.getByTestId("model-context-window").fill("128000");
+  await drawer.getByTestId("model-max-output-tokens").fill("8192");
+  await drawer.getByTestId("model-supports-image").check();
+  await drawer.getByTestId("model-effort-levels").getByRole("checkbox", { name: "high", exact: true }).check();
+  await drawer.getByTestId("model-effort-levels").getByRole("checkbox", { name: "low", exact: true }).check();
   await drawer.getByRole("button", { name: "Save" }).click();
   await expect(drawer).toHaveCount(0);
 
-  // 保存后回显：币种与两个开关都要持久化。
+  // 保存后回显：能力字段持久化，且 effort 由服务端按阶梯升序归一化。
   await modelRow.getByRole("button", { name: "Edit" }).click();
-  await expect(drawer.getByTestId("model-currency-select")).toHaveValue("CNY");
-  await expect(drawer.getByTestId("model-peak-pricing")).toBeChecked();
-  await expect(drawer.getByTestId("model-upstream-cost")).not.toBeChecked();
+  await expect(drawer.getByTestId("model-context-window")).toHaveValue("128000");
+  await expect(drawer.getByTestId("model-max-output-tokens")).toHaveValue("8192");
+  await expect(drawer.getByTestId("model-supports-image")).toBeChecked();
+  await expect(drawer.getByTestId("model-effort-levels").getByRole("checkbox", { name: "high", exact: true })).toBeChecked();
+  await expect(drawer.getByTestId("model-effort-levels").getByRole("checkbox", { name: "low", exact: true })).toBeChecked();
+  await expect(drawer.getByTestId("model-effort-levels").getByRole("checkbox", { name: "medium", exact: true })).not.toBeChecked();
   await page.keyboard.press("Escape");
   await expect(drawer).toHaveCount(0);
 
-  // 价目抽屉：峰谷开关打开时六个单价框都在（峰三列 + 谷三列）。
+  // 价目抽屉承担计价配置：币种 + 两个开关在这里落地，再追加价目。
   await modelRow.getByRole("button", { name: "Prices" }).click();
   const priceDrawer = page.getByRole("dialog", { name: "Prices" });
   await expect(priceDrawer).toBeVisible();
   await expect(priceDrawer.getByText("No prices yet")).toBeVisible();
+
+  await priceDrawer.getByTestId("price-currency-select").selectOption("CNY");
+  await priceDrawer.getByTestId("price-peak-pricing").check();
+  await priceDrawer.getByTestId("price-upstream-cost").uncheck();
+  await priceDrawer.getByRole("button", { name: "Save settings" }).click();
+  // 峰谷开关打开后，六个单价框才出现（峰三列 + 谷三列）。
+  await expect(priceDrawer.getByTestId("price-offpeak_output_micros")).toBeVisible();
+  await expect(priceDrawer.getByTestId("price-peak_output_micros")).toBeVisible();
+
+  // 开关是模型级配置，重开抽屉后必须保持。
+  await page.keyboard.press("Escape");
+  await expect(priceDrawer).toHaveCount(0);
+  await modelRow.getByRole("button", { name: "Prices" }).click();
+  await expect(priceDrawer.getByTestId("price-currency-select")).toHaveValue("CNY");
+  await expect(priceDrawer.getByTestId("price-peak-pricing")).toBeChecked();
+  await expect(priceDrawer.getByTestId("price-upstream-cost")).not.toBeChecked();
 
   // 单价按币种单位录入，提交时换算为整数微元。
   await priceDrawer.getByTestId("price-peak_input_hit_micros").fill("1");
@@ -84,6 +105,20 @@ test("configures model currency, peak pricing and price rows", async ({ page, re
   expect(row.peak_input_hit_micros).toBe(1_000_000);
   expect(row.offpeak_input_hit_micros).toBe(500_000);
   expect(row.offpeak_output_micros).toBe(4_000_000);
+  // 模型级能力字段与开关走 /admin/models，不从价目行读。
+  const modelResp = await request.get("/admin/models/" + (await modelID(request, modelKey)), {
+    headers: { Authorization: "Bearer e2e-admin" },
+  });
+  expect(modelResp.ok()).toBeTruthy();
+  const model = await modelResp.json();
+  expect(model.context_window).toBe(128000);
+  expect(model.max_output_tokens).toBe(8192);
+  expect(model.supports_image).toBe(true);
+  expect(model.effort_levels).toEqual(["low", "high"]);
+  expect(model.currency).toBe("CNY");
+  expect(model.enable_peak_pricing).toBe(true);
+  expect(model.use_upstream_cost).toBe(false);
+
   const schedule = JSON.parse(row.peak_hours);
   expect(schedule.timezone).toBe("Asia/Shanghai");
   expect(schedule.windows).toHaveLength(2);

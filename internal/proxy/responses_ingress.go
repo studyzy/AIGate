@@ -20,18 +20,19 @@ package proxy
 //       2. 解析 model / stream / store / previous_response_id / conversation / background；
 //       3. prepareResponsesState：站点开关取舍、两者互斥、取父行/会话并校验归属（失败 404）、
 //          把父行 items 前置于本轮 input（background 仍 400，属 Task 9）；
-//       4. prepareResponsesTokens：**在转 chat 之前**对 Responses 形态 body 压 max_output_tokens
-//          （enforceMaxTokens 靠请求体形态判定协议，转成 chat 后再压就压不到了）；
-//       5. resolveAndCheckQuota：模型解析 + 配额（**每条路径恰好一次**）；
+//       4. resolveAndCheckQuota：模型解析 + 配额（**每条路径恰好一次**）；
+//       5. prepareResponsesTokens：**在转 chat 之前**对 Responses 形态 body 压 max_output_tokens
+//          （enforceMaxTokens 靠请求体形态判定协议，转成 chat 后再压就压不到了）。
+//          排在 4 之后是因为上限要取模型级与密钥级的较小者，需先解析出模型；
 //       6. 按 resolved.ModelType 二选一：
 //            openai-responses → forwardResponsesPassthrough（格 7，用原始 Responses body，
 //                               仅替换 model、强制 store:false、改写终态 id）；
-//                               上限完全由第 4 步施加。
+//                               上限完全由第 5 步施加。
 //            其余             → forwardViaChatConversion（格 8/9，先 responsesRequestToChat
 //                               转 chat，再由 GetProvider 处理上游差异）；转出的 chat 形态
 //                               再做一次**兜底压制**（正常流下幂等无操作，用于兜住转换器
 //                               未映射 max_output_tokens 的情形，详见该函数内的注释）。
-//   - 「解析 + 配额」每条路径恰好一次（第 5 步），两条路径都不调用 prepareForward。
+//   - 「解析 + 配额」每条路径恰好一次（第 4 步），两条路径都不调用 prepareForward。
 //   - 收尾：logUsage + store 为 true 时落一行 response_states（流式在流结束后）。
 
 import (
@@ -115,27 +116,28 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	isStream, _ := reqBody["stream"].(bool)
 
 	// 3. 有状态前置：站点开关取舍 → 两者互斥 → 取父行/会话并校验归属 → 历史前置于 input。
-	//    必须早于第 4 步（见 responses_state.go 顶部注释）：拼接只动 input，不动
-	//    max_output_tokens / messages，因此不会让第 4 步的协议形态判定失效。
+	//    必须早于第 5 步（见 responses_state.go 顶部注释）：拼接只动 input，不动
+	//    max_output_tokens / messages，因此不会让第 5 步的协议形态判定失效。
 	state, ok := h.prepareResponsesState(w, r, key, reqBody)
 	if !ok {
 		return
 	}
 
-	// 4. 先对 Responses 形态的 body 施加密钥上限，压的是 max_output_tokens（§5.4.1 第 4 步）。
-	prepareResponsesTokens(key, reqBody)
-
-	// 5. 解析模型 + 配额（每条路径恰好一次），再按上游协议二选一。
+	// 4. 解析模型 + 配额（每条路径恰好一次）。上限压制挪到第 5 步：模型级输出上限存在
+	//    ai_models 上，必须先解析出模型才知道本轮的上限（模型级与密钥级取较小者）。
 	//    这里**不能**用 prepareForward：它会原地改写传入的 body。转换路径传入的是 Responses
 	//    形态 body，一旦经过它，max_output_tokens 会被再压一次（并混入 chat 的 max_tokens），
-	//    第 4 步是否真的执行就再也观测不到了——顺序契约重新变成盲区（review I-2）。
-	//    因此解析/配额走 resolveAndCheckQuota，两条路径各自施加自己的一处上限压制：
-	//      · 直通：第 4 步已压 max_output_tokens，路径内只改 model 与 store；
-	//      · 转换：第 4 步 → 转换器映射成 max_tokens → 转换路径内再幂等复压。
+	//    第 5 步是否真的执行就再也观测不到了——顺序契约重新变成盲区（review I-2）。
 	resolved, ok := h.resolveAndCheckQuota(w, r, key, reqBody)
 	if !ok {
 		return
 	}
+
+	// 5. 对 Responses 形态的 body 施加输出上限，压的是 max_output_tokens（§5.4.1 第 4 步）。
+	//    两条路径各自施加自己的一处压制：
+	//      · 直通：本步压 max_output_tokens，路径内只改 model 与 store；
+	//      · 转换：本步 → 转换器映射成 max_tokens → 转换路径内再幂等复压。
+	prepareResponsesTokens(key, resolved, reqBody)
 	// 协议守卫：Responses 入口不接受决策模型（否则会被当成 chat 转换路径发给上游）。
 	if provider.IsDecisionModelType(resolved.ModelType) {
 		h.writeIngressError(w, r, http.StatusBadRequest, fmt.Sprintf(msgDecisionOnChatRoute, resolved.ModelType))
@@ -200,7 +202,7 @@ func (h *Handler) startResponsesBackground(
 	_, _ = w.Write(marshalJSONOrEmpty(buildQueuedResponseBody(respID, requestedModel)))
 }
 
-// prepareResponsesTokens 对 Responses 形态的 body 施加密钥 max_output_tokens 上限。
+// prepareResponsesTokens 对 Responses 形态的 body 施加输出上限（模型级与密钥级取较小者）。
 //
 // 顺序契约（design §5.4.1）：必须在 responsesRequestToChat 之前调用——转换后 body 带
 // messages，isResponsesShaped 为假，enforceMaxTokens 不再压制 max_output_tokens。
@@ -210,22 +212,24 @@ func (h *Handler) startResponsesBackground(
 // 一律经 max_tokens 施加）。两者不一致是 §5.4.1 裁决的结果：Responses 上游的
 // max_output_tokens 是唯一的输出预算字段，留一个非数值给上游等于放弃上限保护；
 // chat 的 max_output_tokens 则是非标准字段，改写它会破坏对严格上游的兼容性。
-func prepareResponsesTokens(key *model.APIKey, reqBody map[string]any) {
+func prepareResponsesTokens(key *model.APIKey, resolved *model.Resolved, reqBody map[string]any) {
 	// 只认 Responses 形态（带 max_output_tokens、无 messages）。
 	// 已转换的 chat 形态绝不能被本步骤改写：否则转换路径的第二道压制变成冗余，
-	// 第 4 步是否真的执行就再也观测不到（review I-2 的根因）。
+	// 第 5 步是否真的执行就再也观测不到（review I-2 的根因）。
 	if _, isChat := reqBody["messages"]; isChat {
 		return
 	}
-	if key.MaxTokens <= 0 {
+	// 上限取模型级与密钥级的较小者；两者都未配置时不介入。
+	limit := resolved.OutputCeiling(key)
+	if limit <= 0 {
 		return
 	}
 	// 客户端没给 max_output_tokens：先补上让它成为 Responses 形态，
 	// 再由 enforceMaxTokens 统一收敛（它只压制已存在的字段，不会主动注入该字段）。
 	if _, exists := reqBody["max_output_tokens"]; !exists {
-		reqBody["max_output_tokens"] = float64(key.MaxTokens)
+		reqBody["max_output_tokens"] = float64(limit)
 	}
-	enforceMaxTokens(reqBody, key.MaxTokens)
+	enforceMaxTokens(reqBody, resolved.OutputCeiling(key))
 }
 
 // forwardViaChatConversion 把 Responses 请求转成 chat 请求交给 provider 管线，
@@ -252,14 +256,14 @@ func (h *Handler) forwardViaChatConversion(
 		return
 	}
 	// 兜底压制（**不要当成冗余删掉**）：
-	//   · 正常流下幂等无操作——第 4 步已把 max_output_tokens 收敛为上限，转换器再把它
+	//   · 正常流下幂等无操作——第 5 步已把 max_output_tokens 收敛为上限，转换器再把它
 	//     映射成 max_tokens，这里压的值与已有值相同；
 	//   · 真实价值在于兜住「转换器漏映射 max_output_tokens」的情形。实测成对变异：
 	//     仅让转换器漏映射（本压制仍在）→ 上游 max_tokens 仍为上限（被这里补上）；
 	//     转换器漏映射 **且** 删掉本压制 → 上游 chat body 里 max_tokens 直接缺失，
 	//     请求等于没有输出预算上限（TestResponsesIngress_ChatUpstreamCapOnlyOnce 变红）；
 	//   · 同时覆盖 max_completion_tokens 等 chat 侧字段。
-	enforceMaxTokens(chatBody, key.MaxTokens)
+	enforceMaxTokens(chatBody, resolved.OutputCeiling(key))
 	chatBody["model"] = resolved.ModelID
 	body, err := json.Marshal(chatBody)
 	if err != nil {
@@ -594,7 +598,7 @@ func marshalJSONOrEmpty(v map[string]any) []byte {
 }
 
 // buildResponsesPassthroughBody 复刻 Responses 请求体，仅替换 model 并强制 store:false。
-// max_output_tokens 的密钥上限压制已在 prepareResponsesTokens 完成（§5.4.1 顺序契约）。
+// max_output_tokens 的上限压制已在 prepareResponsesTokens 完成（§5.4.1 顺序契约）。
 func buildResponsesPassthroughBody(reqBody map[string]any, upstreamModelID string) map[string]any {
 	out := make(map[string]any, len(reqBody)+2)
 	for k, v := range reqBody {

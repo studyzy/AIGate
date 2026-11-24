@@ -83,8 +83,8 @@ The body is an OpenAI Chat Completions object. The gateway reads and rewrites on
 |-------|------|----------|-------|
 | `model` | string | no | Target model. If present and non-empty it must match a model bound to this key (see resolution rules). If absent or empty, the key's `primary` binding is used. |
 | `stream` | bool | no | `true` selects SSE streaming. |
-| `max_tokens` | integer | no | Truncated down to the key's `max_tokens` limit when that limit is `> 0`. |
-| `max_completion_tokens` | integer | no | Truncated by the same limit. |
+| `max_tokens` | integer | Truncated down to the effective output ceiling (see "Output token ceiling" in §3.10). |
+| `max_completion_tokens` | integer | Truncated by the same ceiling. |
 | any other field | — | no | Passed through as-is. |
 
 **Gateway transformations (before forwarding)**
@@ -92,7 +92,7 @@ The body is an OpenAI Chat Completions object. The gateway reads and rewrites on
 | Transformation | Rule |
 |----------------|------|
 | Model substitution | The body's `model` is replaced with the resolved upstream `model_id` (original casing preserved). The client's value is never forwarded verbatim. |
-| `max_tokens` cap | Applies only when the key's `max_tokens > 0`. Both `max_tokens` and `max_completion_tokens` are capped if present. If **neither** is present, `max_tokens` is injected at the limit. If the limit is `<= 0`, the body is left untouched. |
+| `max_tokens` cap | The ceiling is `min(model.max_output_tokens, key.max_tokens)`, ignoring the unset (`<= 0`) side; it applies only when that ceiling is `> 0`. Both `max_tokens` and `max_completion_tokens` are capped if present. If **neither** is present, `max_tokens` is injected at the ceiling. When both are unset, the body is left untouched. |
 | Parameter normalisation | For OpenAI-type upstreams, GPT-5+ and o-series models receive the parameter under `max_completion_tokens` instead of `max_tokens` (and vice versa for other models). |
 | Streaming | For `stream: true`, an OpenAI-type upstream additionally receives `stream: true` and `stream_options.include_usage: true`. |
 | Custom headers | See "Custom header passthrough" below. |
@@ -188,7 +188,7 @@ The body is an Anthropic Messages object. The gateway validates and rewrites onl
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `model` | string | **yes** | Must be non-empty. Resolved against the key's bindings exactly as on `/v1/chat/completions`. |
-| `max_tokens` | integer | **yes** | Must be an integer `> 0`. Truncated down to the key's `max_tokens` limit when that limit is `> 0`. |
+| `max_tokens` | integer | **yes** | Must be an integer `> 0`. Truncated down to the effective output ceiling (model-level and key-level, whichever is smaller). |
 | `stream` | bool | no | `true` selects Anthropic SSE streaming. |
 | `messages` / `system` / `tools` / `tool_choice` / `thinking` / `stop_sequences` | — | no | See the two upstream paths below. |
 | any other field | — | no | Preserved in passthrough; otherwise forwarded as far as the conversion allows. |
@@ -347,7 +347,7 @@ below; every other field is forwarded verbatim on the passthrough path.
 | `input` | string \| array | **yes** | A string, or an array of input items. On the translation path, producing no chat message at all yields `400 invalid input`. |
 | `instructions` | string | no | System prompt. Mapped to a system message on the translation path; **not** written into the conversation history snapshot (so a later turn does not re-inject it). |
 | `stream` | bool | no | `true` selects SSE streaming. |
-| `max_output_tokens` | integer | no | Capped by the key's `max_tokens` limit when that limit is `> 0`. |
+| `max_output_tokens` | integer | no | Capped by the effective output ceiling (model-level and key-level, whichever is smaller). |
 | `tools` | array | no | Responses flat tool array; a non-array yields `400 invalid tools`. |
 | `tool_choice` / `text` / any other field | — | no | Forwarded verbatim on the passthrough path; forwarded as far as it maps on the translation path. |
 | `store` | bool | no | **Defaults to `true`** (i.e. persisted by default — see warning 1). A non-boolean yields `400 invalid store`. |
@@ -707,6 +707,10 @@ Model objects returned by the API:
 | `currency` | string | Pricing currency (ISO 4217). `""` = unconfigured, and the model does not participate in cost accounting (see "Cost billing" in §3.10). |
 | `enable_peak_pricing` | bool | Peak/off-peak pricing switch (default `false`). When off, requests are always billed at the **off-peak** columns. |
 | `use_upstream_cost` | bool | Trust the upstream-reported `usage.cost` (default `true`). When on and the upstream reports `cost > 0`, that value is used instead of computing from the price table. |
+| `context_window` | integer | Context window in tokens; `0` = unconfigured. Declared capability, shown to operators only — it does not reject long requests. |
+| `max_output_tokens` | integer | Per-model output ceiling; `0` = unconfigured. When set, the effective ceiling is the **smaller** of this and the calling key's `max_tokens` (see "Output token ceiling" in §3.10). |
+| `supports_image` | bool | Declares that the model accepts image input. Shown only — image requests are not rejected yet. |
+| `effort_levels` | array of string | Accepted `reasoning_effort` levels, normalised to ascending ladder order (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). `[]` = unconfigured. Declared capability, shown only. |
 | `current_price` | object \| null | The currently effective price snapshot (the newest one whose `effective_at` is not in the future); `null` when the model has no price yet. Same shape as a price row (see §3.10). |
 | `created_at` / `updated_at` | string | RFC 3339 timestamps. |
 
@@ -731,6 +735,10 @@ Model objects returned by the API:
 | `currency` | string | no | `""` | Pricing currency, ISO 4217 three letters (case-insensitive, normalised to upper case). Anything else yields `400 currency must be a 3-letter ISO 4217 code`. |
 | `enable_peak_pricing` | bool | no | `false` | |
 | `use_upstream_cost` | bool | no | `true` | |
+| `context_window` | integer | no | `0` | Must be `>= 0`, else `400 context_window must not be negative`. |
+| `max_output_tokens` | integer | no | `0` | Must be `>= 0`, else `400 max_output_tokens must not be negative`. |
+| `supports_image` | bool | no | `false` | |
+| `effort_levels` | array of string | no | `[]` | Each entry must be a known level and must not repeat, else `400` (`effort_levels contains an unknown level: ...` / `... a duplicate level: ...`). Case-insensitive; stored in ladder order. |
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/models \
@@ -791,6 +799,10 @@ Partial update. Only the fields present in the body are changed (absent fields a
 | `currency` | string | ISO 4217 three letters; `""` clears the pricing currency. Changing it invalidates the model's price cache immediately and never rewrites rows already accounted. |
 | `enable_peak_pricing` | bool | |
 | `use_upstream_cost` | bool | |
+| `context_window` | integer | `>= 0`. |
+| `max_output_tokens` | integer | `>= 0`; `0` clears the model-level ceiling (the key ceiling still applies). |
+| `supports_image` | bool | |
+| `effort_levels` | array of string | Replaces the whole list; `[]` clears it. Same validation as creation. |
 
 ```bash
 curl -X PUT http://127.0.0.1:8080/admin/models/1 \
@@ -1645,6 +1657,15 @@ Usage rows do not carry the model currency: join `ai_models.currency` for
 `cost_vendor_micros`. That is why a summary row's `currency` describes only
 `cost_platform_micros` / the `group_by=model` amounts, and why `cost_vendor_micros` is `0`
 outside `group_by=model`.
+
+#### Output token ceiling
+
+The output ceiling of a request is `min(model.max_output_tokens, key.max_tokens)`, where
+either side `<= 0` means "unset" and is ignored; when both are unset there is no ceiling.
+The model side declares what the upstream model can emit, the key side is the operator's
+security brake — combining them with `min` means neither can loosen the other. The ceiling
+is applied to `max_tokens` / `max_completion_tokens` (chat) and `max_output_tokens`
+(Responses), and is injected when the client omits the field.
 
 #### Price snapshots and the six raw columns
 

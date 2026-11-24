@@ -20,9 +20,9 @@ package proxy
 //   - 归属校验：按 owner_user_id 判定，失配与「不存在」返回**同一个** 404（防存在性枚举）；
 //   - 落库时机：响应完成后（流式则在流结束后），一次性写入终态 items 与完整响应体。
 //
-// 历史拼接的位置是「§5.4.1 第 3 步」：在 prepareResponsesTokens（第 4 步）之前。
+// 历史拼接的位置是「§5.4.1 第 3 步」：在 prepareResponsesTokens（第 5 步）之前。
 // 原因有两条：
-//   1. 第 4 步的 enforceMaxTokens 靠请求体形态判定协议（有 max_output_tokens、无 messages），
+//   1. 第 5 步的 enforceMaxTokens 靠请求体形态判定协议（有 max_output_tokens、无 messages），
 //      历史作为 input item 数组拼进去不会改变形态；但若把拼接放到转换之后，
 //      拼的就不再是 Responses 形态，形状也就没人保证了；
 //   2. 第 5 步的配额/模型解析必须读到最终要转发的请求（含历史），否则「先放行再放大请求」。
@@ -262,7 +262,7 @@ func decodeResponsesItems(raw []byte) ([]any, bool) {
 //   - 数组：直接拼成「历史 + 本轮 items」；
 //   - 其它（对象/数字）：保持原样不动——不是合法 input，交给转换器按 invalid input 拒绝。
 //
-// 注意：只动 input，绝不动 max_output_tokens / messages（§5.4.1 第 4 步靠请求体形态判定协议）。
+// 注意：只动 input，绝不动 max_output_tokens / messages（§5.4.1 第 5 步靠请求体形态判定协议）。
 func applyResponsesHistory(reqBody map[string]any, history []any) {
 	if len(history) == 0 {
 		return

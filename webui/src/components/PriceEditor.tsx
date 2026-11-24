@@ -5,7 +5,7 @@ import type { AIModelPrice, AIGateModel, PriceInput } from "@/api/types";
 import { ConfirmDialog, Drawer } from "@/components/ui/Overlay";
 import { QueryError } from "@/components/ui/QueryError";
 import { useToast } from "@/components/ui/Toast";
-import { Badge, Button, EmptyState, ErrorText, Field, Input, Spinner } from "@/components/ui/primitives";
+import { Badge, Button, EmptyState, ErrorText, Field, Input, Select, Spinner } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import type { MessageKey } from "@/i18n/en";
 import { api } from "@/lib/api";
@@ -20,6 +20,12 @@ const OFFPEAK_FIELDS = ["offpeak_input_hit_micros", "offpeak_input_miss_micros",
 type PriceField = (typeof PEAK_FIELDS)[number] | (typeof OFFPEAK_FIELDS)[number];
 
 type PriceDraft = Record<PriceField, string>;
+
+// CURRENCY_OPTIONS 是计价币种下拉的常见选项；下拉只是便利，服务端只校验三位大写。
+const CURRENCY_OPTIONS = ["CNY", "USD", "HKD", "EUR", "GBP", "JPY", "SGD", "AUD", "CAD", "KRW"];
+
+/** CURRENCY_CUSTOM 是币种下拉里「手输」的哨兵值，不是合法币种。 */
+const CURRENCY_CUSTOM = "__custom";
 
 const ZERO_DRAFT: PriceDraft = {
   peak_input_hit_micros: "0",
@@ -64,6 +70,15 @@ export function PriceEditor({ model, onClose }: { model: AIGateModel; onClose: (
   const latest = prices[0] ?? null;
   const [draft, setDraft] = useState<PriceDraft>(ZERO_DRAFT);
   const [currency, setCurrency] = useState(model.currency);
+  // 已有币种不在常见选项里时，下拉切到「手输」并保留原值。
+  const [customCurrency, setCustomCurrency] = useState(
+    model.currency !== "" && !CURRENCY_OPTIONS.includes(model.currency),
+  );
+  // 两个开关是模型级配置（api_models 列），随本抽屉的「保存设置」提交，不随价目快照变化。
+  const [peakPricing, setPeakPricing] = useState(model.enable_peak_pricing);
+  const [upstreamCost, setUpstreamCost] = useState(model.use_upstream_cost);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
   const [effectiveAt, setEffectiveAt] = useState(() => toLocalInput(new Date()));
   const [peakHours, setPeakHours] = useState("{}");
   const [busy, setBusy] = useState(false);
@@ -79,7 +94,31 @@ export function PriceEditor({ model, onClose }: { model: AIGateModel; onClose: (
     setHydrated(true);
   }
 
-  const peakEnabled = model.enable_peak_pricing;
+  const peakEnabled = peakPricing;
+
+  // saveSettings 把币种与两个开关一起写回模型：币种决定价目单位，必须在追加价目之前落地。
+  async function saveSettings() {
+    setSettingsError("");
+    const code = currency.trim().toUpperCase();
+    setSavingSettings(true);
+    try {
+      await api("/admin/models/" + model.id, {
+        method: "PUT",
+        body: JSON.stringify({
+          currency: code,
+          enable_peak_pricing: peakPricing,
+          use_upstream_cost: upstreamCost,
+        }),
+      });
+      await client.invalidateQueries({ queryKey: ["models"] });
+      await client.invalidateQueries({ queryKey: ["model-prices", model.id] });
+      toast(t("common.saved"), "success");
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  }
 
   async function submit() {
     setError("");
@@ -166,6 +205,68 @@ export function PriceEditor({ model, onClose }: { model: AIGateModel; onClose: (
         <Spinner label={t("common.loading")} />
       ) : (
         <div className="space-y-4">
+          <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+            <div className="text-sm font-medium text-slate-700">{t("price.settings")}</div>
+            <Field label={t("price.currency")} hint={t("price.currencyHint")}>
+              <Select
+                value={customCurrency ? CURRENCY_CUSTOM : currency}
+                onChange={(e) => {
+                  if (e.target.value === CURRENCY_CUSTOM) {
+                    setCustomCurrency(true);
+                    return;
+                  }
+                  setCustomCurrency(false);
+                  setCurrency(e.target.value);
+                }}
+                data-testid="price-currency-select"
+              >
+                <option value="">{t("price.currency.none")}</option>
+                {CURRENCY_OPTIONS.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+                <option value={CURRENCY_CUSTOM}>{t("price.currency.custom")}</option>
+              </Select>
+            </Field>
+            {customCurrency ? (
+              <Field label={t("price.currencyCode")}>
+                <Input
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value)}
+                  placeholder="CNY"
+                  maxLength={3}
+                  data-testid="price-currency-input"
+                />
+              </Field>
+            ) : null}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={peakPricing}
+                onChange={(e) => setPeakPricing(e.target.checked)}
+                data-testid="price-peak-pricing"
+              />
+              {t("price.enablePeakPricing")}
+            </label>
+            <p className="text-xs text-slate-500">{t("price.enablePeakPricingHint")}</p>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={upstreamCost}
+                onChange={(e) => setUpstreamCost(e.target.checked)}
+                data-testid="price-upstream-cost"
+              />
+              {t("price.useUpstreamCost")}
+            </label>
+            <p className="text-xs text-slate-500">{t("price.useUpstreamCostHint")}</p>
+            <p className="text-xs text-slate-500">{t("price.settingsHint")}</p>
+            {settingsError ? <ErrorText>{settingsError}</ErrorText> : null}
+            <Button variant="secondary" onClick={() => void saveSettings()} disabled={savingSettings}>
+              {t("price.saveSettings")}
+            </Button>
+          </section>
+
           <section>
             <div className="mb-2 text-sm font-medium text-slate-700">{t("price.versions")}</div>
             {prices.length === 0 ? (
@@ -196,19 +297,18 @@ export function PriceEditor({ model, onClose }: { model: AIGateModel; onClose: (
 
           <section className="space-y-3 rounded-lg border border-slate-200 p-3">
             <div className="text-sm font-medium text-slate-700">{t("price.addTitle")}</div>
-            <div className="flex gap-2">
-              <Field label={t("price.currency")}>
-                <Input value={currency} onChange={(e) => setCurrency(e.target.value)} placeholder="CNY" />
-              </Field>
-              <Field label={t("price.effectiveAt")}>
-                <Input
-                  type="datetime-local"
-                  value={effectiveAt}
-                  onChange={(e) => setEffectiveAt(e.target.value)}
-                  data-testid="price-effective-at"
-                />
-              </Field>
+            <div className="flex items-center gap-2 text-xs text-slate-600" data-testid="price-currency-unit">
+              <Badge>{currency.trim().toUpperCase() || "—"}</Badge>
+              <span>{t("price.currencyFromSettings")}</span>
             </div>
+            <Field label={t("price.effectiveAt")}>
+              <Input
+                type="datetime-local"
+                value={effectiveAt}
+                onChange={(e) => setEffectiveAt(e.target.value)}
+                data-testid="price-effective-at"
+              />
+            </Field>
 
             {peakEnabled ? (
               <PriceGroup

@@ -77,6 +77,10 @@ type billingModelResp struct {
 	Currency          string     `json:"currency"`
 	EnablePeakPricing bool       `json:"enable_peak_pricing"`
 	UseUpstreamCost   bool       `json:"use_upstream_cost"`
+	ContextWindow     int        `json:"context_window"`
+	MaxOutputTokens   int        `json:"max_output_tokens"`
+	SupportsImage     bool       `json:"supports_image"`
+	EffortLevels      []string   `json:"effort_levels"`
 	CurrentPrice      *priceResp `json:"current_price"`
 }
 
@@ -677,4 +681,75 @@ func TestAdminSettings_PlatformCurrencyNormalized(t *testing.T) {
 			t.Fatalf("platform_currency after unrelated update = %q, want USD", got.PlatformCurrency)
 		}
 	})
+}
+
+// TestAdminBilling_ModelCapabilityFields 覆盖模型能力字段的创建、回显与局部更新：
+// 未配置时 effort_levels 必须是 []（不是 null），配置后按阶梯升序归一化。
+func TestAdminBilling_ModelCapabilityFields(t *testing.T) {
+	srv, store, _ := newTestBillingServer(t)
+	_, adminToken := seedAdmin(t, store)
+
+	status, raw := doRequest(t, srv, http.MethodPost, "/admin/models", adminToken, map[string]any{
+		"provider": "mock", "model_id": "m", "url": "https://x", "model_type": "openai-completions",
+	})
+	assertStatus(t, status, http.StatusCreated, raw)
+	def := mustDecode[billingModelResp](t, raw)
+	if def.ContextWindow != 0 || def.MaxOutputTokens != 0 || def.SupportsImage || def.EffortLevels == nil || len(def.EffortLevels) != 0 {
+		t.Fatalf("defaults = %+v", def)
+	}
+
+	id := createBillingModel(t, srv, adminToken, map[string]any{
+		"context_window":    128000,
+		"max_output_tokens": 8192,
+		"supports_image":    true,
+		// 故意乱序 + 大写：落库前按阶梯归一化，而不是照抄入参顺序。
+		"effort_levels": []string{"HIGH", "low", "medium"},
+	})
+	modelPath := fmt.Sprintf("/admin/models/%d", id)
+
+	status, raw = doRequest(t, srv, http.MethodGet, modelPath, adminToken, nil)
+	assertStatus(t, status, http.StatusOK, raw)
+	got := mustDecode[billingModelResp](t, raw)
+	if got.ContextWindow != 128000 || got.MaxOutputTokens != 8192 || !got.SupportsImage {
+		t.Fatalf("created = %+v", got)
+	}
+	want := []string{"low", "medium", "high"}
+	if len(got.EffortLevels) != len(want) {
+		t.Fatalf("effort_levels = %v, want %v", got.EffortLevels, want)
+	}
+	for i := range want {
+		if got.EffortLevels[i] != want[i] {
+			t.Fatalf("effort_levels = %v, want %v", got.EffortLevels, want)
+		}
+	}
+
+	// 局部更新：只改输出上限，其余能力字段保持。
+	status, raw = doRequest(t, srv, http.MethodPut, modelPath, adminToken, map[string]any{"max_output_tokens": 4096})
+	assertStatus(t, status, http.StatusOK, raw)
+	updated := mustDecode[billingModelResp](t, raw)
+	if updated.MaxOutputTokens != 4096 || updated.ContextWindow != 128000 || !updated.SupportsImage {
+		t.Fatalf("updated = %+v", updated)
+	}
+
+	// 清空 effort 等级：显式传空数组应回到「未配置」。
+	status, raw = doRequest(t, srv, http.MethodPut, modelPath, adminToken, map[string]any{"effort_levels": []string{}})
+	assertStatus(t, status, http.StatusOK, raw)
+	if cleared := mustDecode[billingModelResp](t, raw); cleared.EffortLevels == nil || len(cleared.EffortLevels) != 0 {
+		t.Fatalf("cleared effort_levels = %#v", cleared.EffortLevels)
+	}
+
+	// 非法取值必须 400，而不是静默落库。
+	for _, bad := range []map[string]any{
+		{"effort_levels": []string{"extreme"}},
+		{"context_window": -1},
+		{"max_output_tokens": -1},
+	} {
+		status, raw = doRequest(t, srv, http.MethodPut, modelPath, adminToken, bad)
+		assertStatus(t, status, http.StatusBadRequest, raw)
+	}
+	status, raw = doRequest(t, srv, http.MethodPost, "/admin/models", adminToken, map[string]any{
+		"provider": "mock", "model_id": "bad", "url": "https://x", "model_type": "openai-completions",
+		"effort_levels": []string{"extreme"},
+	})
+	assertStatus(t, status, http.StatusBadRequest, raw)
 }

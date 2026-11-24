@@ -13,9 +13,6 @@ import { microsToInput } from "@/lib/micros";
 
 type ProviderGroup = { key: string; models: AIGateModel[] };
 
-// CURRENCY_OPTIONS 是计价/结算币种下拉的常见选项；下拉只是便利，服务端只校验三位大写。
-const CURRENCY_OPTIONS = ["CNY", "USD", "HKD", "EUR", "GBP", "JPY", "SGD", "AUD", "CAD", "KRW"];
-
 // MAX_AUTO_SELECT 是「拉取模型」后默认勾选的上限：超过就一个都不勾，避免一次点出上百个请求。
 const MAX_AUTO_SELECT = 20;
 
@@ -569,30 +566,47 @@ function ProviderDrawer({ group, onClose }: { group: ProviderGroup | null; onClo
   );
 }
 
-/** CURRENCY_CUSTOM 是币种下拉里「手输」的哨兵值，不是合法币种。 */
-const CURRENCY_CUSTOM = "__custom";
+// EFFORT_OPTIONS 是 reasoning_effort 的可选等级（升序）；与后端 model.effortLevelLadder 同口径。
+const EFFORT_OPTIONS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/**
+ * ModelDrawer 只编辑模型自身的能力与身份：显示名、配额、启停，以及上下文窗口、
+ * 输出上限、图片支持、effort 等级。计价相关的配置（币种、峰谷开关、采信上游成本）
+ * 属于价目，统一在价目抽屉里改。
+ */
 function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => void }) {
   const { t } = useI18n();
   const client = useQueryClient();
   const [modelName, setModelName] = useState(model.model_name);
   const [quotaDay, setQuotaDay] = useState(model.quota_day);
   const [enabled, setEnabled] = useState(model.enabled);
-  const [currency, setCurrency] = useState(model.currency);
-  // 已有币种不在常见选项里时，下拉切到「手输」并保留原值。
-  const [customCurrency, setCustomCurrency] = useState(
-    model.currency !== "" && !CURRENCY_OPTIONS.includes(model.currency),
+  // 空输入用空串承接（不能塞进 number，否则用户删空就变成 0 而无法区分「未配置」）。
+  const [contextWindow, setContextWindow] = useState(model.context_window > 0 ? String(model.context_window) : "");
+  const [maxOutputTokens, setMaxOutputTokens] = useState(
+    model.max_output_tokens > 0 ? String(model.max_output_tokens) : "",
   );
-  const [peakPricing, setPeakPricing] = useState(model.enable_peak_pricing);
-  const [upstreamCost, setUpstreamCost] = useState(model.use_upstream_cost);
+  const [supportsImage, setSupportsImage] = useState(model.supports_image);
+  const [efforts, setEfforts] = useState<string[]>(model.effort_levels);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const price = model.current_price;
+  // parsePositive 把「可留空的非负整数」解析成数字：空串 → 0，非法 → null。
+  function parsePositive(raw: string): number | null {
+    const text = raw.trim();
+    if (text === "") return 0;
+    const n = Number(text);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
 
   async function submit() {
-    setBusy(true);
     setError("");
+    const context = parsePositive(contextWindow);
+    const output = parsePositive(maxOutputTokens);
+    if (context === null || output === null) {
+      setError(t("model.positiveIntegerRequired"));
+      return;
+    }
+    setBusy(true);
     try {
       await api("/admin/models/" + model.id, {
         method: "PUT",
@@ -600,9 +614,10 @@ function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => vo
           model_name: modelName,
           quota_day: quotaDay,
           enabled,
-          currency: currency.trim().toUpperCase(),
-          enable_peak_pricing: peakPricing,
-          use_upstream_cost: upstreamCost,
+          context_window: context,
+          max_output_tokens: output,
+          supports_image: supportsImage,
+          effort_levels: efforts,
         }),
       });
       await client.invalidateQueries({ queryKey: ["models"] });
@@ -638,75 +653,69 @@ function ModelDrawer({ model, onClose }: { model: AIGateModel; onClose: () => vo
         </label>
 
         <div className="space-y-2 rounded-lg border border-slate-200 p-3">
-          <div className="text-sm font-medium text-slate-700">{t("model.billing")}</div>
-          <Field label={t("model.currency")} hint={t("model.currencyHint")}>
-            <Select
-              value={customCurrency ? CURRENCY_CUSTOM : currency}
-              onChange={(e) => {
-                if (e.target.value === CURRENCY_CUSTOM) {
-                  setCustomCurrency(true);
-                  return;
-                }
-                setCustomCurrency(false);
-                setCurrency(e.target.value);
-              }}
-              data-testid="model-currency-select"
-            >
-              <option value="">{t("model.currency.none")}</option>
-              {CURRENCY_OPTIONS.map((code) => (
-                <option key={code} value={code}>
-                  {code}
-                </option>
-              ))}
-              <option value={CURRENCY_CUSTOM}>{t("model.currency.custom")}</option>
-            </Select>
+          <div className="text-sm font-medium text-slate-700">{t("model.capabilities")}</div>
+          <Field label={t("model.contextWindow")} hint={t("model.contextWindowHint")}>
+            <Input
+              type="number"
+              min={0}
+              value={contextWindow}
+              onChange={(e) => setContextWindow(e.target.value)}
+              placeholder="128000"
+              data-testid="model-context-window"
+            />
           </Field>
-          {customCurrency ? (
-            <Field label={t("model.currencyCode")}>
-              <Input
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
-                placeholder="CNY"
-                maxLength={3}
-                data-testid="model-currency-input"
-              />
-            </Field>
-          ) : null}
+          <Field label={t("model.maxOutputTokens")} hint={t("model.maxOutputTokensHint")}>
+            <Input
+              type="number"
+              min={0}
+              value={maxOutputTokens}
+              onChange={(e) => setMaxOutputTokens(e.target.value)}
+              placeholder="8192"
+              data-testid="model-max-output-tokens"
+            />
+          </Field>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
-              checked={peakPricing}
-              onChange={(e) => setPeakPricing(e.target.checked)}
-              data-testid="model-peak-pricing"
+              checked={supportsImage}
+              onChange={(e) => setSupportsImage(e.target.checked)}
+              data-testid="model-supports-image"
             />
-            {t("model.enablePeakPricing")}
+            {t("model.supportsImage")}
           </label>
-          <p className="text-xs text-slate-500">{t("model.enablePeakPricingHint")}</p>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={upstreamCost}
-              onChange={(e) => setUpstreamCost(e.target.checked)}
-              data-testid="model-upstream-cost"
-            />
-            {t("model.useUpstreamCost")}
-          </label>
-          <p className="text-xs text-slate-500">{t("model.useUpstreamCostHint")}</p>
-          <div className="flex items-center gap-2 text-xs text-slate-600" data-testid="model-current-price">
-            {price ? (
-              <>
-                <Badge tone="green">{t("model.priceConfigured")}</Badge>
-                <span>{price.currency}</span>
-                <span>{t("price.output")} {microsToInput(price.offpeak_output_micros)}</span>
-              </>
-            ) : currency.trim() === "" ? (
-              <span>{t("model.noCurrency")}</span>
-            ) : (
-              <span>{t("model.noPrice")}</span>
-            )}
+          <p className="text-xs text-slate-500">{t("model.supportsImageHint")}</p>
+          <div className="text-sm">{t("model.effortLevels")}</div>
+          <div className="flex flex-wrap gap-3 text-sm" data-testid="model-effort-levels">
+            {EFFORT_OPTIONS.map((level) => (
+              <label key={level} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={efforts.includes(level)}
+                  onChange={(e) =>
+                    setEfforts(e.target.checked ? [...efforts, level] : efforts.filter((item) => item !== level))
+                  }
+                />
+                {level}
+              </label>
+            ))}
           </div>
-          {error ? <ErrorText>{error}</ErrorText> : null}
+          <p className="text-xs text-slate-500">{t("model.effortLevelsHint")}</p>
         </div>
+
+        <div className="flex items-center gap-2 text-xs text-slate-600" data-testid="model-current-price">
+          {model.current_price ? (
+            <>
+              <Badge tone="green">{t("model.priceConfigured")}</Badge>
+              <span>{model.current_price.currency}</span>
+              <span>{t("price.output")} {microsToInput(model.current_price.offpeak_output_micros)}</span>
+            </>
+          ) : model.currency === "" ? (
+            <span>{t("model.noCurrency")}</span>
+          ) : (
+            <span>{t("model.noPrice")}</span>
+          )}
+        </div>
+        {error ? <ErrorText>{error}</ErrorText> : null}
       </div>
     </Drawer>
   );

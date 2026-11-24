@@ -206,8 +206,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns in usage and a spend card on the dashboard; `aigatectl` gains
   `prices`, `calendar` and `rates`.
 
+### Added
+
+- **Model capability fields** — `ai_models` gains `context_window`,
+  `max_output_tokens`, `supports_image` and `effort_levels` (plus the matching
+  fields on `POST`/`PUT /admin/models` and in the model response). The model edit
+  drawer in the WebUI now edits these instead of the pricing switches.
+  `max_output_tokens` is enforced: the output ceiling of a request is
+  `min(model.max_output_tokens, key.max_tokens)` (an unset `<= 0` side is
+  ignored), applied to `max_tokens` / `max_completion_tokens` and
+  `max_output_tokens` and injected when the client omits it — a model-level
+  ceiling can therefore only tighten the existing key-level brake, never loosen
+  it. `context_window`, `supports_image` and `effort_levels` are declared
+  capabilities shown to operators only; no request is rejected on them yet.
+  `effort_levels` is validated (known levels, no duplicates) and stored in
+  ascending ladder order. Upgrade path: `sql/20261124-model-capabilities.sql`.
+
 ### Changed
 
+- **Pricing settings moved into the price drawer** — the model edit drawer no
+  longer carries the pricing currency or the peak/upstream-cost switches; the
+  price drawer now opens with a "Pricing settings" block that saves them back to
+  the model (they stay model-level, not per price version) and then appends
+  price snapshots in that currency. The provider list also shows each model's
+  price status inline.
 - **Usage reports carry amounts** — the usage summarize/log/export responses are
   extended, additively: summary rows gain `currency`, `cost_vendor_micros`,
   `cost_platform_micros` and, when a row spans currencies, `mixed_currency`

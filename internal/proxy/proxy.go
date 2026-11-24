@@ -238,7 +238,7 @@ func (h *Handler) prepareForward(
 	}
 
 	// 强制 max_tokens 上限，并把上游 model 名替换为绑定的原始 ID。
-	enforceMaxTokens(reqBody, key.MaxTokens)
+	enforceMaxTokens(reqBody, res.OutputCeiling(key))
 	reqBody["model"] = res.ModelID
 	modifiedBody, err := json.Marshal(reqBody)
 	if err != nil {
