@@ -15,6 +15,7 @@ package provider
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,26 @@ func TestEncodeGeminiCallID_UsesRawURLEncoding(t *testing.T) {
 	}
 	if _, got := splitGeminiCallID(encoded); !bytes.Equal(got, sig) {
 		t.Fatalf("sig round-trip = %x", got)
+	}
+}
+
+// 上游用标准 base64 回签名，客户端回传时必须能无损还原成同一组字节，
+// 否则签名校验失败。覆盖含 '+'、'/'、'=' 的字节组合。
+func TestGeminiSignatureSurvivesStdBase64RoundTrip(t *testing.T) {
+	for _, sig := range [][]byte{
+		{0xfb, 0xff},       // 标准 base64 含 '+'
+		{0xff, 0xfe},       // 含 '/'
+		{0x01, 0x02, 0x03}, // 含 '='
+		{0xfb, 0xff, 0xbf}, // 多字节组合
+	} {
+		upstream := base64.StdEncoding.EncodeToString(sig)
+		raw := geminiDecodeSignature(upstream)
+		if !bytes.Equal(raw, sig) {
+			t.Fatalf("decode(%q) = %x, want %x", upstream, raw, sig)
+		}
+		_, back := splitGeminiCallID(encodeGeminiCallID("call_x", raw))
+		if !bytes.Equal(back, sig) {
+			t.Fatalf("sig %x: round-trip = %x", sig, back)
+		}
 	}
 }
