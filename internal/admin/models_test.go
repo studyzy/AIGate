@@ -75,6 +75,24 @@ func TestCreateModel_OpenAIResponsesType(t *testing.T) {
 	}
 }
 
+// TestCreateModel_GeminiType 覆盖管理面接受 gemini-generate-content 上游协议。
+func TestCreateModel_GeminiType(t *testing.T) {
+	srv, _, adminToken := newAdminServer(t)
+
+	status, body := doRequest(t, srv, http.MethodPost, "/admin/models", adminToken, map[string]any{
+		"provider":   "google",
+		"model_id":   "gemini-2.5-flash",
+		"url":        "https://generativelanguage.googleapis.com/v1beta",
+		"model_type": "gemini-generate-content",
+	})
+	assertStatus(t, status, http.StatusCreated, body)
+
+	got := mustDecode[modelResp](t, body)
+	if got.ModelType != "gemini-generate-content" {
+		t.Errorf("model_type want gemini-generate-content, got %q", got.ModelType)
+	}
+}
+
 // TestCreateModel_CustomHeaders 覆盖 custom_http_headers 对象透传。
 func TestCreateModel_CustomHeaders(t *testing.T) {
 	srv, _, adminToken := newAdminServer(t)

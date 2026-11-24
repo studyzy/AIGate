@@ -456,7 +456,7 @@ func modelUpdateFields(req *modelUpdateRequest) (map[string]any, string) {
 func validModelType(t string) bool {
 	switch t {
 	case model.ModelTypeOpenAI, model.ModelTypeAnthropic, model.ModelTypeResponses,
-		model.ModelTypeDecisions, model.ModelTypeSystemOne:
+		model.ModelTypeDecisions, model.ModelTypeSystemOne, model.ModelTypeGemini:
 		return true
 	default:
 		return false
@@ -466,7 +466,7 @@ func validModelType(t string) bool {
 // modelTypeList 是 model_type 合法取值的文案（四处错误消息共用）。
 func modelTypeList() string {
 	return model.ModelTypeOpenAI + ", " + model.ModelTypeAnthropic + ", " + model.ModelTypeResponses +
-		", " + model.ModelTypeDecisions + " or " + model.ModelTypeSystemOne
+		", " + model.ModelTypeDecisions + ", " + model.ModelTypeSystemOne + " or " + model.ModelTypeGemini
 }
 
 // billingModeOrDefault 把空值按 per_token 回显（加列前的存量行没有该字段）。
