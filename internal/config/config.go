@@ -16,12 +16,14 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -58,6 +60,9 @@ type Config struct {
 	AllowPrivateUpstreams        bool          // 是否放行私网/回环上游地址（SSRF 严格模式开关，默认 false）
 	MasterKey                    string        // 主密钥（64 位 hex 或 base64，解码后 32 字节）；空 = 禁用加密
 	MigrateEncrypt               bool          // 启动开关：把存量明文密钥类字段加密后退出（需主密钥）
+	RequestLog                   string        // 请求日志实现名（-request-log / AIGATE_REQUEST_LOG，默认 "none"）
+	RequestLogConfig             string        // 请求日志插件内联配置（-request-log-config / AIGATE_REQUEST_LOG_CONFIG，JSON 对象）
+	RequestLogConfigFile         string        // 请求日志插件配置文件路径（-request-log-config-file / AIGATE_REQUEST_LOG_CONFIG_FILE）
 }
 
 // Load 解析配置。args 为命令行参数（不含程序名）。
@@ -163,6 +168,24 @@ func Load(args []string) (*Config, error) {
 		false,
 		"encrypt existing plaintext secret rows and exit (requires -master-key)",
 	)
+	fs.StringVar(
+		&cfg.RequestLog,
+		"request-log",
+		envOr("AIGATE_REQUEST_LOG", "none"),
+		"request log implementation name",
+	)
+	fs.StringVar(
+		&cfg.RequestLogConfig,
+		"request-log-config",
+		envOr("AIGATE_REQUEST_LOG_CONFIG", ""),
+		"inline request log plugin config (JSON object)",
+	)
+	fs.StringVar(
+		&cfg.RequestLogConfigFile,
+		"request-log-config-file",
+		envOr("AIGATE_REQUEST_LOG_CONFIG_FILE", ""),
+		"path to request log plugin config file (JSON object)",
+	)
 	if err := fs.Parse(args); err != nil {
 		// -h/--help：把用法与 flag 列表打印到 stdout，交给调用方以成功退出。
 		if errors.Is(err, flag.ErrHelp) {
@@ -229,6 +252,16 @@ func (c *Config) validate() error {
 	if c.QuotaExceededStatus != 429 && c.QuotaExceededStatus != 403 {
 		return fmt.Errorf("quota-exceeded-status must be 429 or 403")
 	}
+	// 请求日志三项配置：非法值一律在启动期拒绝，禁止静默归一（design：请求日志插件能力）。
+	if c.RequestLog == "" {
+		return fmt.Errorf("request-log must not be empty")
+	}
+	if c.RequestLogConfig != "" && !isJSONObject(c.RequestLogConfig) {
+		return fmt.Errorf("request-log-config must be a valid JSON object")
+	}
+	if c.RequestLogConfigFile != "" && strings.TrimSpace(c.RequestLogConfigFile) == "" {
+		return fmt.Errorf("request-log-config-file must be a non-empty path")
+	}
 	return nil
 }
 
@@ -237,6 +270,12 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isJSONObject 判断 s 是否为合法 JSON 对象：首个非空字符为 '{' 且整体为合法 JSON。
+func isJSONObject(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	return len(trimmed) > 0 && trimmed[0] == '{' && json.Valid([]byte(s))
 }
 
 func envInt(key string, def int) (int, error) {

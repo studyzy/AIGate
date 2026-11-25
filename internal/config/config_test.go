@@ -193,3 +193,87 @@ func TestLoad_RetentionBoundsAreInclusive(t *testing.T) {
 		t.Fatalf("bound values not applied: %+v", cfg)
 	}
 }
+
+// 请求日志三项配置的默认值：none / "" / ""。
+func TestLoad_RequestLogDefaults(t *testing.T) {
+	// 显式清空相关环境变量，避免外部 env 干扰默认值断言。
+	t.Setenv("AIGATE_REQUEST_LOG", "")
+	t.Setenv("AIGATE_REQUEST_LOG_CONFIG", "")
+	t.Setenv("AIGATE_REQUEST_LOG_CONFIG_FILE", "")
+	cfg, err := config.Load(nil)
+	if err != nil {
+		t.Fatalf("Load(nil) 失败：%v", err)
+	}
+	if cfg.RequestLog != "none" || cfg.RequestLogConfig != "" || cfg.RequestLogConfigFile != "" {
+		t.Fatalf("请求日志默认值不符：log=%q config=%q file=%q",
+			cfg.RequestLog, cfg.RequestLogConfig, cfg.RequestLogConfigFile)
+	}
+}
+
+// 非法 request-log-config（flag 与 env 覆盖）都在启动期以含 "request-log-config" 的错误拒绝。
+func TestLoad_RequestLogInvalidJSON(t *testing.T) {
+	for _, bad := range []string{"[]", "not-json", "{bad}"} {
+		_, err := config.Load([]string{"-request-log-config", bad})
+		if err == nil || !strings.Contains(err.Error(), "request-log-config") {
+			t.Errorf("非法 request-log-config %q 应返回含 'request-log-config' 的错误，实得 %v", bad, err)
+		}
+	}
+	// 非法 env 覆盖同口径。
+	t.Setenv("AIGATE_REQUEST_LOG_CONFIG", "not-json")
+	_, err := config.Load(nil)
+	if err == nil || !strings.Contains(err.Error(), "request-log-config") {
+		t.Errorf("非法 env 覆盖应同样拒绝，实得 %v", err)
+	}
+}
+
+// 三项配置遵循 flag > env > 默认，合法值可加载。
+func TestLoad_RequestLogOptions(t *testing.T) {
+	t.Setenv("AIGATE_REQUEST_LOG", "sqlite")
+	t.Setenv("AIGATE_REQUEST_LOG_CONFIG", `{"env":true}`)
+	t.Setenv("AIGATE_REQUEST_LOG_CONFIG_FILE", "/env/rl.json")
+	cfg, err := config.Load(nil)
+	if err != nil {
+		t.Fatalf("Load() 失败：%v", err)
+	}
+	if cfg.RequestLog != "sqlite" || cfg.RequestLogConfig != `{"env":true}` || cfg.RequestLogConfigFile != "/env/rl.json" {
+		t.Fatalf("env 未生效：log=%q config=%q file=%q",
+			cfg.RequestLog, cfg.RequestLogConfig, cfg.RequestLogConfigFile)
+	}
+
+	// flag 覆盖 env。
+	cfg, err = config.Load([]string{
+		"-request-log", "none",
+		"-request-log-config", `{"flag":true}`,
+		"-request-log-config-file", "/flag/rl.json",
+	})
+	if err != nil {
+		t.Fatalf("Load() 失败：%v", err)
+	}
+	if cfg.RequestLog != "none" || cfg.RequestLogConfig != `{"flag":true}` || cfg.RequestLogConfigFile != "/flag/rl.json" {
+		t.Fatalf("flag 未覆盖 env：log=%q config=%q file=%q",
+			cfg.RequestLog, cfg.RequestLogConfig, cfg.RequestLogConfigFile)
+	}
+}
+
+// request-log 为空时拒绝，禁止静默归一成 "none"。
+func TestLoad_RequestLogNotEmpty(t *testing.T) {
+	_, err := config.Load([]string{"-request-log", ""})
+	if err == nil || !strings.Contains(err.Error(), "request-log must not be empty") {
+		t.Fatalf("空 request-log 应拒绝，实得 %v", err)
+	}
+}
+
+// request-log-config-file 非空但为空白路径时拒绝；合法非空路径通过。
+func TestLoad_RequestLogConfigFilePath(t *testing.T) {
+	_, err := config.Load([]string{"-request-log-config-file", "   "})
+	if err == nil || !strings.Contains(err.Error(), "request-log-config-file") {
+		t.Fatalf("空白路径应拒绝（禁止静默归一），实得 %v", err)
+	}
+	cfg, err := config.Load([]string{"-request-log-config-file", "/tmp/rl.json"})
+	if err != nil {
+		t.Fatalf("合法非空路径被拒绝：%v", err)
+	}
+	if cfg.RequestLogConfigFile != "/tmp/rl.json" {
+		t.Fatalf("路径未生效：%q", cfg.RequestLogConfigFile)
+	}
+}
