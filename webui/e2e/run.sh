@@ -40,7 +40,10 @@ node webui/e2e/mock-upstream.mjs >"$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 
 "$WORK/aigate" -db-type sqlite -db-dsn "$WORK/e2e.db" -init-admin-token e2e-admin \
-  -allow-private-upstreams -addr "$APP_ADDR" >"$WORK/aigate.log" 2>&1 &
+  -allow-private-upstreams -addr "$APP_ADDR" \
+  -request-log=sqlite \
+  -request-log-config "{\"path\":\"$WORK/request-logs.db\",\"retention_days\":0}" \
+  >"$WORK/aigate.log" 2>&1 &
 APP_PID=$!
 
 for _ in $(seq 1 100); do
