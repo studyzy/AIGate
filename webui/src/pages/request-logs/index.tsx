@@ -14,7 +14,7 @@ import type { Column } from "@/components/ui/Table";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, Select, Spinner } from "@/components/ui/primitives";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
-import { formatDateTime, formatLatency, formatNumber } from "@/lib/format";
+import { formatDateTime, formatLatency, formatNumber, toLocalInput } from "@/lib/format";
 
 const PAGE_SIZE = 20;
 
@@ -101,10 +101,20 @@ export function RequestLogsPage() {
   const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1;
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  // 筛选值与页码都以 URL search params 为唯一来源；空串表示该维度不过滤。
+  // 规格 §7.8：URL 未带时间边界时默认「最近 7 天」。固定在一次挂载内，避免每次渲染
+  // 重新取 now 导致 queryKey 漂移反复重查；值与 datetime-local 控件同格式，提交时经 timeBound 转换。
+  const [defaultRange] = useState(() => {
+    const end = new Date();
+    return {
+      start: toLocalInput(new Date(end.getTime() - 7 * 86400000)),
+      end: toLocalInput(end),
+    };
+  });
+
+  // 筛选值与页码都以 URL search params 为唯一来源；URL 未给 start/end 时回退到默认区间。
   const filter: RequestLogFilter = {
-    start: params.get("start") ?? "",
-    end: params.get("end") ?? "",
+    start: params.get("start") || defaultRange.start,
+    end: params.get("end") || defaultRange.end,
     api_key_id: params.get("api_key_id") ?? "",
     api_key_hash: params.get("api_key_hash") ?? "",
     model: params.get("model") ?? "",

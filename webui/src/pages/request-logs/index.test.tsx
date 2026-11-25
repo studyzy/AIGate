@@ -85,4 +85,26 @@ describe("RequestLogsPage", () => {
       ).toBe(true);
     });
   });
+
+  it("defaults the initial range to the last 7 days when the URL has no start/end", async () => {
+    renderPage();
+
+    await waitFor(() => {
+      expect(api).toHaveBeenCalledWith(expect.stringContaining("page=1&page_size=20"));
+    });
+
+    const listUrl = vi
+      .mocked(api)
+      .mock.calls.map(([path]) => String(path))
+      .filter((path) => path.startsWith("/admin/request-logs?"))
+      .at(-1);
+    const params = new URLSearchParams((listUrl ?? "").split("?")[1] ?? "");
+    const start = params.get("start") ?? "";
+    const end = params.get("end") ?? "";
+    // 默认值必须经 timeBound 变成 RFC3339（带秒），不是裸 datetime-local。
+    expect(start).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(end).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    const delta = Date.parse(end) - Date.parse(start);
+    expect(Math.abs(delta - 7 * 86400000)).toBeLessThan(2 * 3600000);
+  });
 });
