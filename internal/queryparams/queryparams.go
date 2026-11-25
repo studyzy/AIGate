@@ -13,7 +13,8 @@
 
 // Package queryparams 集中实现列表类接口的 HTTP 查询参数解析与用量明细行视图：
 // 管理面（/admin/*）与用户面（/api/user/*）共用同一口径，避免两处实现漂移
-// （分页上限、日期解释、group_by 白名单、行级隔离参数等）。
+// （分页上限、日期解释、group_by 白名单、行级隔离参数等）。请求日志等按时间过滤的
+// 列表在此把日期 / RFC3339 边界统一归一为半开 UTC 区间 [Start, End)，供各存储后端直接消费。
 package queryparams
 
 import (
@@ -36,6 +37,24 @@ const (
 	//（负 OFFSET 在 MySQL 是语法错误、SQLite 会被当作 0，两者行为不一致）。
 	MaxPage = 1_000_000
 )
+
+// MaxResultWindow 是列表查询可返回的最大结果窗口（对应 ES index.max_result_window）：
+// 分页的 (page-1)*page_size + page_size 不得超过该值，避免深度翻页拖垮存储；等于边界值允许。
+const MaxResultWindow = 10000
+
+// RequestLogFilter 是请求日志列表的过滤条件。
+// Start/End 为半开 UTC 区间 [Start, End) 的端点（nil 表示该侧不限制）；其余零值字段
+// 均表示「不过滤」，由存储层据此组装查询（Task 8 映射为 requestlog.Query）。
+type RequestLogFilter struct {
+	Start, End                 *time.Time
+	APIKeyID                   uint
+	APIKeyHash, Model, Path    string
+	StatusCode                 int
+	Stream                     *bool
+	MinLatencyMS, MaxLatencyMS int
+	Q                          string
+	Page, PageSize             int
+}
 
 // UsageLogRow 是用量明细的对外表示（显式 JSON 字段名，不含任何内部/敏感列）。
 type UsageLogRow struct {
@@ -153,6 +172,106 @@ func parseUintQuery(raw, name string) (uint, error) {
 		return 0, fmt.Errorf("invalid %s", name)
 	}
 	return uint(n), nil
+}
+
+// parseIntQuery 解析整型查询参数；空串视为 0（不过滤），非法值沿用 invalid <name> 风格。
+func parseIntQuery(raw, name string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s", name)
+	}
+	return n, nil
+}
+
+// parseTimeBound 解析单个时间边界，统一为 UTC 时刻：
+//   - 含 T 的按 RFC3339 解析后转 UTC（end 排他，原样返回）；
+//   - 否则按 YYYY-MM-DD 走业务时区日期标签（model.ParseDateLabel），
+//     end 含当日靠 AddDate(0,0,1) 把「含」转成半开区间的排他上界。
+//
+// 空串返回 nil（该侧不限制）；非法值返回 invalid <name> 错误。
+func parseTimeBound(raw, name string, isEnd bool) (*time.Time, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	if strings.Contains(s, "T") {
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s", name)
+		}
+		tu := t.UTC()
+		return &tu, nil
+	}
+	d, err := model.ParseDateLabel(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s", name)
+	}
+	if isEnd {
+		d = d.AddDate(0, 0, 1)
+	}
+	return &d, nil
+}
+
+// ParseRequestLogFilter 解析请求日志列表的全部查询参数，归一为半开 UTC 区间与统一口径的过滤条件。
+// 复用 ParsePagination 取 page/page_size；非法参数返回英文错误文案（调用方据此回 400），
+// 结果窗口校验放在最后。
+func ParseRequestLogFilter(r *http.Request) (RequestLogFilter, error) {
+	q := r.URL.Query()
+	var f RequestLogFilter
+
+	// 分页复用既有口径（默认值、上限、非法值校验）。
+	page, pageSize, err := ParsePagination(r)
+	if err != nil {
+		return f, err
+	}
+	f.Page, f.PageSize = page, pageSize
+
+	if f.Start, err = parseTimeBound(q.Get("start"), "start", false); err != nil {
+		return f, err
+	}
+	if f.End, err = parseTimeBound(q.Get("end"), "end", true); err != nil {
+		return f, err
+	}
+	if f.APIKeyID, err = parseUintQuery(q.Get("api_key_id"), "api_key_id"); err != nil {
+		return f, err
+	}
+	f.APIKeyHash = strings.TrimSpace(q.Get("api_key_hash"))
+	f.Model = strings.TrimSpace(q.Get("model"))
+	f.Path = strings.TrimSpace(q.Get("path"))
+	if f.StatusCode, err = parseIntQuery(q.Get("status_code"), "status_code"); err != nil {
+		return f, err
+	}
+	if s := strings.TrimSpace(q.Get("stream")); s != "" {
+		v, perr := strconv.ParseBool(s)
+		if perr != nil {
+			return f, fmt.Errorf("invalid stream")
+		}
+		f.Stream = &v
+	}
+	if f.MinLatencyMS, err = parseIntQuery(q.Get("min_latency_ms"), "min_latency_ms"); err != nil {
+		return f, err
+	}
+	if f.MaxLatencyMS, err = parseIntQuery(q.Get("max_latency_ms"), "max_latency_ms"); err != nil {
+		return f, err
+	}
+	f.Q = strings.TrimSpace(q.Get("q"))
+
+	// 跨字段校验：仅在两侧都设定时比较（0 表示该侧无上/下界）。
+	if f.Start != nil && f.End != nil && f.Start.After(*f.End) {
+		return f, fmt.Errorf("invalid time range")
+	}
+	if f.MinLatencyMS != 0 && f.MaxLatencyMS != 0 && f.MinLatencyMS > f.MaxLatencyMS {
+		return f, fmt.Errorf("invalid latency range")
+	}
+	// 结果窗口校验放最后：对应 ES from+size > max_result_window，边界值（==）允许。
+	if (f.Page-1)*f.PageSize+f.PageSize > MaxResultWindow {
+		return f, fmt.Errorf("page out of range")
+	}
+	return f, nil
 }
 
 // ToUsageLogRow 将用量日志实体转为对外表示。
