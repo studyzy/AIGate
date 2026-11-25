@@ -199,7 +199,7 @@ func newSmokeServer(t *testing.T) (*httptest.Server, string) {
 	}
 
 	mux := http.NewServeMux()
-	admin.Register(mux, store, billing.NewStoreSource(store))
+	admin.Register(mux, store, billing.NewStoreSource(store), nil)
 	userapi.Register(mux, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

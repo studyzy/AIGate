@@ -47,7 +47,7 @@ func credServer(t *testing.T) (*httptest.Server, *model.Store, string, string) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	mux := http.NewServeMux()
-	admin.Register(mux, store, billing.NewStoreSource(store))
+	admin.Register(mux, store, billing.NewStoreSource(store), nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

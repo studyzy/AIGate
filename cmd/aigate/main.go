@@ -165,7 +165,7 @@ func run() error {
 	// 路由策略目录与预览由数据面实现、管理面暴露：在此桥接，避免管理面依赖数据面内部结构。
 	admin.SetRouterStrategies(proxyHandler)
 	admin.SetRouterPreviewer(proxyHandler)
-	admin.Register(mux, store, billingSource)
+	admin.Register(mux, store, billingSource, nil)
 	userapi.Register(mux, store)
 
 	// 管控 WebUI：静态资源挂在 /ui/，根路径跳转过去；其余未匹配路径保持 404。

@@ -66,7 +66,7 @@ func newTestBillingServer(t *testing.T) (*httptest.Server, *model.Store, *billin
 	store := newTestStore(t)
 	src := billing.NewStoreSource(store)
 	mux := http.NewServeMux()
-	admin.Register(mux, store, src)
+	admin.Register(mux, store, src, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, store, src

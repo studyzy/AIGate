@@ -25,6 +25,7 @@ import (
 	"aigate/internal/auth"
 	"aigate/internal/billing"
 	"aigate/internal/model"
+	"aigate/internal/requestlog"
 )
 
 // Register 在 mux 上注册全部管理面路由。
@@ -32,7 +33,8 @@ import (
 // src 是数据面共用的同一个 billing.StoreSource 实例：价目、日历、汇率与结算币种的写入
 // 必须经它失效进程内缓存（缓存没有自动失效钩子）。传入 nil 时写操作照常落库、只是不失效
 // 缓存——仅供未装配数据面的纯 HTTP 测试使用；生产装配必须传入真实实例。
-func Register(mux *http.ServeMux, store *model.Store, src *billing.StoreSource) {
+// logs 是请求日志读取器；为 nil 时两个请求日志读接口不注册（未启用该能力 → 404，语义诚实）。
+func Register(mux *http.ServeMux, store *model.Store, src *billing.StoreSource, logs requestlog.Reader) {
 	m := http.NewServeMux()
 
 	m.HandleFunc("POST /admin/models", handleCreateModel(store, src))
@@ -91,6 +93,15 @@ func Register(mux *http.ServeMux, store *model.Store, src *billing.StoreSource) 
 	m.HandleFunc("GET /admin/usage/summary", handleUsageSummary(store))
 	m.HandleFunc("GET /admin/usage/export", handleUsageExport(store))
 	m.HandleFunc("GET /admin/usage/logs", handleUsageLogs(store))
+
+	// 请求日志读接口：仅在装配了 logs 插件时注册，未启用时保持 404。
+	// {$} 单独承接尾斜杠路径：Go 1.22 ServeMux 的 {id} 不匹配空尾段，
+	// 若不注册它，/admin/request-logs/ 会落到 404 而非约定的「空 id → 400」。
+	if logs != nil {
+		m.HandleFunc("GET /admin/request-logs", handleRequestLogs(store, logs))
+		m.HandleFunc("GET /admin/request-logs/{id}", handleRequestLogDetail(logs))
+		m.HandleFunc("GET /admin/request-logs/{$}", handleRequestLogDetail(logs))
+	}
 
 	m.HandleFunc("GET /admin/settings", handleGetSettings(store))
 	m.HandleFunc("PUT /admin/settings", handleUpdateSettings(store, src))

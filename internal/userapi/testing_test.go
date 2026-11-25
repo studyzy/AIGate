@@ -58,7 +58,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *model.Store) {
 	t.Helper()
 	store := newTestStore(t)
 	mux := http.NewServeMux()
-	admin.Register(mux, store, billing.NewStoreSource(store))
+	admin.Register(mux, store, billing.NewStoreSource(store), nil)
 	userapi.Register(mux, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
