@@ -35,6 +35,7 @@ import (
 	"aigate/internal/model"
 	"aigate/internal/provider"
 	"aigate/internal/proxy"
+	"aigate/internal/requestlog"
 	"aigate/internal/userapi"
 	"aigate/internal/version"
 	"aigate/internal/webui"
@@ -140,6 +141,19 @@ func run() error {
 	dispatcher.Start()
 	event.SetDefault(dispatcher)
 
+	// 请求日志插件：装载原始配置（可能含 ES 凭据，绝不打印）、按名选择实现、启动异步写入器。
+	// none 与其它实现走同一条 Open 路径；未知实现名由 Open 附上可用实现清单后拒绝启动。
+	raw, err := requestlog.LoadRawConfig(cfg.RequestLogConfig, cfg.RequestLogConfigFile)
+	if err != nil {
+		return err
+	}
+	plugin, err := requestlog.Open(context.Background(), cfg.RequestLog, raw)
+	if err != nil {
+		return err
+	}
+	writer := requestlog.NewWriter(plugin)
+	writer.Start() // R18：启动期显式拉起消费者，避免停机排空时才触发 Start 的启动清理
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -165,7 +179,12 @@ func run() error {
 	// 路由策略目录与预览由数据面实现、管理面暴露：在此桥接，避免管理面依赖数据面内部结构。
 	admin.SetRouterStrategies(proxyHandler)
 	admin.SetRouterPreviewer(proxyHandler)
-	admin.Register(mux, store, billingSource, nil)
+	// R31：none 时传 nil，两个请求日志读接口不注册（返回 404，语义诚实）。
+	var reader requestlog.Reader
+	if cfg.RequestLog != "none" {
+		reader = plugin
+	}
+	admin.Register(mux, store, billingSource, reader)
 	userapi.Register(mux, store)
 
 	// 管控 WebUI：静态资源挂在 /ui/，根路径跳转过去；其余未匹配路径保持 404。
@@ -178,9 +197,15 @@ func run() error {
 		http.NotFound(w, r)
 	})
 
+	// R2：在构造 http.Server 之前确定 Handler，不在构造后再赋值。
+	var handler http.Handler = mux
+	if cfg.RequestLog != "none" {
+		handler = requestlog.Middleware(mux, writer)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -205,6 +230,8 @@ func run() error {
 			cfg.ResponseRetentionDays,
 			"response_background_timeout",
 			cfg.ResponseBackgroundTimeout.String(),
+			"request_log",
+			cfg.RequestLog,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -217,7 +244,7 @@ func run() error {
 	case <-ctx.Done():
 	}
 
-	// 优雅停机：停新请求 → 卸载事件投递器 → 排空用量与事件队列（各自受停机预算约束）→ 退出。
+	// 优雅停机：停新请求 → 排空请求日志 → 卸载事件投递器 → 排空用量与事件队列（各自受停机预算约束）→ 退出。
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -225,10 +252,16 @@ func run() error {
 		// 仍有在途请求（如长流式连接）未结束：超时后放行，由进程退出终止。
 		slog.Warn("http server shutdown incomplete", "error", err)
 	}
+	// 排空请求日志：与其余 Stop 共用同一 10s 停机预算；plugin.Close() 由 writer.Stop 负责。
+	writer.Stop(shutdownCtx)
 	event.SetDefault(nil)
 	usage.Stop(shutdownCtx)
 	dispatcher.Stop(shutdownCtx)
-	slog.Info("stopped", "usage_dropped", usage.Dropped(), "webhook_dropped", dispatcher.Dropped())
+	slog.Info("stopped",
+		"usage_dropped", usage.Dropped(),
+		"webhook_dropped", dispatcher.Dropped(),
+		"request_log_dropped", writer.Dropped(),
+	)
 	return nil
 }
 
