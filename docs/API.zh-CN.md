@@ -1852,6 +1852,94 @@ curl -X POST http://127.0.0.1:8080/admin/currency-rates \
 与命中的规则分别通过 `X-AIGate-Routed-Model` 与 `X-AIGate-Router-Id` 响应头返回。
 响应体仍按客户端所问回显 `"auto"`。
 
+### 3.12 请求日志
+
+请求日志记录每个推理入口在客户端侧看到的原始请求/响应对。该能力**默认关闭**
+（`-request-log=none`）：只有启用插件时才会注册下面两个路由，否则返回 `404`。仅管理员
+可读（挂在既有 `/admin/` 鉴权子树下）。每个被采集的请求都会带一个
+`X-AIGate-Request-Id` 响应头，取值与日志行的 `id` 一致。插件契约、各实现的配置、
+保留期与「如何新增实现」见 [docs/request-log.zh-CN.md](request-log.zh-CN.md)。
+
+#### GET /admin/request-logs
+
+请求日志分页列表，按时间倒序。**列表行只含元数据**——不含请求/响应正文，也不含头列；
+完整字段需调 `GET /admin/request-logs/{id}`。13 个筛选参数全部可选、可组合；`0` / 空串
+表示「不过滤」。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `start` / `end` | string | 时间范围。`YYYY-MM-DD`（业务时区整天，`end` 含当日）或 RFC3339（`2026-11-25T10:30:00+08:00` / `...Z`）。两侧统一归一为半开 UTC 区间 `[start, end)`：日期形式的 `end` 靠 +1 天变成排他上界，RFC3339 形式的 `end` 本身即排他。取值含 `T` 时按 RFC3339 解析。`start > end` → `400 invalid time range`。 |
+| `api_key_id` | integer | 按密钥过滤。管理面取出该密钥当前的 `proxy_token_hash` 后据此过滤；密钥不存在 → `404 api key not found`。与 `api_key_hash` 同时给出时以 `api_key_id` 为准。 |
+| `api_key_hash` | string | 直接按凭据 sha256 hex 过滤。**密钥 rotate 之后，旧日志只能用本参数查到**，不能用 `api_key_id`。 |
+| `model` | string | 精确匹配从请求体解析出的模型名。 |
+| `path` | string | 精确匹配入口路径，如 `/v1/messages`。 |
+| `status_code` | integer | 精确匹配 HTTP 状态码。 |
+| `stream` | bool | `true` / `false`，只取流式或非流式行。 |
+| `min_latency_ms` / `max_latency_ms` | integer | 延迟区间（毫秒，含端点）。`min > max` → `400 invalid latency range`。 |
+| `q` | string | 全文，尽力而为：sqlite 用 `LIKE`、ES 用 `multi_match`，不承诺打分一致。 |
+| `page` / `page_size` | integer | 默认 `1` / `50`，`page_size` 上限 `500`。`(page-1)*page_size + page_size` 不得超过共享的 `10000` 结果窗口，否则 `400 page out of range`。 |
+
+```json
+{
+  "logs": [
+    {
+      "id": "0123456789abcdef0123456789abcdef",
+      "created_at": "2026-11-25T08:12:34.512Z",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "model": "glm-5.1",
+      "api_key_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "status_code": 200,
+      "latency_ms": 512,
+      "stream": false,
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "page_size": 50
+}
+```
+
+无匹配时 `logs` 为 `[]`（不会是 `null`）。两种实现返回同一套字段、同一套筛选与分页
+语义。`created_at` 为 UTC；`error` 仅在 `status_code >= 400` 时填状态归类；
+`truncated` 表示正文在 1 MiB 采集上限处被截断。
+
+错误码：`400`（参数非法、时间/延迟区间非法或页码超出结果窗口）、`401`（凭据缺失或无效）、
+`403`（非管理员）、`500`（存储错误）。
+
+#### GET /admin/request-logs/{id}
+
+返回单条请求的完整记录：列表行字段之外，补出 `request_body`、`response_body`、
+`request_headers`、`response_headers`。正文字段是原始文本（流式行为原始 SSE 字节）；
+头字段是白名单头的 JSON 对象。凭据类头一律不入库。
+
+路径参数 `id` —— 取自 `X-AIGate-Request-Id` 的 32 位十六进制请求 ID。
+
+```json
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "created_at": "2026-11-25T08:12:34.512Z",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "model": "glm-5.1",
+  "api_key_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "status_code": 200,
+  "latency_ms": 512,
+  "stream": false,
+  "error": "",
+  "truncated": false,
+  "request_body": "{\"model\":\"glm-5.1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+  "response_body": "{\"id\":\"chatcmpl-1\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}",
+  "request_headers": "{\"Content-Type\":\"application/json\",\"User-Agent\":\"openai-python/1.0\"}",
+  "response_headers": "{\"Content-Type\":\"application/json\",\"X-AIGate-Request-Id\":\"0123456789abcdef0123456789abcdef\"}"
+}
+```
+
+错误码：`400`（id 为空）、`401`（凭据缺失或无效）、`403`（非管理员）、
+`404`（`request log not found`）、`500`（存储错误）。
+
 ## 4. 用户面
 
 前缀 `/api/user/*`。任意启用用户 token（`user` 或 `admin`）均可访问。`user` 角色 token
@@ -2190,3 +2278,17 @@ curl -X POST http://127.0.0.1:8080/api/user/keys \
 | 后台超时 | `-response-background-timeout`（`AIGATE_RESPONSE_BACKGROUND_TIMEOUT`，默认 `30m`）：`background:true` 任务的总时长上限；须为正数。 |
 | 落库内容 | 每行保存请求体改写后的 `items` 累积快照（不含 `instructions`）与响应体。**对话正文属于用户数据**，请据保留期与合规要求配置开关。 |
 | 过期 | 行被清理后，其 ID 不能再作为 `previous_response_id`（`404`）；以它为最新行的 `conversation` 回退到上一行。 |
+
+### 请求日志配置
+
+请求日志是可替换实现的能力，**默认关闭**。核心只保留下面三项「如何把配置交给插件」
+的设置；JSON 内容归实现所有（见
+[docs/request-log.zh-CN.md](request-log.zh-CN.md)）。
+
+| Flag | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | 实现名：`none` / `sqlite` / `es`；未知名字在启动阶段拒绝。 |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | （空） | 内联 JSON 对象，原样交给实现；非空时必须是合法 JSON 对象。 |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | （空） | JSON 配置文件路径，优先于 `-request-log-config`；ES 凭据建议放这里，避免出现在命令行。 |
+
+核心存储 schema 未变，**不需要 SQL 迁移**。

@@ -284,6 +284,9 @@ precedence over the default.
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | Allow private/loopback upstreams (relaxes SSRF strict mode) |
 | `-master-key` | `AIGATE_MASTER_KEY` | (empty) | 64-hex or base64 32-byte key for AES-256-GCM; empty = plaintext + warning |
 | `-migrate-encrypt` | — | `false` | One-off: encrypt existing plaintext secret rows, then exit (requires a master key) |
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | Request-log implementation: `none` (default, off), `sqlite` or `es` |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | (empty) | Inline JSON config passed verbatim to the request-log plugin |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | (empty) | JSON config file path (takes precedence); put ES credentials here so they stay out of argv |
 
 Invalid configuration is rejected at startup rather than silently defaulted.
 `-version` prints the version, commit, build time and Go version and exits; the same

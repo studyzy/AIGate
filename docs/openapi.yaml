@@ -1732,6 +1732,74 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/request-logs:
+    get:
+      tags: [admin]
+      summary: 请求日志列表（按时间倒序）
+      description: |
+        仅当启用请求日志插件（`-request-log` 不为 `none`）时注册；未启用时路由不存在（404）。
+        列表行只含元数据，不含请求/响应正文与头；正文需按 id 调详情接口读取。
+        13 个筛选参数全部可选、可组合；`(page-1)*page_size + page_size` 不得超过
+        `MaxResultWindow = 10000`（两种实现共用同一约束），否则 400 `page out of range`。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/StartDateTime'
+        - $ref: '#/components/parameters/EndDateTime'
+        - $ref: '#/components/parameters/FilterAPIKeyID'
+        - $ref: '#/components/parameters/FilterAPIKeyHash'
+        - $ref: '#/components/parameters/FilterModel'
+        - $ref: '#/components/parameters/FilterPath'
+        - $ref: '#/components/parameters/FilterStatusCode'
+        - $ref: '#/components/parameters/FilterStream'
+        - $ref: '#/components/parameters/MinLatencyMS'
+        - $ref: '#/components/parameters/MaxLatencyMS'
+        - $ref: '#/components/parameters/FilterQ'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 请求日志分页（列表行不含正文）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestLogs'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/request-logs/{id}:
+    get:
+      tags: [admin]
+      summary: 请求日志详情
+      description: 返回完整 Entry（在列表行之上补出请求体、响应体与白名单头）。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestLogID'
+      responses:
+        '200':
+          description: 完整请求日志行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestLogDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/settings:
     get:
       tags: [admin]
@@ -2407,6 +2475,93 @@ components:
         minimum: 1
         maximum: 500
         default: 50
+    # 请求日志专用：start/end 同时接受 YYYY-MM-DD 与 RFC3339，
+    # 不能复用仅接受 YYYY-MM-DD 的 StartDate / EndDate（R39）。
+    StartDateTime:
+      name: start
+      in: query
+      required: false
+      description: |
+        起始时间（含）。`YYYY-MM-DD` 按业务时区整天解释，或 RFC3339 时刻
+        （含 `T`，如 `2026-11-25T10:30:00+08:00` / `...Z`）；统一归一为半开 UTC
+        区间 `[start, end)` 的起点。取值含 `T` 时按 RFC3339 解析。
+      schema:
+        type: string
+    EndDateTime:
+      name: end
+      in: query
+      required: false
+      description: |
+        结束时间。`YYYY-MM-DD` 含当日（靠 +1 天换算成排他上界）；RFC3339 时刻本身即**排他**上界。
+        两种实现都用 `created_at >= start AND created_at < end`；`start > end` → 400 `invalid time range`。
+      schema:
+        type: string
+    FilterAPIKeyHash:
+      name: api_key_hash
+      in: query
+      required: false
+      description: 直接按凭据 sha256 hex 过滤；密钥 rotate 后的旧日志用它查。与 api_key_id 同时给出时以 api_key_id 为准。
+      schema:
+        type: string
+    FilterModel:
+      name: model
+      in: query
+      required: false
+      description: 精确匹配从请求体解析出的模型名
+      schema:
+        type: string
+    FilterPath:
+      name: path
+      in: query
+      required: false
+      description: 精确匹配入口路径，如 `/v1/messages`
+      schema:
+        type: string
+    FilterStatusCode:
+      name: status_code
+      in: query
+      required: false
+      description: 精确匹配 HTTP 状态码（0 / 空 = 不过滤）
+      schema:
+        type: integer
+    FilterStream:
+      name: stream
+      in: query
+      required: false
+      description: 只取流式（true）或非流式（false）；不传表示不过滤
+      schema:
+        type: boolean
+    MinLatencyMS:
+      name: min_latency_ms
+      in: query
+      required: false
+      description: 延迟下界（毫秒，含端点）；0 = 不过该侧
+      schema:
+        type: integer
+        minimum: 0
+    MaxLatencyMS:
+      name: max_latency_ms
+      in: query
+      required: false
+      description: 延迟上界（毫秒，含端点）；0 = 不过该侧；min > max → 400 `invalid latency range`
+      schema:
+        type: integer
+        minimum: 0
+    FilterQ:
+      name: q
+      in: query
+      required: false
+      description: 全文检索，尽力而为（sqlite 用 LIKE、ES 用 multi_match，不承诺一致打分）
+      schema:
+        type: string
+    RequestLogID:
+      name: id
+      in: path
+      required: true
+      description: 请求日志 ID，16 随机字节的 32 位十六进制；与响应头 `X-AIGate-Request-Id` 一致。
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{32}$'
 
   responses:
     BadRequest:
@@ -3933,6 +4088,107 @@ components:
         total:
           type: integer
           format: int64
+        page:
+          type: integer
+        page_size:
+          type: integer
+      required: [logs, total, page, page_size]
+
+    # ------------------------------------------------------------------
+    # 管理面：请求日志
+    # ------------------------------------------------------------------
+    RequestLogRow:
+      type: object
+      description: |
+        列表行：只含元数据，绝不含请求/响应正文与头；完整字段由详情接口返回。
+        两种实现返回同一套字段与同一套筛选/分页语义。
+      properties:
+        id:
+          type: string
+          description: 请求 ID，16 随机字节的 32 位十六进制；与响应头 `X-AIGate-Request-Id` 一致。
+        created_at:
+          type: string
+          format: date-time
+          description: UTC 时间戳
+        method:
+          type: string
+        path:
+          type: string
+          description: 入口路径，如 `/v1/chat/completions`
+        model:
+          type: string
+          description: 尽力从请求体解析的模型名，解析失败为空串
+        api_key_hash:
+          type: string
+          description: 凭据 token 的 sha256 hex；绝不存明文
+        status_code:
+          type: integer
+        latency_ms:
+          type: integer
+          description: 请求耗时（毫秒）
+        stream:
+          type: boolean
+        error:
+          type: string
+          description: 仅 `status_code >= 400` 时的状态归类；成功为空串
+        truncated:
+          type: boolean
+          description: 任一侧正文超过 1 MiB 采集上限被截断
+      required: [id, created_at, method, path, model, api_key_hash, status_code, latency_ms, stream, error, truncated]
+
+    RequestLogDetail:
+      type: object
+      description: 详情：在 RequestLogRow 之上补出请求体、响应体与白名单头（头字段是 JSON 对象字符串，凭据头一律不入库）。
+      properties:
+        id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        method:
+          type: string
+        path:
+          type: string
+        model:
+          type: string
+        api_key_hash:
+          type: string
+        status_code:
+          type: integer
+        latency_ms:
+          type: integer
+        stream:
+          type: boolean
+        error:
+          type: string
+        truncated:
+          type: boolean
+        request_body:
+          type: string
+          description: 原始请求体文本（流式时为原始 SSE 字节文本）
+        response_body:
+          type: string
+          description: 原始响应体文本（流式时为原始 SSE 字节文本）
+        request_headers:
+          type: string
+          description: 白名单请求头的 JSON 对象字符串
+        response_headers:
+          type: string
+          description: 白名单响应头的 JSON 对象字符串
+      required: [id, created_at, method, path, model, api_key_hash, status_code, latency_ms, stream, error, truncated, request_body, response_body, request_headers, response_headers]
+
+    RequestLogs:
+      type: object
+      properties:
+        logs:
+          type: array
+          description: 当前页行；空结果为 `[]` 而非 null
+          items:
+            $ref: '#/components/schemas/RequestLogRow'
+        total:
+          type: integer
+          format: int64
+          description: 匹配总数
         page:
           type: integer
         page_size:

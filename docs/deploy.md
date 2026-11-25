@@ -98,6 +98,14 @@ malformed master key) makes the process exit rather than fall back silently.
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When true, relaxes SSRF strict mode to allow private/loopback upstreams. |
 | `-master-key` | `AIGATE_MASTER_KEY` | (empty) | AES-256-GCM master key: 64 hex characters or base64 decoding to 32 bytes. Empty disables encryption (plaintext storage plus a startup warning). See "Secret encryption". |
 | `-migrate-encrypt` | — | `false` | One-off start-up switch: encrypt existing plaintext secret rows and exit without serving. Requires `-master-key`. See "Secret encryption". |
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | Request-log implementation: `none` (default, off), `sqlite` or `es`. An unknown name is rejected at startup. Enabling it registers `GET /admin/request-logs` and `GET /admin/request-logs/{id}`. |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | (empty) | Inline JSON object handed verbatim to the request-log plugin; a non-empty value must be a valid JSON object. |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | (empty) | Path to a JSON config file; takes precedence over `-request-log-config`. **Put ES credentials here**, not in the inline flag or argv. |
+
+The request-log plugin is **off by default**; the core storage schema is unchanged, so
+enabling it needs **no SQL migration**. Implementation-specific configuration (and ES
+credentials) belongs in the JSON supplied via `-request-log-config-file`, which keeps
+secrets out of the process command line — see [docs/request-log.md](request-log.md).
 
 `-init-admin-token` is consulted only when no admin exists yet. If an admin is
 already present the flag is ignored and a log line records that. The token is

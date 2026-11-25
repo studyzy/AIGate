@@ -1848,6 +1848,98 @@ an `ai_models` id whose `model_type` is a decision protocol), `max_candidates`,
 rule are returned in the `X-AIGate-Routed-Model` and `X-AIGate-Router-Id` response
 headers. The response body still echoes `"auto"` as asked.
 
+### 3.12 Request Logs
+
+Request logs record the raw client-side request/response pair for every inference
+ingress. They are **off by default** (`-request-log=none`): the two routes below are
+registered only when a plugin is enabled and return `404` otherwise. Only admins can
+read them (they hang off the existing `/admin/` auth subtree). Each captured request
+carries an `X-AIGate-Request-Id` response header equal to the log row's `id`. See
+[docs/request-log.md](request-log.md) for the plugin contract, per-implementation
+configuration, retention and the recipe for adding an implementation.
+
+#### GET /admin/request-logs
+
+Paginated request-log rows, newest first. **Rows contain metadata only** — no request or
+response bodies and no headers; fetch `GET /admin/request-logs/{id}` for the full entry.
+All 13 filter parameters are optional and may be combined; `0` / empty means "no filter".
+
+| Parameter | Type | Notes |
+|-----------|------|-------|
+| `start` / `end` | string | Time range. `YYYY-MM-DD` (business timezone, whole day; `end` includes that day) or RFC3339 (`2026-11-25T10:30:00+08:00` / `...Z`). Both bounds are normalised to a half-open UTC interval `[start, end)`: a date `end` becomes exclusive via +1 day, an RFC3339 `end` is exclusive as given. A value containing `T` is parsed as RFC3339. `start > end` → `400 invalid time range`. |
+| `api_key_id` | integer | Filter by key. The admin plane resolves the key's current `proxy_token_hash` and filters on it; an unknown key → `404 api key not found`. When given together with `api_key_hash`, `api_key_id` wins. |
+| `api_key_hash` | string | Filter directly by credential sha256 hex. **After a key rotate, older rows are reachable only via this parameter**, not `api_key_id`. |
+| `model` | string | Exact match on the model name parsed from the request body. |
+| `path` | string | Exact match on the ingress path, e.g. `/v1/messages`. |
+| `status_code` | integer | Exact HTTP status code match. |
+| `stream` | bool | `true` / `false` — only streaming or non-streaming rows. |
+| `min_latency_ms` / `max_latency_ms` | integer | Inclusive latency bounds (ms). `min > max` → `400 invalid latency range`. |
+| `q` | string | Full text, best effort: `LIKE` in sqlite, `multi_match` in ES; no consistent scoring is promised. |
+| `page` / `page_size` | integer | Defaults `1` / `50`; `page_size` capped at `500`. `(page-1)*page_size + page_size` must not exceed the shared `10000` result window, else `400 page out of range`. |
+
+```json
+{
+  "logs": [
+    {
+      "id": "0123456789abcdef0123456789abcdef",
+      "created_at": "2026-11-25T08:12:34.512Z",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "model": "glm-5.1",
+      "api_key_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "status_code": 200,
+      "latency_ms": 512,
+      "stream": false,
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "page_size": 50
+}
+```
+
+`logs` is `[]` (never `null`) when nothing matches. Both implementations return the same
+field set and the same filter/pagination semantics. `created_at` is UTC; `error` is a
+status classification only when `status_code >= 400`; `truncated` marks a body cut at the
+1 MiB capture limit.
+
+Errors: `400` (invalid parameter, time/latency range, or page outside the result
+window), `401` (missing/invalid token), `403` (not an admin), `500` (storage error).
+
+#### GET /admin/request-logs/{id}
+
+Returns the full entry for one request: the list row plus `request_body`,
+`response_body`, `request_headers` and `response_headers`. Body fields are raw text
+(streaming rows carry the raw SSE bytes); header fields are JSON objects of whitelisted
+headers. Credential headers are never stored.
+
+Path parameter `id` — the 32-character hex request ID from `X-AIGate-Request-Id`.
+
+```json
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "created_at": "2026-11-25T08:12:34.512Z",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "model": "glm-5.1",
+  "api_key_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "status_code": 200,
+  "latency_ms": 512,
+  "stream": false,
+  "error": "",
+  "truncated": false,
+  "request_body": "{\"model\":\"glm-5.1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+  "response_body": "{\"id\":\"chatcmpl-1\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}",
+  "request_headers": "{\"Content-Type\":\"application/json\",\"User-Agent\":\"openai-python/1.0\"}",
+  "response_headers": "{\"Content-Type\":\"application/json\",\"X-AIGate-Request-Id\":\"0123456789abcdef0123456789abcdef\"}"
+}
+```
+
+Errors: `400` (empty id), `401` (missing/invalid token), `403` (not an admin),
+`404` (`request log not found`), `500` (storage error).
+
 ## 4. User plane
 
 Prefix `/api/user/*`. Any enabled user token (`user` or `admin`) may authenticate. A `user`-role token is forced to act on its own data (its `user_id` is ignored); an `admin`-role token may target another user with `?user_id=`.
@@ -2176,3 +2268,17 @@ historical data); set it explicitly when creating a model.
 | Background timeout | `-response-background-timeout` (`AIGATE_RESPONSE_BACKGROUND_TIMEOUT`, default `30m`): total run time of a `background:true` job; must be positive. |
 | What is stored | Each row keeps the rewritten cumulative `items` snapshot (excluding `instructions`) and the response body. **Conversation content is user data** — configure the switch and retention to match your compliance requirements. |
 | Expiry | Once a row is pruned its ID can no longer be used as `previous_response_id` (`404`); a `conversation` whose newest row it was falls back to the previous row. |
+
+### Request log configuration
+
+Request logging is a pluggable capability, **off by default**. The core only carries the
+three "how to hand config to the plugin" settings below; the JSON content belongs to the
+implementation (see [docs/request-log.md](request-log.md)).
+
+| Flag | Environment variable | Default | Notes |
+|------|----------------------|---------|-------|
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | Implementation name: `none` / `sqlite` / `es`. Unknown names are rejected at startup. |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | (empty) | Inline JSON object passed verbatim to the implementation; a non-empty value must be a valid JSON object. |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | (empty) | Path to a JSON config file; takes precedence over `-request-log-config`. Use it for ES credentials so they stay out of argv. |
+
+The core storage schema is unchanged — **no SQL migration is needed**.

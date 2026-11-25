@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Request-log plugin capability (pluggable raw request/response capture)** — request
+  logging is now a replaceable capability: one `requestlog.Plugin` interface, a named
+  registry (`Register` / `Names` / `Open`), and an edge middleware that tees the raw
+  client-side request and response bodies (including raw SSE bytes) for every inference
+  ingress, then writes asynchronously through a bounded queue so the data plane is never
+  blocked. Each captured request carries the request ID returned in the
+  `X-AIGate-Request-Id` response header. Three implementations ship in-tree: `none`
+  (no-op), `sqlite` (its own `request_logs` table in a local SQLite file) and `es`
+  (Elasticsearch 8.x/9.x over stdlib `net/http`, no new dependency). Each implementation
+  owns its own schema and configuration; the core `sql/init.sql` is untouched, so
+  **no SQL migration is needed (不需要 SQL 迁移；核心 schema 未变)** — MySQL deployments
+  need no incremental script. Enabled by three new flags: `-request-log` /
+  `AIGATE_REQUEST_LOG` (default `none`), `-request-log-config` /
+  `AIGATE_REQUEST_LOG_CONFIG` (default empty, inline JSON object) and
+  `-request-log-config-file` / `AIGATE_REQUEST_LOG_CONFIG_FILE` (default empty, JSON file
+  path; takes precedence, and is where ES credentials belong so they stay out of argv).
+  The capability is **off by default (默认关闭)**: with `none` the middleware is not
+  installed and no request/response body is written to disk. Admin read endpoints
+  `GET /admin/request-logs` (paginated metadata-only rows) and
+  `GET /admin/request-logs/{id}` (full entry with bodies and whitelisted headers) are
+  registered only when a plugin is enabled; the list accepts **13 filter parameters**
+  (`start`, `end`, `api_key_id`, `api_key_hash`, `model`, `path`, `status_code`,
+  `stream`, `min_latency_ms`, `max_latency_ms`, `q`, `page`, `page_size`) with a shared
+  half-open UTC `[start, end)` range and a 10000 result window. Credential headers are
+  hashed, never stored, and the raw plugin config is never logged. A new **Request logs**
+  page in the WebUI lists metadata and expands a row into the full request/response
+  bodies. See `docs/request-log.md` / `docs/request-log.zh-CN.md` for the plugin
+  contract, per-implementation configuration, retention and the three-step recipe to
+  add another implementation.
+
 - **`auto` pseudo-model (cost-aware routing)** — `GET /v1/models` now lists an `auto`
   entry (owned_by `aigate`) when enabled, and `model: "auto"` on
   `/v1/chat/completions`, `/v1/messages` and `/v1/responses` is routed to the cheapest

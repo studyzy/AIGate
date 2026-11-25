@@ -88,6 +88,13 @@ schema 变更需在 GORM 模型与 `sql/init.sql` 两处同步（`init.sql` 是�
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | 为 true 时放宽 SSRF 严格模式，放行私网/回环上游。 |
 | `-master-key` | `AIGATE_MASTER_KEY` | （空） | AES-256-GCM 主密钥：64 位 hex 或 base64（解码后 32 字节）。为空则禁用加密（明文存储 + 启动告警）。见「密钥加密」。 |
 | `-migrate-encrypt` | — | `false` | 一次性启动开关：加密存量明文密钥行后退出（不起服务）。需同时配置 `-master-key`。见「密钥加密」。 |
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | 请求日志实现：`none`（默认，关闭）、`sqlite` 或 `es`；未知名字在启动阶段拒绝。启用后注册 `GET /admin/request-logs` 与 `GET /admin/request-logs/{id}`。 |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | （空） | 内联 JSON 对象，原样交给请求日志插件；非空时必须是合法 JSON 对象。 |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | （空） | JSON 配置文件路径，优先于 `-request-log-config`；**ES 凭据请放这里**，不要放内联 flag 或命令行。 |
+
+请求日志插件**默认关闭**；核心存储 schema 未变，启用**不需要 SQL 迁移**。实现专属配置
+（含 ES 凭据）放在 `-request-log-config-file` 指向的 JSON 里，避免凭据出现在进程命令行，
+见 [docs/request-log.zh-CN.md](request-log.zh-CN.md)。
 
 `-init-admin-token` 只在尚不存在管理员时生效。若管理员已存在，该 flag 被忽略并记
 一条日志。token 以哈希入库，明文不落库。

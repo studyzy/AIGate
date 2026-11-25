@@ -250,6 +250,9 @@ Docker 说明与上游 SSRF 策略见 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.m
 | `-allow-private-upstreams` | `AIGATE_ALLOW_PRIVATE_UPSTREAMS` | `false` | 放行私网/回环上游（放宽 SSRF 严格模式） |
 | `-master-key` | `AIGATE_MASTER_KEY` | （空） | AES-256-GCM 主密钥（64 hex 或 base64 的 32 字节）；空 = 明文 + 告警 |
 | `-migrate-encrypt` | — | `false` | 一次性开关：加密存量明文密钥行后退出（需主密钥） |
+| `-request-log` | `AIGATE_REQUEST_LOG` | `none` | 请求日志实现：`none`（默认，关闭）、`sqlite` 或 `es` |
+| `-request-log-config` | `AIGATE_REQUEST_LOG_CONFIG` | （空） | 内联 JSON 配置，原样交给请求日志插件 |
+| `-request-log-config-file` | `AIGATE_REQUEST_LOG_CONFIG_FILE` | （空） | JSON 配置文件路径（优先）；ES 凭据放这里，避免出现在命令行 |
 
 非法配置会在启动阶段被直接拒绝，而不是静默兜底。`-version` 打印版本号、commit、
 构建时间与 Go 版本后退出；同样的数据在运行时由 `GET /version` 提供。权威配置表见
