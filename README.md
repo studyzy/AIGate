@@ -65,6 +65,9 @@ For the `aigatectl` management CLI, see [docs/CLI.md](docs/CLI.md).
 
 - **Built for model access, not general API traffic.** Routing, quotas,
   credentials, usage and webhooks are first-class concepts, not plugin chains.
+  Where a capability needs another backend, its **implementation is replaceable**
+  rather than chained: request logging ships `none` / `sqlite` / `es` behind one
+  interface (see [docs/request-log.md](docs/request-log.md)).
 - **Production-extracted.** AIGate is the model-access layer of
   [ClawPro](https://cloud.tencent.com/document/product/213/129156), so its
   behavior reflects request patterns and failure modes that have already run in

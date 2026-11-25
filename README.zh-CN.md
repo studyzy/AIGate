@@ -61,7 +61,9 @@ make run
 ## 为什么用 AIGate
 
 - **为模型访问而做，不是通用 API 网关。** 路由、配额、凭据、用量和 Webhook
-  都是一等概念，不是插件链上的补丁。
+  都是一等概念，不是插件链上的补丁。一等概念不变，但**能力可替换实现**：请求日志
+  以同一个接口提供 `none` / `sqlite` / `es` 三种实现（见
+  [docs/request-log.zh-CN.md](docs/request-log.zh-CN.md)）。
 - **从生产里抽出来。** AIGate 是
   [ClawPro](https://cloud.tencent.com/document/product/213/129156) 的模型接入层，
   行为对应已经跑过生产的请求模式和失败模式。

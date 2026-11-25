@@ -1906,7 +1906,8 @@ status classification only when `status_code >= 400`; `truncated` marks a body c
 1 MiB capture limit.
 
 Errors: `400` (invalid parameter, time/latency range, or page outside the result
-window), `401` (missing/invalid token), `403` (not an admin), `500` (storage error).
+window), `401` (missing/invalid token), `403` (not an admin), `404` (`api key not found`
+when `api_key_id` refers to a missing key), `500` (storage error).
 
 #### GET /admin/request-logs/{id}
 

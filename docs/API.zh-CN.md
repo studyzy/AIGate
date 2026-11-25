@@ -1907,7 +1907,8 @@ curl -X POST http://127.0.0.1:8080/admin/currency-rates \
 `truncated` 表示正文在 1 MiB 采集上限处被截断。
 
 错误码：`400`（参数非法、时间/延迟区间非法或页码超出结果窗口）、`401`（凭据缺失或无效）、
-`403`（非管理员）、`500`（存储错误）。
+`403`（非管理员）、`404`（`api_key_id` 指向的密钥不存在时返回 `api key not found`）、
+`500`（存储错误）。
 
 #### GET /admin/request-logs/{id}
 
