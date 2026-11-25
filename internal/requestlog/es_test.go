@@ -71,11 +71,13 @@ type mockES struct {
 	server *httptest.Server
 	url    string // = server.URL，直接作为 esConfig.Endpoints 的元素
 
-	mu         sync.Mutex
-	docs       map[string]map[string]any // _id -> 完整 _source（snake_case）
-	reqs       []esRequest
-	headStatus int  // HEAD /<index> 返回码；404 触发建索引，200 跳过（默认 404）
-	bulkErrors bool // true 时 _bulk 返回 {"errors":true}
+	mu            sync.Mutex
+	docs          map[string]map[string]any // _id -> 完整 _source（snake_case）
+	reqs          []esRequest
+	headStatus    int    // HEAD /<index> 返回码；404 触发建索引，200 跳过（默认 404）
+	bulkErrors    bool   // true 时 _bulk 返回 {"errors":true}
+	bulkErrType   string // 可选：注入 items[].index.error.type
+	bulkErrReason string // 可选：注入 items[].index.error.reason
 }
 
 // newMockES 启动 mock ES 并登记 server 关闭清理。
@@ -100,6 +102,14 @@ func (m *mockES) setHeadStatus(v int) {
 func (m *mockES) setBulkErrors(v bool) {
 	m.mu.Lock()
 	m.bulkErrors = v
+	m.mu.Unlock()
+}
+
+// setBulkItemError 注入 _bulk 响应 items[].index.error 的 type/reason，用于验证 I2 的告警摘要。
+func (m *mockES) setBulkItemError(typ, reason string) {
+	m.mu.Lock()
+	m.bulkErrType = typ
+	m.bulkErrReason = reason
 	m.mu.Unlock()
 }
 
@@ -178,7 +188,24 @@ func (m *mockES) handleBulk(w http.ResponseWriter, body []byte) {
 		m.docs[action.Index.ID] = doc
 	}
 	if m.bulkErrors {
-		_, _ = w.Write([]byte(`{"errors":true,"items":[]}`))
+		if m.bulkErrType != "" || m.bulkErrReason != "" {
+			resp := map[string]any{
+				"errors": true,
+				"items": []any{map[string]any{
+					"index": map[string]any{
+						"status": 400,
+						"error": map[string]any{
+							"type":   m.bulkErrType,
+							"reason": m.bulkErrReason,
+						},
+					},
+				}},
+			}
+			data, _ := json.Marshal(resp)
+			_, _ = w.Write(data)
+		} else {
+			_, _ = w.Write([]byte(`{"errors":true,"items":[]}`))
+		}
 	} else {
 		_, _ = w.Write([]byte(`{"errors":false,"items":[]}`))
 	}
@@ -544,7 +571,7 @@ func TestES_InitCreatesMapping(t *testing.T) {
 	}
 	props := body.Mappings.Properties
 	want := map[string]string{
-		"id": "keyword", "created_at": "date",
+		"id": "keyword", "created_at": "date_nanos",
 		"method": "keyword", "path": "keyword", "model": "keyword",
 		"api_key_hash": "keyword", "status_code": "integer",
 		"latency_ms": "integer", "stream": "boolean", "truncated": "boolean",
@@ -797,25 +824,33 @@ func TestES_SearchFilters(t *testing.T) {
 		t.Error("bool.filter 缺少 multi_match（Q）")
 	}
 
-	if len(body.Sort) != 1 {
-		t.Fatalf("sort 子句数 = %d，期望 1", len(body.Sort))
+	// I1：主键 created_at DESC + 次级键 id DESC，与 sqlite 的 ORDER BY 对齐，
+	// 保证 created_at 精度相同时 from/size 分页稳定、不重复/丢行。
+	if len(body.Sort) != 2 {
+		t.Fatalf("sort 子句数 = %d，期望 2（created_at desc + id desc 次级键）", len(body.Sort))
 	}
-	if sortClause, ok := body.Sort[0]["created_at"]; ok {
-		switch v := sortClause.(type) {
+	assertSortDesc := func(i int, field string) {
+		t.Helper()
+		clause, ok := body.Sort[i][field]
+		if !ok {
+			t.Errorf("sort[%d] 应为 %s：%v", i, field, body.Sort[i])
+			return
+		}
+		switch v := clause.(type) {
 		case string:
 			if v != "desc" {
-				t.Errorf("sort created_at = %q，期望 desc", v)
+				t.Errorf("sort[%d] %s = %q，期望 desc", i, field, v)
 			}
 		case map[string]any:
 			if v["order"] != "desc" {
-				t.Errorf("sort created_at.order = %v，期望 desc", v["order"])
+				t.Errorf("sort[%d] %s.order = %v，期望 desc", i, field, v["order"])
 			}
 		default:
-			t.Errorf("sort created_at 形式异常：%T", sortClause)
+			t.Errorf("sort[%d] %s 形式异常：%T", i, field, clause)
 		}
-	} else {
-		t.Errorf("sort 应为 created_at：%v", body.Sort[0])
 	}
+	assertSortDesc(0, "created_at")
+	assertSortDesc(1, "id")
 
 	if body.From != 5 {
 		t.Errorf("from = %d，期望 (2-1)*5=5", body.From)
@@ -1106,5 +1141,146 @@ func TestES_CloseConcurrentWithWrite(t *testing.T) {
 	wg.Wait()
 	if err := p.Close(); err != nil {
 		t.Errorf("并发结束后再次 Close 仍应幂等：%v", err)
+	}
+}
+
+// TestES_CreatedAtPrecisionIsConsistent（I1(b)）：写入的 created_at 精度必须与 mapping
+// 一致。ES 用 date_nanos 映射并以 RFC3339Nano（纳秒精度）写入 _bulk、_source 回读同样解析，
+// 避免 date（毫秒）映射把纳秒写值截断后产生大量 created_at 相同的时间点。
+func TestES_CreatedAtPrecisionIsConsistent(t *testing.T) {
+	m := newMockES(t)
+	p := openES(t, m, nil)
+	// 带亚毫秒（纳秒）分量的时刻，用来验证写值精度不被截断。
+	ts := time.Date(2026, 11, 25, 8, 12, 34, 123456789, time.UTC)
+	if err := p.Write(context.Background(), []requestlog.Entry{makeEntry("prec-1", ts)}); err != nil {
+		t.Fatalf("Write 失败：%v", err)
+	}
+
+	// mapping 必须是 date_nanos，才能承载 RFC3339Nano 的纳秒精度。
+	var put *esRequest
+	for _, r := range m.requests() {
+		if r.Method == http.MethodPut && isESIndexPath(r.Path) {
+			rr := r
+			put = &rr
+		}
+	}
+	if put == nil {
+		t.Fatal("HEAD 404 后应发送 PUT /<index> 建索引")
+	}
+	var mapping struct {
+		Mappings struct {
+			Properties map[string]struct {
+				Type string `json:"type"`
+			} `json:"properties"`
+		} `json:"mappings"`
+	}
+	if err := json.Unmarshal(put.Body, &mapping); err != nil {
+		t.Fatalf("mapping 不是合法 JSON：%v", err)
+	}
+	if got := mapping.Mappings.Properties["created_at"].Type; got != "date_nanos" {
+		t.Errorf("created_at mapping = %q，期望 date_nanos（与纳秒写值一致）", got)
+	}
+
+	// _bulk 文档的 created_at 必须是 RFC3339Nano 纳秒精度，与 date_nanos 映射一致。
+	var bulk *esRequest
+	for _, r := range m.requests() {
+		if r.Method == http.MethodPost && r.Path == "/_bulk" {
+			rr := r
+			bulk = &rr
+		}
+	}
+	if bulk == nil {
+		t.Fatal("Write 应发送 POST /_bulk")
+	}
+	lines := bytes.Split(bytes.TrimSpace(bulk.Body), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("_bulk NDJSON 行数 = %d，期望 2（1 对 action+doc）", len(lines))
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(lines[1], &doc); err != nil {
+		t.Fatalf("解析 _bulk doc 行失败：%v", err)
+	}
+	got, _ := doc["created_at"].(string)
+	want := ts.UTC().Format(time.RFC3339Nano)
+	if got != want {
+		t.Errorf("写入的 created_at = %q，期望 %q（RFC3339Nano 纳秒精度）", got, want)
+	}
+}
+
+// TestES_BulkItemErrorsAreLogged（I2）：_bulk errors:true 且带 items[].index.error 时，
+// 告警日志须含解析出的（截断）reason/type 摘要，且 Write 仍只告警、不返回错误、不重试。
+func TestES_BulkItemErrorsAreLogged(t *testing.T) {
+	capture := func(t *testing.T, reason string) (string, error) {
+		t.Helper()
+		m := newMockES(t)
+		p := openES(t, m, nil)
+		m.setBulkErrors(true)
+		m.setBulkItemError("mapper_parsing_exception", reason)
+		var buf bytes.Buffer
+		old := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(old)
+		err := p.Write(context.Background(), []requestlog.Entry{makeEntry("be-1", time.Now().UTC())})
+		return buf.String(), err
+	}
+
+	t.Run("reason and type included", func(t *testing.T) {
+		out, err := capture(t, "failed to parse field [created_at]")
+		if err != nil {
+			t.Fatalf("errors:true + item error 时 Write 不应返回错误，实得 %v", err)
+		}
+		for _, want := range []string{"bulk", "mapper_parsing_exception", "failed to parse field [created_at]"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("告警日志应含 %q，实得 %q", want, out)
+			}
+		}
+	})
+
+	t.Run("long reason truncated", func(t *testing.T) {
+		long := strings.Repeat("E", 1000)
+		out, err := capture(t, long)
+		if err != nil {
+			t.Fatalf("errors:true + item error 时 Write 不应返回错误，实得 %v", err)
+		}
+		if !strings.Contains(out, "first_error") {
+			t.Errorf("告警日志应含 first_error 结构化字段，实得 %q", out)
+		}
+		if strings.Contains(out, long) {
+			t.Error("过长 reason 应被截断，不应整段进入日志")
+		}
+	})
+}
+
+// TestES_ConfigValidationStrictness（I3 + T1）：非正 timeout 与未知配置键必须在 Init
+// 阶段被拒绝（英文错误），且拒绝前不得访问 ES。
+func TestES_ConfigValidationStrictness(t *testing.T) {
+	m := newMockES(t)
+	cases := []struct {
+		name    string
+		opts    map[string]any
+		wantErr string
+	}{
+		{"zero timeout", map[string]any{"timeout": "0s"}, "es timeout must be positive"},
+		{"negative timeout", map[string]any{"timeout": "-1s"}, "es timeout must be positive"},
+		{"unknown key", map[string]any{"retention_day": 3}, "unknown field"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before := len(m.requests())
+			p, err := requestlog.Open(context.Background(), "es", esRawConfig(t, m.url, c.opts))
+			if err == nil {
+				_ = p.Close()
+				t.Fatal("非法配置应被拒绝，却成功")
+			}
+			if p != nil {
+				t.Error("Init 失败时不应返回插件")
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("错误信息 %q 未包含 %q", err.Error(), c.wantErr)
+			}
+			if got := len(m.requests()); got != before {
+				t.Errorf("非法配置不应访问 ES，实得新增 %d 个请求", got-before)
+			}
+		})
 	}
 }

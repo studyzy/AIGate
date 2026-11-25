@@ -1913,8 +1913,9 @@ curl -X POST http://127.0.0.1:8080/admin/currency-rates \
 #### GET /admin/request-logs/{id}
 
 返回单条请求的完整记录：列表行字段之外，补出 `request_body`、`response_body`、
-`request_headers`、`response_headers`。正文字段是原始文本（流式行为原始 SSE 字节）；
-头字段是白名单头的 JSON 对象。凭据类头一律不入库。
+`request_headers`、`response_headers`。`request_body` 是客户端发来的原始请求体文本；
+`response_body` 是原始响应体文本（流式响应为原始 SSE 字节）。头字段是白名单头的
+JSON 对象。凭据类头一律不入库。
 
 路径参数 `id` —— 取自 `X-AIGate-Request-Id` 的 32 位十六进制请求 ID。
 

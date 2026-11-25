@@ -208,3 +208,24 @@ MySQL 生产部署要共享、可检索的存储请用 `es`。它不改 `sql/ini
 `autoMigrateModels` 条目，**不需要 MySQL 迁移 / 增量脚本**。存量 MySQL 部署不会多出
 新表；启用 `sqlite` 时写到本地独立文件，启用 `es` 时写到配置的集群。两种后端仍须返回
 同一套字段、筛选与分页语义，保证管理面接口与 WebUI 契约一致。
+
+## 已知差异与限制
+
+- **`q` 的匹配语义不同，不只是打分不同。** sqlite 用字面 `LIKE` 子串匹配，es 用分词的
+  `multi_match`（按分析器切词）。同一 `q` 在两种后端可能命中不同的行——这是匹配语义差异，
+  不只是上文提到的打分不一致。
+- **超过 1 MiB 的正文会丢失尽力解析的元数据。** `model` / `stream` 只从截断后的请求体前缀
+  （1 MiB 采集上限）解析；请求体超过 1 MiB 时，不完整的前缀通常解析失败，日志里这两个字段
+  会留空。
+- **同时带 `x-api-key` 与 `Authorization: Bearer`。** 客户端同时给两者时，日志记录
+  `sha256(x-api-key)`（`x-api-key` 优先），但 `/v1/chat/completions` 用 Bearer 密钥鉴权。
+  因此按该 Bearer 密钥的 `api_key_id` 过滤可能查不到这一行；应改用实际生效的 `x-api-key`
+  的 `api_key_hash`。
+- **未知配置键会被拒绝。** `sqlite` 与 `es` 都用 `DisallowUnknownFields`：拼错的键（如
+  `retention_day`）是启动错误，不会静默回退到默认 7 天。
+- **`es` 仅对 mock 测试，生产前请做真实集群冒烟。** `es` 实现的测试只在进程内的 mock
+  Elasticsearch 上进行。生产使用前，请针对真实的 ES 8.x/9.x 集群及其实际 mappings/凭据做
+  一次冒烟（建索引、`_bulk`、`_search`、`_delete_by_query`）。
+- **`created_at` 精度。** `es` 把 `created_at` 映射为 `date_nanos`，并以 RFC3339Nano
+  （纳秒精度）写入；sqlite 保留 Go `time.Time` 的完整精度。两种后端都按
+  `created_at DESC, id DESC` 排序，用 `id` 打破并列以保证分页稳定。

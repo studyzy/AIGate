@@ -740,3 +740,24 @@ func TestSQLite_CloseConcurrentWithWrite(t *testing.T) {
 		t.Errorf("并发结束后再次 Close 仍应幂等：%v", err)
 	}
 }
+
+// TestSQLite_ConfigRejectsUnknownKeys（T1）：拼错的未知配置键必须在 Init 阶段被拒绝，
+// 不能静默回退到默认的 7 天保留期；拒绝前不得创建 db 文件。
+func TestSQLite_ConfigRejectsUnknownKeys(t *testing.T) {
+	path := tempDBPath(t)
+	raw := rawConfig(t, path, map[string]any{"retention_day": 3})
+	p, err := requestlog.Open(context.Background(), "sqlite", raw)
+	if err == nil {
+		_ = p.Close()
+		t.Fatal("未知配置键应被拒绝，却成功")
+	}
+	if p != nil {
+		t.Error("Init 失败时不应返回插件")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("错误信息 %q 未包含 'unknown field'", err.Error())
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("非法配置不应创建 db 文件：%v", err)
+	}
+}

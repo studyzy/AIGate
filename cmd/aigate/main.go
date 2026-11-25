@@ -152,7 +152,11 @@ func run() error {
 		return err
 	}
 	writer := requestlog.NewWriter(plugin)
-	writer.Start() // R18：启动期显式拉起消费者，避免停机排空时才触发 Start 的启动清理
+	// R46：none 不启动 idle 写入器；停机时 Writer.Stop 内部仍会调用 Start 兜底排空，
+	// 且 nonePlugin.Retention()==0 不会启动清理循环。非 none 才显式拉起消费者（R18）。
+	if cfg.RequestLog != "none" {
+		writer.Start()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

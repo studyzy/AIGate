@@ -384,10 +384,11 @@ func TestWriter_PruneWhenConfigured(t *testing.T) {
 	w.Start()
 	t.Cleanup(func() { w.Stop(context.Background()) })
 
-	// 启动即同步清一次：Start() 返回后应立即有且仅有一次 Prune。
+	// 启动即同步清一次：Start() 返回后应至少有一次 Prune。调度较慢时清理循环可能
+	// 已经又 tick 了一次，所以不能断言恰好 1 次（T2，避免慢调度下的偶发抖动）。
 	n, before := f.pruneSnapshot()
-	if n != 1 {
-		t.Fatalf("startup inline Prune: got %d calls, want 1", n)
+	if n < 1 {
+		t.Fatalf("startup inline Prune: got %d calls, want >=1", n)
 	}
 	wantBefore := start.Add(-retention)
 	if d := before[0].Sub(wantBefore); d > 2*time.Second || d < -2*time.Second {

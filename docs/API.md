@@ -1912,9 +1912,10 @@ when `api_key_id` refers to a missing key), `500` (storage error).
 #### GET /admin/request-logs/{id}
 
 Returns the full entry for one request: the list row plus `request_body`,
-`response_body`, `request_headers` and `response_headers`. Body fields are raw text
-(streaming rows carry the raw SSE bytes); header fields are JSON objects of whitelisted
-headers. Credential headers are never stored.
+`response_body`, `request_headers` and `response_headers`. `request_body` is the raw
+client request body as sent; `response_body` is the raw response body (the raw SSE bytes
+for streaming responses). Header fields are JSON objects of whitelisted headers.
+Credential headers are never stored.
 
 Path parameter `id` — the 32-character hex request ID from `X-AIGate-Request-Id`.
 

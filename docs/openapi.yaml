@@ -4168,10 +4168,10 @@ components:
           type: boolean
         request_body:
           type: string
-          description: 原始请求体文本（流式时为原始 SSE 字节文本）
+          description: 客户端发来的原始请求体文本（始终是请求体原文，与是否流式无关；不含响应 SSE）
         response_body:
           type: string
-          description: 原始响应体文本（流式时为原始 SSE 字节文本）
+          description: 原始响应体文本（流式时为原始 SSE 字节文本；仅响应体如此，请求体始终是原文）
         request_headers:
           type: string
           description: 白名单请求头的 JSON 对象字符串

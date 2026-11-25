@@ -234,3 +234,28 @@ migration / incremental script is needed**. Existing MySQL deployments carry no 
 table; enabling the plugin with `sqlite` writes to a local file, and with `es` writes to
 the configured cluster. The two backends must still return the same fields, filters and
 pagination so the admin UI and API contract stay identical.
+
+## Caveats and known differences
+
+- **`q` matching differs, not just scoring.** sqlite uses a literal `LIKE` substring
+  match; es uses a tokenized `multi_match` (split by the analyser). The same `q` can
+  therefore match different rows in the two backends — a matching-semantics difference,
+  beyond the lack of consistent scoring noted above.
+- **Bodies over 1 MiB lose best-effort metadata.** `model` and `stream` are parsed only
+  from the truncated request-body prefix (the 1 MiB capture cap). For a request body over
+  1 MiB the incomplete prefix usually fails to parse, so both fields are left empty in
+  the log.
+- **Mixed `x-api-key` and `Authorization: Bearer`.** When a client sends both, the log
+  records `sha256(x-api-key)` (x-api-key takes priority), but `/v1/chat/completions`
+  authenticates the Bearer key. Filtering by that Bearer key's `api_key_id` may therefore
+  not find the row; use the `api_key_hash` of the actually-used x-api-key instead.
+- **Unknown config keys are rejected.** Both `sqlite` and `es` use
+  `DisallowUnknownFields`: a misspelled key such as `retention_day` is a startup error,
+  not a silent fallback to the 7-day default.
+- **`es` is tested against a mock; smoke-test your real cluster.** The `es` implementation
+  is exercised in tests only against an in-process mock Elasticsearch. Before production
+  use, run a smoke test (create index, `_bulk`, `_search`, `_delete_by_query`) against
+  your real ES 8.x/9.x cluster and its actual mappings/credentials.
+- **`created_at` precision.** `es` maps `created_at` as `date_nanos` and writes it in
+  RFC3339Nano (nanosecond precision); sqlite keeps full Go `time.Time` precision. Both
+  backends sort `created_at DESC, id DESC`, so `id` breaks ties for stable paging.

@@ -208,7 +208,9 @@ func init() {
 func (*esPlugin) Name() string { return "es" }
 
 // parseESConfig 解析并校验私有配置：先写默认值再用 raw 覆盖，因此 {} 用默认值、
-// 显式 0 才是「永不清理」；非法值一律拒绝，不做静默归一化。
+// 显式 0 才是「永不清理」；非法值一律拒绝，不做静默归一化。解码用
+// DisallowUnknownFields，拼错的未知键（如 retention_day）在启动期直接报错，
+// 而不是被忽略后悄悄回退默认值（T1）。
 func parseESConfig(raw json.RawMessage) (esConfig, error) {
 	cfg := esConfig{
 		Index:         defaultESIndex,
@@ -220,7 +222,9 @@ func parseESConfig(raw json.RawMessage) (esConfig, error) {
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			return esConfig{}, errors.New("es config must be a JSON object")
 		}
-		if err := json.Unmarshal(raw, &cfg); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
 			return esConfig{}, fmt.Errorf("invalid es config: %w", err)
 		}
 	}
@@ -243,20 +247,28 @@ func parseESConfig(raw json.RawMessage) (esConfig, error) {
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > maxESRetentionDays {
 		return esConfig{}, fmt.Errorf("es retention_days must be between 0 and %d", maxESRetentionDays)
 	}
-	if _, err := time.ParseDuration(cfg.Timeout); err != nil {
+	timeout, err := time.ParseDuration(cfg.Timeout)
+	if err != nil {
 		return esConfig{}, fmt.Errorf("invalid es timeout: %w", err)
+	}
+	// timeout <= 0 会让 http.Client{Timeout} 退化为「无超时」，Init 的 HEAD/PUT
+	// 在 ES 不可达时会挂住启动流程，因此必须为正数（I3）。
+	if timeout <= 0 {
+		return esConfig{}, errors.New("es timeout must be positive")
 	}
 	return cfg, nil
 }
 
-// esIndexMapping 定义索引字段类型：筛选字段用 keyword/date/integer/boolean，正文用 text。
+// esIndexMapping 定义索引字段类型：筛选字段用 keyword/date_nanos/integer/boolean，正文用 text。
+// created_at 用 date_nanos（纳秒精度），与 esDoc.CreatedAt / esTime 写入的 RFC3339Nano
+// 纳秒精度一致；若用 date（毫秒）映射会截断写值、制造大量同毫秒时间点（I1）。
 func esIndexMapping() ([]byte, error) {
 	type field struct {
 		Type string `json:"type"`
 	}
 	properties := map[string]field{
 		"id":               {Type: "keyword"},
-		"created_at":       {Type: "date"},
+		"created_at":       {Type: "date_nanos"},
 		"method":           {Type: "keyword"},
 		"path":             {Type: "keyword"},
 		"model":            {Type: "keyword"},
@@ -346,7 +358,8 @@ func (p *esPlugin) acquire() (*esConn, error) {
 	return p.conn, nil
 }
 
-// esTime 把已解析好的 UTC 时刻格式化为 ES date 字段可识别的 RFC3339 字符串（R16）。
+// esTime 把已解析好的 UTC 时刻格式化为 RFC3339Nano（纳秒精度）字符串（R16），
+// 与 date_nanos 映射、esDoc.CreatedAt 的 time.Time 写值保持同一精度（I1）。
 func esTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func esTerm(field string, value any) map[string]any {
@@ -403,6 +416,43 @@ func buildESFilters(q Query) []any {
 	return filters
 }
 
+// maxESBulkDetailRunes 限制单条 _bulk 错误摘要进入日志的长度，避免把大段映射错误灌进日志。
+const maxESBulkDetailRunes = 256
+
+// esBulkItem 是 _bulk 响应里唯一需要的结构：只取 items[].index.error，其余字段由
+// encoding/json 忽略。
+type esBulkItem struct {
+	Index struct {
+		Error struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	} `json:"index"`
+}
+
+// esBulkErrorDetail 取响应里第一条带 error 的 item，拼出 "type: reason" 并按 rune 截断，
+// 作为告警的结构化摘要；ES 未给出可解析的 item error 时返回占位说明（I2）。
+func esBulkErrorDetail(items []esBulkItem) string {
+	for _, it := range items {
+		e := it.Index.Error
+		if e.Type == "" && e.Reason == "" {
+			continue
+		}
+		detail := e.Type
+		if e.Reason != "" {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += e.Reason
+		}
+		if r := []rune(detail); len(r) > maxESBulkDetailRunes {
+			detail = string(r[:maxESBulkDetailRunes])
+		}
+		return detail
+	}
+	return "no item error detail in response"
+}
+
 // Write 用 NDJSON _bulk 批量写入，_id 取 Entry.ID；响应 errors:true 只告警不返回错误。
 func (p *esPlugin) Write(ctx context.Context, entries []Entry) error {
 	if len(entries) == 0 {
@@ -442,13 +492,18 @@ func (p *esPlugin) Write(ctx context.Context, entries []Entry) error {
 	}
 	if len(data) > 0 {
 		var bulkResp struct {
-			Errors bool `json:"errors"`
+			Errors bool         `json:"errors"`
+			Items  []esBulkItem `json:"items"`
 		}
 		if err := json.Unmarshal(data, &bulkResp); err != nil {
 			return fmt.Errorf("decode es bulk response: %w", err)
 		}
 		if bulkResp.Errors {
-			slog.Warn("es bulk write reported item errors", "entries", len(entries))
+			// 只告警、不返回错误、不重试；把首条 item.error 的截断摘要带进结构化字段，
+			// 避免 _bulk 的逐条失败原因被完全丢弃（I2）。
+			slog.Warn("es bulk write reported item errors",
+				"entries", len(entries),
+				"first_error", esBulkErrorDetail(bulkResp.Items))
 		}
 	}
 	return nil
@@ -472,7 +527,12 @@ func (p *esPlugin) Search(ctx context.Context, q Query) (Page, error) {
 		"query": map[string]any{
 			"bool": map[string]any{"filter": buildESFilters(q)},
 		},
-		"sort":             []any{map[string]any{"created_at": map[string]any{"order": "desc"}}},
+		// 主键 created_at DESC + 次级键 id DESC，与 sqlite 的 ORDER BY 对齐：
+		// created_at 精度相同时用唯一 id 打破并列，保证 from/size 分页不重复/丢行（I1）。
+		"sort": []any{
+			map[string]any{"created_at": map[string]any{"order": "desc"}},
+			map[string]any{"id": map[string]any{"order": "desc"}},
+		},
 		"from":             (page - 1) * pageSize,
 		"size":             pageSize,
 		"track_total_hits": true,

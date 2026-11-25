@@ -104,6 +104,8 @@ func (*sqlitePlugin) Name() string { return "sqlite" }
 
 // parseSQLiteConfig 解析并校验私有配置：先把默认值写进结构体，再用 raw 覆盖，
 // 因此 {} 用默认值、显式 0 才是「永不清理」；非法值一律拒绝，不做静默归一化。
+// 解码用 DisallowUnknownFields，拼错的未知键（如 retention_day）在启动期直接报错，
+// 而不是被忽略后悄悄回退默认保留期（T1）。
 func parseSQLiteConfig(raw json.RawMessage) (sqliteConfig, error) {
 	cfg := sqliteConfig{
 		Path:          defaultSQLitePath,
@@ -114,7 +116,9 @@ func parseSQLiteConfig(raw json.RawMessage) (sqliteConfig, error) {
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			return sqliteConfig{}, errors.New("sqlite config must be a JSON object")
 		}
-		if err := json.Unmarshal(raw, &cfg); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
 			return sqliteConfig{}, fmt.Errorf("invalid sqlite config: %w", err)
 		}
 	}
