@@ -19,6 +19,7 @@ const GROUPS: { title: MessageKey; items: { key: MessageKey; to: string }[] }[] 
     items: [
       { key: "nav.dashboard", to: "/" },
       { key: "nav.usage", to: "/usage" },
+      { key: "nav.requestLogs", to: "/request-logs" },
     ],
   },
   {

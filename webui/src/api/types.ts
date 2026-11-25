@@ -448,3 +448,50 @@ export interface RouterPreview {
   /** true 表示策略未能决定，预览的是「会回退到 primary」这一结果。 */
   fallback: boolean;
 }
+
+/** 请求日志列表行：对齐 GET /admin/request-logs，不含任何正文列或正文派生字段。 */
+export interface RequestLogRow {
+  id: string;
+  created_at: string;
+  method: string;
+  path: string;
+  model: string;
+  api_key_hash: string;
+  status_code: number;
+  latency_ms: number;
+  stream: boolean;
+  error: string;
+  truncated: boolean;
+}
+
+/** 请求日志详情：对齐 GET /admin/request-logs/{id}，在列表行之上补出正文与白名单头。 */
+export interface RequestLogDetail extends RequestLogRow {
+  request_body: string;
+  response_body: string;
+  request_headers: string;
+  response_headers: string;
+}
+
+export interface RequestLogsResponse {
+  logs: RequestLogRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 列表接口的 13 个查询参数；页面把它们放在 URL search params 里，取值均为字符串。 */
+export interface RequestLogFilter {
+  start?: string;
+  end?: string;
+  api_key_id?: string;
+  api_key_hash?: string;
+  model?: string;
+  path?: string;
+  status_code?: string;
+  stream?: string;
+  min_latency_ms?: string;
+  max_latency_ms?: string;
+  q?: string;
+  page?: string;
+  page_size?: string;
+}

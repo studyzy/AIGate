@@ -13,6 +13,9 @@ const DashboardPage = lazy(() =>
 const UsagePage = lazy(() =>
   import("./pages/usage").then((m) => ({ default: m.UsagePage })),
 );
+const RequestLogsPage = lazy(() =>
+  import("./pages/request-logs").then((m) => ({ default: m.RequestLogsPage })),
+);
 const ProvidersPage = lazy(() =>
   import("./pages/providers").then((m) => ({ default: m.ProvidersPage })),
 );
@@ -65,6 +68,7 @@ export const router = createBrowserRouter(
           children: [
             { index: true, element: page(DashboardPage) },
             { path: "usage", element: page(UsagePage) },
+            { path: "request-logs", element: page(RequestLogsPage) },
             { path: "providers", element: page(ProvidersPage) },
             { path: "model-routers", element: page(ModelRouterPage) },
             { path: "billing-calendar", element: page(BillingCalendarPage) },
