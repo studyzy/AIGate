@@ -56,5 +56,10 @@ if ! curl -sf "http://$APP_ADDR/healthz" >/dev/null; then
   exit 1
 fi
 
+# 浏览器必须与网关共用同一时区：网关默认 -timezone=Asia/Shanghai（internal/config），
+# 而用量页的 todayISO() 取浏览器本地日期。CI runner 默认 UTC，16:00–24:00 UTC 时浏览器
+# 日期比业务时区晚一天，usage.spec.ts 会查不到刚产生的用量行（"No usage in this range"）。
+# 固定 TZ 让浏览器 e2e 在任意时刻、任意宿主时区下都确定性通过；若将来改网关默认时区，
+# 这里需同步调整。
 cd "$ROOT/webui"
-WEBUI_BASE_URL="http://$APP_ADDR" pnpm exec playwright test "$@"
+TZ=Asia/Shanghai WEBUI_BASE_URL="http://$APP_ADDR" pnpm exec playwright test "$@"
