@@ -96,6 +96,10 @@ schema 变更需在 GORM 模型与 `sql/init.sql` 两处同步（`init.sql` 是�
 （含 ES 凭据）放在 `-request-log-config-file` 指向的 JSON 里，避免凭据出现在进程命令行，
 见 [docs/request-log.zh-CN.md](request-log.zh-CN.md)。
 
+启用 `-request-log=es` 时，**网关启动之前** ES 必须可达、索引必须可创建：`Init` 在启动时
+探测/创建索引（受 `timeout` 约束，默认 `5s`），失败即拒绝启动。而运行期 ES 故障只产生告警，
+绝不阻塞数据面。
+
 `-init-admin-token` 只在尚不存在管理员时生效。若管理员已存在，该 flag 被忽略并记
 一条日志。token 以哈希入库，明文不落库。
 

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"aigate/internal/model"
 	"aigate/internal/queryparams"
 )
 
@@ -158,6 +159,50 @@ func TestParseRequestLogFilter_DateInclusiveEnd(t *testing.T) {
 	}
 }
 
+// TestParseRequestLogFilter_DateInBusinessTimezone 验证 YYYY-MM-DD 按配置的业务时区取整日：
+// 以 Asia/Shanghai 为例，start=end=2026-11-25 应归一为 [2026-11-24T16:00Z, 2026-11-25T16:00Z)，
+// 即覆盖北京时区整个自然日的 24 小时半开区间，而不是 UTC 日历日的 00:00～24:00。
+func TestParseRequestLogFilter_DateInBusinessTimezone(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	prev := model.BusinessLocation()
+	model.SetLocation(loc)
+	t.Cleanup(func() { model.SetLocation(prev) })
+
+	f, err := queryparams.ParseRequestLogFilter(newFilterReq(url.Values{
+		"start": {"2026-11-25"},
+		"end":   {"2026-11-25"},
+	}))
+	if err != nil {
+		t.Fatalf("ParseRequestLogFilter: %v", err)
+	}
+	if f.Start == nil || f.End == nil {
+		t.Fatalf("Start/End = %v/%v, want non-nil", f.Start, f.End)
+	}
+	wantStart := time.Date(2026, 11, 24, 16, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	if !f.Start.Equal(wantStart) || f.Start.Location() != time.UTC {
+		t.Fatalf("Start = %v (loc=%v), want %v in UTC", f.Start, f.Start.Location(), wantStart)
+	}
+	if !f.End.Equal(wantEnd) || f.End.Location() != time.UTC {
+		t.Fatalf("End = %v (loc=%v), want %v in UTC", f.End, f.End.Location(), wantEnd)
+	}
+	if d := wantEnd.Sub(wantStart); d != 24*time.Hour {
+		t.Fatalf("interval = %v, want 24h covering the whole Beijing day", d)
+	}
+	// 北京 2026-11-25 01:00 在区间内；北京 2026-11-26 01:00 在区间外。
+	inside := time.Date(2026, 11, 24, 17, 0, 0, 0, time.UTC)
+	outside := time.Date(2026, 11, 25, 17, 0, 0, 0, time.UTC)
+	if !inRange(inside, *f.Start, *f.End) {
+		t.Errorf("Beijing 01:00 of the day (%v) should be inside [Start, End)", inside)
+	}
+	if inRange(outside, *f.Start, *f.End) {
+		t.Errorf("Beijing 01:00 next day (%v) should be outside [Start, End)", outside)
+	}
+}
+
 // TestParseRequestLogFilter_RFC3339 验证含 T 的 RFC3339 边界：按给定时区偏移转 UTC，
 // end 排他（原样返回，不加一天）；结果统一为 UTC 时刻（供 sqlite / ES 直接使用）。
 func TestParseRequestLogFilter_RFC3339(t *testing.T) {
@@ -259,7 +304,9 @@ func TestParseRequestLogFilter_Invalid(t *testing.T) {
 		{name: "invalid rfc3339 start", values: url.Values{"start": {"2026-11-25T99:99:99Z"}}, want: "invalid start"},
 		{name: "invalid api_key_id", values: url.Values{"api_key_id": {"abc"}}, want: "invalid api_key_id"},
 		{name: "invalid status_code", values: url.Values{"status_code": {"abc"}}, want: "invalid status_code"},
+		{name: "negative status_code", values: url.Values{"status_code": {"-1"}}, want: "invalid status_code"},
 		{name: "invalid min_latency_ms", values: url.Values{"min_latency_ms": {"abc"}}, want: "invalid min_latency_ms"},
+		{name: "negative min_latency_ms", values: url.Values{"min_latency_ms": {"-1"}}, want: "invalid min_latency_ms"},
 		{name: "invalid max_latency_ms", values: url.Values{"max_latency_ms": {"abc"}}, want: "invalid max_latency_ms"},
 		{name: "invalid stream", values: url.Values{"stream": {"maybe"}}, want: "invalid stream"},
 		{name: "invalid page", values: url.Values{"page": {"0"}}, want: "invalid page"},

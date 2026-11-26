@@ -174,14 +174,15 @@ func parseUintQuery(raw, name string) (uint, error) {
 	return uint(n), nil
 }
 
-// parseIntQuery 解析整型查询参数；空串视为 0（不过滤），非法值沿用 invalid <name> 风格。
+// parseIntQuery 解析非负整型查询参数；空串视为 0（不过滤），非法值与负数沿用
+// invalid <name> 风格（与 openapi.yaml 的 minimum: 0 一致）。
 func parseIntQuery(raw, name string) (int, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return 0, nil
 	}
 	n, err := strconv.Atoi(s)
-	if err != nil {
+	if err != nil || n < 0 {
 		return 0, fmt.Errorf("invalid %s", name)
 	}
 	return n, nil
@@ -189,8 +190,10 @@ func parseIntQuery(raw, name string) (int, error) {
 
 // parseTimeBound 解析单个时间边界，统一为 UTC 时刻：
 //   - 含 T 的按 RFC3339 解析后转 UTC（end 排他，原样返回）；
-//   - 否则按 YYYY-MM-DD 走业务时区日期标签（model.ParseDateLabel），
-//     end 含当日靠 AddDate(0,0,1) 把「含」转成半开区间的排他上界。
+//   - 否则按 YYYY-MM-DD 在配置的业务时区（model.BusinessLocation）取当日 00:00，
+//     换算成对应的 UTC 瞬间；start 直接取该瞬间，end 含当日则靠 AddDate(0,0,1)
+//     挪到次日业务时区 00:00 对应的 UTC 瞬间，作为半开区间的排他上界
+//     （在带时区的 time 上做 AddDate，夏令时也正确）。
 //
 // 空串返回 nil（该侧不限制）；非法值返回 invalid <name> 错误。
 func parseTimeBound(raw, name string, isEnd bool) (*time.Time, error) {
@@ -206,14 +209,17 @@ func parseTimeBound(raw, name string, isEnd bool) (*time.Time, error) {
 		tu := t.UTC()
 		return &tu, nil
 	}
-	d, err := model.ParseDateLabel(s)
+	loc := model.BusinessLocation()
+	t, err := time.ParseInLocation("2006-01-02", s, loc)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s", name)
 	}
-	if isEnd {
-		d = d.AddDate(0, 0, 1)
+	if !isEnd {
+		tu := t.UTC()
+		return &tu, nil
 	}
-	return &d, nil
+	tu := t.AddDate(0, 0, 1).UTC()
+	return &tu, nil
 }
 
 // ParseRequestLogFilter 解析请求日志列表的全部查询参数，归一为半开 UTC 区间与统一口径的过滤条件。

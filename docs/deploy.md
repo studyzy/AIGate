@@ -107,6 +107,11 @@ enabling it needs **no SQL migration**. Implementation-specific configuration (a
 credentials) belongs in the JSON supplied via `-request-log-config-file`, which keeps
 secrets out of the process command line — see [docs/request-log.md](request-log.md).
 
+With `-request-log=es`, ES must be reachable and the index creatable **before the gateway
+starts**: `Init` probes/creates the index at startup (bounded by `timeout`, default `5s`)
+and a failure makes the gateway refuse to start. Runtime ES outages, by contrast, only
+produce warnings and never block the data plane.
+
 `-init-admin-token` is consulted only when no admin exists yet. If an admin is
 already present the flag is ignored and a log line records that. The token is
 stored as a hash; the plaintext is never persisted.

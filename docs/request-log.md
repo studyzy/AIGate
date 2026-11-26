@@ -149,6 +149,17 @@ Only stdlib `net/http` is used (`_bulk` / `_search` / `_doc` / `_delete_by_query
 there is no new dependency and no version probing; target ES 8.x/9.x. Endpoints come
 from operator config, not from request input — do not put untrusted addresses there.
 
+Only the first `endpoints` entry is used; the rest are ignored; v1 provides no failover
+or load balancing.
+
+**Startup is fail-fast.** With `-request-log=es`, `Init` probes the index (HEAD) and
+creates it with mappings (PUT) when absent, before the gateway starts serving. ES must be
+reachable and the index creatable **before startup**, otherwise the gateway refuses to
+start; the probe is bounded by `http.Client.Timeout` (`timeout`, default `5s`). This
+asymmetry with runtime is intentional: after startup, ES failures are warn-only (the
+async writer logs and drops batches, prune failures are logged) and never block the data
+plane.
+
 ## Read API and all 13 filter parameters
 
 `GET /admin/request-logs` (list) and `GET /admin/request-logs/{id}` (detail) are
@@ -192,6 +203,14 @@ would drop everything after 00:00 on the `end` day).
   → `400 page out of range`. sqlite's `OFFSET` has no such limit, so the check is applied
   in the shared parser to keep both backends identical. Results are ordered
   `created_at DESC` (newest first).
+- A `YYYY-MM-DD` value in `/admin/request-logs` is interpreted in the **configured
+  business timezone** (`-timezone`, default `Asia/Shanghai`): the whole local day, with
+  `end` inclusive. This differs from `/admin/usage/logs`, which keeps the project's
+  existing UTC-calendar-day label convention (`ParseUsageFilter` /
+  `model.ParseDateLabel`); do not assume the two endpoints share a day boundary.
+- `created_at` is the **capture-completion instant** (response written / stream ended),
+  not the request-arrival time. A long SSE stream can therefore be logged on the day
+  after it started and is filtered by that completion day.
 
 ## Rotate caveat
 

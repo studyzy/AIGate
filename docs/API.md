@@ -1934,8 +1934,8 @@ Path parameter `id` — the 32-character hex request ID from `X-AIGate-Request-I
   "truncated": false,
   "request_body": "{\"model\":\"glm-5.1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
   "response_body": "{\"id\":\"chatcmpl-1\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}",
-  "request_headers": "{\"Content-Type\":\"application/json\",\"User-Agent\":\"openai-python/1.0\"}",
-  "response_headers": "{\"Content-Type\":\"application/json\",\"X-AIGate-Request-Id\":\"0123456789abcdef0123456789abcdef\"}"
+  "request_headers": "{\"Content-Type\":[\"application/json\"],\"User-Agent\":[\"openai-python/1.0\"]}",
+  "response_headers": "{\"Content-Type\":[\"application/json\"],\"X-AIGate-Request-Id\":[\"0123456789abcdef0123456789abcdef\"]}"
 }
 ```
 

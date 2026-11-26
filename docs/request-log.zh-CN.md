@@ -133,6 +133,14 @@ MySQL 生产部署要共享、可检索的存储请用 `es`。它不改 `sql/ini
 只用标准库 `net/http`（`_bulk` / `_search` / `_doc` / `_delete_by_query`），无新依赖、
 无版本探测；目标 ES 8.x/9.x。端点来自运维配置而非请求输入——不要把不可信地址写进去。
 
+当前只使用 `endpoints` 的第一个元素，其余会被忽略；v1 不提供故障转移或负载均衡。
+
+**启动即快速失败（fail-fast）。** 启用 `-request-log=es` 时，`Init` 会在网关启动服务前探测
+索引（HEAD），缺失时带 mappings 创建（PUT）。因此**启动之前** ES 必须可达、索引必须可创建，
+否则网关拒绝启动；探测受 `http.Client.Timeout`（`timeout`，默认 `5s`）约束。这与运行期行为
+的不对称是刻意为之：启动之后 ES 故障只产生告警（异步写入器记录并丢弃批次、清理失败只记日志），
+绝不阻塞数据面。
+
 ## 读接口与全部 13 个筛选参数
 
 `GET /admin/request-logs`（列表）与 `GET /admin/request-logs/{id}`（详情）**仅在启用插件时
@@ -174,6 +182,12 @@ MySQL 生产部署要共享、可检索的存储请用 `es`。它不改 `sql/ini
   **`maxResultWindow = 10000`**：`(page-1)*page_size + page_size > 10000` →
   `400 page out of range`。sqlite 的 `OFFSET` 没有该限制，因此校验放在共享解析器里，
   保证两种后端一致。结果按 `created_at DESC`（时间倒序）排列。
+- `/admin/request-logs` 的 `YYYY-MM-DD` 按**配置的业务时区**（`-timezone`，默认
+  `Asia/Shanghai`）解释为整天（`end` 含当日），与 `/admin/usage/logs` 沿用项目既有的
+  「UTC 日历日日期标签」口径（`ParseUsageFilter` / `model.ParseDateLabel`）不同；不要假定
+  两个接口的自然日边界一致。
+- `created_at` 是**采集完成时刻**（响应写完/流结束），不是请求到达时刻；长时间 SSE 流可能
+  跨天，因此按完成时刻所在日归档与筛选。
 
 ## rotate 兜底
 
